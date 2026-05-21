@@ -92,7 +92,7 @@
 <h2>Status at a glance</h2>
 <ul>
   <li><span class="check done">[x]</span> Phase 0 — repo skeleton, Go toolchain, pinned deps, auth smoke test</li>
-  <li><span class="check">[~]</span> Phase 1 — SQLite + full backfill of message metadata <em>(storage layer done; backfill pending)</em></li>
+  <li><span class="check">[~]</span> Phase 1 — SQLite + full backfill of message metadata <em>(code complete, awaiting smoke test against real account)</em></li>
   <li><span class="check">[ ]</span> Phase 2 — event-loop sync, lazy body decrypt, FTS5 search</li>
   <li><span class="check">[ ]</span> Phase 3 — MCP server (hand-rolled JSON-RPC over stdio for now)</li>
   <li><span class="check">[ ]</span> Phase 4 — policy engine + audit log + Touch ID approval broker</li>
@@ -166,16 +166,26 @@ and search can be answered offline.</p>
     (FK + cascade), <code>labels</code>, <code>messages_fts</code> (FTS5 with insert/update/delete
     triggers), <code>sync_state</code>, <code>audit_log</code>. Tests cover insert/get,
     FTS5 search, cascade delete, label replacement, sync_state round-trip.</li>
-  <li><span class="check">[ ]</span> <code>proton.Session</code> helper <code>ListAllMessageMetadata(ctx)</code> that pages
-    through <code>client.GetMessageMetadataPage</code> (check exact name in
-    <code>message.go</code>) and yields <code>MessageMetadata</code> items.</li>
-  <li><span class="check">[ ]</span> Cold backfill command: <code>protonmcp backfill</code> — logs in (reusing
-    the interactive flow from whoami), drains pages, writes rows, prints
-    progress every N batches.</li>
-  <li><span class="check">[ ]</span> Persist sync cursor: after backfill, call <code>client.GetLatestEventID</code>
-    (check name) and store under <code>sync_state</code> key <code>event_cursor</code>.</li>
+  <li><span class="check done">[x]</span> <code>proton.Session.ForEachMessageMetadataPage</code> walks pages via
+    <code>client.GetMessageMetadataPage</code> (page size 150, the API cap) and
+    yields batches to a callback. <code>ToStoreMessage</code> translates
+    <code>MessageMetadata</code> into the store row shape.</li>
+  <li><span class="check done">[x]</span> Cold backfill command: <code>protonmcp backfill</code> — interactive
+    login, capture event cursor first, count messages, confirm if
+    over 5000 (overridable via <code>--yes</code>), drain into store with progress
+    reporting every 2s. Supports <code>--limit N</code> for spot-checks.</li>
+  <li><span class="check done">[x]</span> Sync cursor: captured via <code>client.GetLatestEventID</code> <em>before</em>
+    drain (so events during backfill aren't lost — sync replays them
+    later), persisted under <code>sync_state.event_cursor</code> on completion.</li>
+  <li><span class="check">[ ]</span> Smoke-test against rdort@proton.me — run
+    <code>./bin/protonmcp backfill --limit 100</code> first, confirm rows land,
+    then full drain.</li>
   <li><span class="check">[ ]</span> <strong>Skip body fetch in this phase.</strong> Body decryption is in Phase 2.
     Just metadata: envelope fields, label IDs, folder, flags.</li>
+  <li><strong>Known limitation</strong>: Bridge's SDK doesn't expose Proton's
+    <code>ConversationID</code>, so <code>thread_id</code> is set to the message ID for now.
+    Phase 2 will reconstruct threads from RFC 2822 <code>In-Reply-To</code> /
+    <code>References</code> headers once we start fetching full messages.</li>
 </ul>
 <h3>Gotchas</h3>
 <ul>

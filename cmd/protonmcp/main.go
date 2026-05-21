@@ -1,12 +1,12 @@
 // Command protonmcp is the entry point for the Proton MCP project.
 //
-// At this stage it only implements `whoami`, which performs an SRP login
-// against Proton Mail using env-var credentials, unlocks the user keyring,
-// and prints a small account summary. This validates the auth path before
-// any of the daemon, IPC, or MCP scaffolding is in place.
+// Current subcommands:
+//
+//	whoami    Log in and print an account summary.
+//	backfill  Drain message metadata into the local SQLite mirror.
 //
 // Later subcommands (setup, daemon, status, lock, unlock, audit ...) will
-// be added as the build plan in TODO.md progresses.
+// be added as the build plan in TODO.html progresses.
 package main
 
 import (
@@ -31,23 +31,27 @@ func main() {
 	}
 
 	cmd, args := os.Args[1], os.Args[2:]
-	_ = args
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	var err error
 	switch cmd {
 	case "whoami":
-		if err := runWhoami(ctx); err != nil {
-			fmt.Fprintln(os.Stderr, "error:", err)
-			os.Exit(1)
-		}
+		err = runWhoami(ctx)
+	case "backfill":
+		err = runBackfill(ctx, args)
 	case "help", "-h", "--help":
 		usage()
+		return
 	default:
 		fmt.Fprintf(os.Stderr, "unknown subcommand: %s\n\n", cmd)
 		usage()
 		os.Exit(2)
+	}
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
 	}
 }
 
@@ -55,12 +59,16 @@ func usage() {
 	fmt.Fprintln(os.Stderr, `protonmcp — Proton MCP daemon (pre-alpha)
 
 Usage:
-  protonmcp <command>
+  protonmcp <command> [options]
 
 Commands:
-  whoami    Log in and print account summary. Missing credentials are
-            prompted interactively (passwords use echo-off /dev/tty).
-  help      Show this help.
+  whoami     Log in and print account summary.
+  backfill   Drain message metadata into the local SQLite mirror.
+             Flags: --db <path>, --yes (skip confirm), --limit <n>.
+  help       Show this help.
+
+All commands prompt interactively for missing credentials; passwords use
+echo-off /dev/tty.
 
 Environment (override prompts; useful for scripting):
   PROTONMCP_EMAIL              Proton login email.
@@ -69,7 +77,12 @@ Environment (override prompts; useful for scripting):
   PROTONMCP_TOTP               Required if the account has TOTP 2FA.`)
 }
 
-func runWhoami(ctx context.Context) error {
+// collectCredentials assembles a Credentials value from environment
+// variables, prompting interactively for anything still empty. The
+// AskTOTP / AskMailboxPassword callbacks are wired to interactive
+// prompts so login can request those mid-flow only when the server
+// actually needs them.
+func collectCredentials() (protonclient.Credentials, error) {
 	creds := protonclient.Credentials{
 		Email:           os.Getenv("PROTONMCP_EMAIL"),
 		Password:        os.Getenv("PROTONMCP_PASSWORD"),
@@ -85,19 +98,27 @@ func runWhoami(ctx context.Context) error {
 	if creds.Email == "" {
 		v, err := cli.PromptLine("Proton email: ")
 		if err != nil {
-			return fmt.Errorf("read email: %w", err)
+			return creds, fmt.Errorf("read email: %w", err)
 		}
 		creds.Email = v
 	}
 	if creds.Password == "" {
 		v, err := cli.PromptSecret("Password: ")
 		if err != nil {
-			return fmt.Errorf("read password: %w", err)
+			return creds, fmt.Errorf("read password: %w", err)
 		}
 		creds.Password = v
 	}
 	if creds.Email == "" || creds.Password == "" {
-		return errors.New("email and password are required")
+		return creds, errors.New("email and password are required")
+	}
+	return creds, nil
+}
+
+func runWhoami(ctx context.Context) error {
+	creds, err := collectCredentials()
+	if err != nil {
+		return err
 	}
 
 	mgr := protonclient.NewManager("")
