@@ -26,21 +26,15 @@
 # build
 go build -o bin/protonmcp ./cmd/protonmcp
 
-# verify auth (one-password account, no 2FA)
-PROTONMCP_EMAIL=you@proton.me \
-PROTONMCP_PASSWORD='...' \
-  ./bin/protonmcp whoami
+# fully interactive — prompts for whatever it needs, passwords are
+# echo-off via /dev/tty, TOTP and mailbox password are asked only if
+# the server actually requires them
+./bin/protonmcp whoami
 
-# with TOTP 2FA
+# scripted — env vars override interactive prompts
 PROTONMCP_EMAIL=you@proton.me \
 PROTONMCP_PASSWORD='...' \
 PROTONMCP_TOTP=123456 \
-  ./bin/protonmcp whoami
-
-# with legacy two-password mailbox
-PROTONMCP_EMAIL=you@proton.me \
-PROTONMCP_PASSWORD='login-pass' \
-PROTONMCP_MAILBOX_PASSWORD='mailbox-pass' \
   ./bin/protonmcp whoami
 ```
 
@@ -240,6 +234,38 @@ during this transition.
 - [ ] README with threat model summary (one-paragraph version is in the
       spec — expand).
 - [ ] GitHub Actions: lint (golangci-lint), test, build artifacts.
+
+## FIDO2 / passkey 2FA support
+
+The current code only handles TOTP. If an account has FIDO2 + TOTP, we
+fall through to TOTP transparently. If an account has FIDO2 *only*, login
+errors out with a pointer to add TOTP in Proton settings as a stop-gap.
+
+Implementing native FIDO2 means:
+
+- Parse the WebAuthn challenge from `auth.TwoFA.FIDO2.AuthenticationOptions`
+  (it's `any` in the SDK — likely a JSON-encoded
+  `PublicKeyCredentialRequestOptions`).
+- Drive the authenticator. On macOS this means either:
+  - **Platform authenticator** (Touch ID / passkey via iCloud Keychain):
+    use the `AuthenticationServices` framework
+    (`ASAuthorizationController` with
+    `ASAuthorizationPlatformPublicKeyCredentialAssertionRequest`).
+    Requires a small Swift helper similar to the planned Touch ID prompt
+    helper.
+  - **Roaming authenticator** (USB / NFC security key like YubiKey):
+    shell out to `fido2-assert` from `libfido2` (Homebrew:
+    `brew install libfido2`), or link against it via cgo.
+- Submit the assertion as `proton.FIDO2Req` to
+  `client.Auth2FA(ctx, Auth2FAReq{FIDO2: ...})`. Field mapping:
+  `ClientData`, `AuthenticatorData`, `Signature`, `CredentialID` (note:
+  `CredentialID` in the SDK is `[]int`, probably a byte-by-byte JSON
+  encoding — verify against the SDK before sending).
+
+Estimated effort: ~1 day for platform-authenticator only, ~2-3 days for
+roaming key support too. Probably worth bundling with the Touch ID
+approval helper from Phase 4 since both want a Swift helper that drives
+LocalAuthentication / AuthenticationServices.
 
 ## Open questions still to decide
 

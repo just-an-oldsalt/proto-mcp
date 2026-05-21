@@ -5,6 +5,7 @@ go 1.26.3
 require (
 	github.com/ProtonMail/go-proton-api v0.4.1-0.20260319112440-799673ddc2db
 	github.com/ProtonMail/gopenpgp/v2 v2.9.0-proton
+	golang.org/x/term v0.40.0
 )
 
 require (
