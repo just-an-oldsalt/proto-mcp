@@ -204,64 +204,96 @@ and search can be answered offline.</p>
 </ul>
 
 <h2>Phase 1.5 — Security foundations <span class="tag">blocks Phase 2</span></h2>
-<p>External audit (see <code>SECURITY.md</code> in repo root) flagged eight
-foundational invariants that get exponentially more expensive to retrofit
-once Phases 2-7 spread credentials / logging / trust assumptions across
-more files. This phase locks them in before Phase 2 lands more code that
-would otherwise need re-plumbing.</p>
+<p>External audit (see <code>SECURITY.md</code> in repo root) flagged invariants
+that get exponentially more expensive to retrofit later. The agreed
+approach: split into focused branches landing in dependency order. Most
+items that aren't truly load-bearing get lifted into the later phase
+that already touches those files (cross-referenced below).</p>
 
-<h3>Must land before Phase 2 starts</h3>
+<h3>Branches in this phase</h3>
+
+<p><strong>1.5/A — <code>security/secret-type</code></strong>. Foundation for everything else.</p>
 <ul>
-  <li><span class="check">[ ]</span> <code>internal/secret</code> package: <code>Secret</code> wraps a
+  <li><span class="check">[ ]</span> <code>internal/secret</code> package: <code>Secret</code> wraps
     <code>[]byte</code>, exposes <code>Bytes()</code> / <code>Zero()</code>, returns <code>"[REDACTED]"</code> from
-    <code>String()</code>, returns an error from <code>MarshalJSON</code>.
-    <em>(SECURITY Foundational #1, fixes H-1, L-2)</em></li>
+    <code>String()</code>, returns an error from <code>MarshalJSON</code>. <em>(Foundational #1)</em></li>
   <li><span class="check">[ ]</span> Plumb <code>Secret</code> through
-    <code>proton.Credentials.{Password, MailboxPassword, TOTP}</code> and the
-    SRP-derived <code>saltedPass</code>. Zero on <code>Session.Close</code> and on any error
-    path before return. <em>(H-1, H-2)</em></li>
-  <li><span class="check">[ ]</span> Plumb <code>Secret</code> through <code>internal/cli</code> prompts;
-    explicitly zero the <code>term.ReadPassword</code> <code>[]byte</code> before returning.
-    <em>(L-2)</em></li>
-  <li><span class="check">[ ]</span> Call <code>os.Unsetenv("PROTONMCP_PASSWORD")</code>
-    (and the other secret-bearing envs) immediately after copying into a
-    <code>Secret</code>. Caps the <code>ps eww</code> / <code>/proc/&lt;pid&gt;/environ</code> window. <em>(H-1)</em></li>
-  <li><span class="check">[ ]</span> <code>internal/logging</code>: <code>log/slog</code>-based logger
-    with a <code>ReplaceAttr</code> hook redacting known sensitive keys
-    (<code>password</code>, <code>mailbox_password</code>, <code>totp</code>, <code>auth_token</code>,
-    <code>refresh_token</code>, <code>body</code>, <code>body_html</code>). Set as the default before
-    any subcommand starts. <em>(Foundational #2)</em></li>
+    <code>proton.Credentials.{Password, MailboxPassword, TOTP}</code>, the
+    SRP-derived <code>saltedPass</code>, and <code>internal/cli</code> prompts. Zero the
+    <code>term.ReadPassword</code> <code>[]byte</code> before returning. <em>(H-1, H-2, L-2)</em></li>
+  <li><span class="check">[ ]</span> <code>os.Unsetenv</code> each <code>PROTONMCP_*</code> secret-bearing
+    env after copying into a <code>Secret</code>. <em>(H-1)</em></li>
+</ul>
+
+<p><strong>1.5/B — <code>security/signal-cleanup</code></strong>. Builds on A; locks down
+shutdown so Ctrl-C / SIGTERM still revokes server sessions and zeroes
+credential material.</p>
+<ul>
   <li><span class="check">[ ]</span> Detached short-timeout context inside
-    <code>cleanup()</code> in <code>proton.Login</code> and inside <code>Session.Close</code>, so
-    Ctrl-C during login still revokes the server-side session.
-    <em>(H-3)</em></li>
-  <li><span class="check">[ ]</span> <code>sync.Once</code>-driven shutdown path wired
-    through <code>signal.NotifyContext</code> that explicitly zeroes <code>Credentials</code>
-    and <code>saltedPass</code> <em>and</em> calls <code>Session.Close</code> even on SIGTERM.
-    <em>(H-2)</em></li>
-  <li><span class="check">[ ]</span> <code>syscall.Umask(0o077)</code> at process start
-    so every file the daemon creates is owner-only by default. <em>(M-3)</em></li>
-  <li><span class="check">[ ]</span> <code>os.Chmod(0o600)</code> on <code>store.db</code> and its
-    <code>-wal</code> / <code>-shm</code> siblings after first <code>Ping</code>. <em>(M-2)</em></li>
-  <li><span class="check">[ ]</span> Surface <code>AppVersion</code> string in
-    <code>whoami</code> output and log a one-line warning that it impersonates
-    Bridge. <em>(M-1)</em></li>
-  <li><span class="check">[ ]</span> Hygiene quick wins:
-    <ul>
-      <li><code>prompt.go</code> err handling — return non-EOF errors even when
-        the line is non-empty. <em>(L-1)</em></li>
-      <li>Reject (or wire a real flag parser for) unknown subcommand
-        arguments instead of silently discarding via <code>_ = args</code>.
-        <em>(L-3)</em></li>
-      <li>Build the SQLite DSN via <code>net/url</code> instead of string
-        concat — closes the <code>?_pragma=</code> injection vector before the
-        store path becomes user-controllable. <em>(L-4)</em></li>
-      <li>Register <code>SIGHUP</code> in <code>signal.NotifyContext</code> now (no-op
-        until Phase 4 wires policy reload to it). <em>(L-5)</em></li>
-      <li><code>go mod tidy</code> to drop the duplicate <code>golang.org/x/crypto</code>
-        v0.48.0 alongside v0.50.0. <em>(L-6)</em></li>
-    </ul>
-  </li>
+    <code>cleanup()</code> in <code>proton.Login</code> and <code>Session.Close</code>, so login
+    Ctrl-C still hits <code>AuthDelete</code>. <em>(H-3)</em></li>
+  <li><span class="check">[ ]</span> <code>sync.Once</code>-driven shutdown wired through
+    <code>signal.NotifyContext</code> that explicitly zeroes <code>Secret</code> material
+    and calls <code>Session.Close</code> on SIGTERM. <em>(H-2)</em></li>
+  <li><span class="check">[ ]</span> Register <code>SIGHUP</code> in <code>signal.NotifyContext</code>
+    now (no-op until Phase 4 wires policy reload). <em>(L-5)</em></li>
+</ul>
+
+<p><strong>1.5/C — <code>security/auth-persistence</code></strong>. <strong>Biggest user-visible
+win.</strong> Stop re-prompting on every subcommand. Pulls the Phase 6 Keychain
+token-persistence story forward.</p>
+<ul>
+  <li><span class="check">[ ]</span> macOS Keychain integration: store
+    <code>{UID, AccessToken, RefreshToken, SaltedKeyPass, Email}</code> after a
+    successful login. Use <code>keybase/go-keychain</code> or shell out to
+    <code>security</code>. Owner-only ACL.</li>
+  <li><span class="check">[ ]</span> New subcommand <code>protonmcp login</code>: does
+    full SRP + TOTP + unlock, stores session.</li>
+  <li><span class="check">[ ]</span> New subcommand <code>protonmcp logout</code>: deletes
+    Keychain entries, calls <code>AuthRevoke</code>.</li>
+  <li><span class="check">[ ]</span> Refactor <code>whoami</code> / <code>backfill</code>: load session
+    from Keychain, call <code>NewClientWithRefresh</code> for a fresh access
+    token, use stored <code>SaltedKeyPass</code> to re-unlock keyring. Fall through
+    to "no session — run <code>protonmcp login</code>" error if absent.</li>
+  <li><span class="check">[ ]</span> Token-refresh failure (401) wipes the Keychain
+    entry and tells the user to re-login. Maps to <strong>Login rate limit</strong>
+    (Foundational #6) at the same time — bounded retries on refresh
+    failure so a bad token doesn't loop into Proton anti-abuse.</li>
+  <li><span class="check">[ ]</span> Document the persistence model: which fields
+    live in Keychain, under what ACL, what <code>logout</code> zeroes, what
+    happens when the OS Keychain is locked. <em>(Foundational #5)</em></li>
+</ul>
+
+<p><strong>1.5/D — <code>security/structured-logging</code></strong>.</p>
+<ul>
+  <li><span class="check">[ ]</span> <code>internal/logging</code>: <code>log/slog</code>-based logger
+    with a <code>ReplaceAttr</code> hook redacting <code>password</code>, <code>mailbox_password</code>,
+    <code>totp</code>, <code>auth_token</code>, <code>refresh_token</code>, <code>body</code>, <code>body_html</code>.
+    Set as default before any subcommand starts. <em>(Foundational #2)</em></li>
+</ul>
+
+<p><strong>1.5/E — <code>security/file-hardening</code></strong>. Small file-system + error
+hygiene fixes. Best to bundle.</p>
+<ul>
+  <li><span class="check">[ ]</span> <code>syscall.Umask(0o077)</code> at process start. <em>(M-3)</em></li>
+  <li><span class="check">[ ]</span> <code>os.Chmod(0o600)</code> on <code>store.db</code> +
+    <code>-wal</code> / <code>-shm</code> after first <code>Ping</code>. <em>(M-2)</em></li>
+  <li><span class="check">[ ]</span> Surface <code>AppVersion</code> in <code>whoami</code> output +
+    log warning that it impersonates Bridge. <em>(M-1)</em></li>
+  <li><span class="check">[ ]</span> Tighten <code>prompt.go</code> err handling (L-1),
+    reject unknown subcommand args via real flag parser (L-3), build
+    SQLite DSN via <code>net/url</code> (L-4), <code>go mod tidy</code> drop dupe
+    <code>golang.org/x/crypto</code> (L-6).</li>
+</ul>
+
+<p><strong>1.5/F — <code>ci/initial-workflows</code></strong>. Pulled forward from Phase 7.</p>
+<ul>
+  <li><span class="check">[ ]</span> GitHub Actions: <code>go build</code>, <code>go test</code>,
+    <code>go vet</code>, <code>golangci-lint</code> on every PR + push to <code>main</code>.</li>
+  <li><span class="check">[ ]</span> <code>govulncheck</code> in CI (weekly cron + on PR
+    touching <code>go.{mod,sum}</code>). <em>(Foundational #8)</em></li>
+  <li><span class="check">[ ]</span> Dependabot config for Go modules + GitHub
+    Actions, grouped weekly. <em>(Foundational #8)</em></li>
 </ul>
 
 <h3>Folded into later phases (cross-references)</h3>
@@ -271,26 +303,17 @@ would otherwise need re-plumbing.</p>
     the invariant can't regress silently.</li>
   <li><strong>Default-deny tool policy</strong> (Foundational #4) → Phase 4. Unknown
     tool = deny; allow list is explicit.</li>
-  <li><strong>Token persistence story</strong> (Foundational #5) → Phase 6. Document
-    which tokens persist, under whose ACL, and what <code>protonmcp lock</code>
-    zeroes — answer before Keychain code lands or it becomes a junk
-    drawer.</li>
-  <li><strong>Login rate limit</strong> (Foundational #6) → Phase 7 (or earlier if a
-    bug burns us). Per-tool limits aren't enough on their own; a buggy
-    MCP client looping on auth failure can trip Proton's anti-abuse.</li>
   <li><strong>HTML sanitization at the MCP boundary</strong> (Foundational #7) →
     Phases 2-3. Store raw HTML in SQLite; sanitize via <code>bluemonday</code> on
-    the way out to MCP. Raw stays in case a stricter policy needs to
-    be re-applied later.</li>
-  <li><strong>govulncheck + Dependabot</strong> (Foundational #8) → Phase 7 polish,
-    but pulled forward to Phase 2 if dep count grows.</li>
+    the way out to MCP.</li>
   <li><strong>Sentinel error types + classification</strong> (M-4, M-5) → Phase 4
-    alongside the structured-logging-touches-errors work. Define
+    alongside the structured-logging-touches-errors work.
     <code>ErrUnlockFailed</code> / <code>ErrUserCanceled</code> / <code>ErrAuthFailed</code> /
-    <code>ErrNetwork</code> so future log redaction has something to match on.</li>
+    <code>ErrNetwork</code> so log redaction has something to match on.</li>
   <li><strong>Prompt-injection runtime banner</strong> (open question #5,
     Foundational #7) → Phase 3 first-run UX, not just a README line.</li>
-  <li><strong>CI release-artifact hygiene</strong> (L-8) → Phase 7 GitHub Actions.</li>
+  <li><strong>CI release-artifact hygiene</strong> (L-8) → Phase 7 GitHub Actions
+    release workflow.</li>
 </ul>
 
 <h2>Phase 2 — Sync loop + lazy decrypt + FTS</h2>
@@ -416,17 +439,20 @@ during this transition.</p>
 
 <h2>Phase 7 — Polish</h2>
 <ul>
-  <li><span class="check">[ ]</span> Rate limiting per tool, per-window token bucket. Hard cap regardless
-    of policy (e.g. <code>mail.send: 20/hour</code> even under <code>allow</code>).</li>
+  <li><span class="check">[ ]</span> Rate limiting <strong>per tool</strong>, per-window token bucket. Hard cap
+    regardless of policy (e.g. <code>mail.send: 20/hour</code> even under <code>allow</code>).
+    Login-flow rate limit landed in 1.5/C as part of token-refresh handling.</li>
   <li><span class="check">[ ]</span> Token refresh on 401 — register <code>AuthHandler</code> / <code>DeauthHandler</code> on
     the proton.Client (see <code>client.go:53,60</code> in the SDK). On <code>Deauth</code>
-    transition daemon to LOCKED.</li>
+    transition daemon to LOCKED. (Refresh-loop scaffolding lands in 1.5/C;
+    this is the daemon-side reaction to it.)</li>
   <li><span class="check">[ ]</span> Log rotation: 50MB cap, keep 10 generations.</li>
   <li><span class="check">[ ]</span> Code signing + notarization for distribution. Even for local use,
     Touch ID prompt looks worse on unsigned binaries.</li>
   <li><span class="check">[ ]</span> README with threat model summary (one-paragraph version is in the
     spec — expand).</li>
-  <li><span class="check">[ ]</span> GitHub Actions: lint (golangci-lint), test, build artifacts.</li>
+  <li><span class="check">[ ]</span> Release workflow: build signed/notarized artifacts.
+    (Test/lint/govulncheck workflows landed in 1.5/F.)</li>
 </ul>
 
 <h2>FIDO2 / passkey 2FA support</h2>
