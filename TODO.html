@@ -1,0 +1,430 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>proto-mcp — TODO</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    :root {
+      color-scheme: light dark;
+      --fg: #1c1c1e;
+      --muted: #6e6e73;
+      --bg: #fbfbfd;
+      --panel: #f2f2f4;
+      --accent: #0a5fb4;
+      --border: #d8d8de;
+      --code-bg: #f0f0f4;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --fg: #ececef;
+        --muted: #9a9aa1;
+        --bg: #15151a;
+        --panel: #1f1f25;
+        --accent: #6fb5ff;
+        --border: #2f2f37;
+        --code-bg: #1c1c22;
+      }
+    }
+    html { background: var(--bg); }
+    body {
+      color: var(--fg);
+      font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+      max-width: 820px;
+      margin: 2rem auto;
+      padding: 0 1.25rem 4rem;
+    }
+    h1, h2, h3 { font-weight: 600; line-height: 1.25; }
+    h1 { font-size: 1.9rem; margin: 0 0 .25rem; }
+    h2 { font-size: 1.25rem; margin: 2.2rem 0 .6rem; border-bottom: 1px solid var(--border); padding-bottom: .25rem; }
+    h3 { font-size: 1.05rem; margin: 1.5rem 0 .4rem; color: var(--muted); }
+    p, ul, ol, table { margin: .5rem 0 .9rem; }
+    ul, ol { padding-left: 1.4rem; }
+    li { margin: .15rem 0; }
+    li > p { margin: 0 0 .25rem; }
+    a { color: var(--accent); }
+    blockquote {
+      margin: .9rem 0;
+      padding: .6rem .9rem;
+      border-left: 3px solid var(--border);
+      background: var(--panel);
+      color: var(--muted);
+      border-radius: 0 4px 4px 0;
+    }
+    blockquote p { margin: .3rem 0; }
+    code {
+      background: var(--code-bg);
+      border-radius: 3px;
+      padding: 1px 5px;
+      font: 13px/1.4 "SF Mono", Menlo, Consolas, monospace;
+    }
+    pre {
+      background: var(--code-bg);
+      padding: .75rem 1rem;
+      border-radius: 6px;
+      overflow-x: auto;
+      border: 1px solid var(--border);
+    }
+    pre code { background: none; padding: 0; }
+    table { border-collapse: collapse; width: 100%; font-size: .92rem; }
+    th, td { border: 1px solid var(--border); padding: .45rem .65rem; text-align: left; vertical-align: top; }
+    th { background: var(--panel); font-weight: 600; }
+    .check { font-family: "SF Mono", Menlo, Consolas, monospace; color: var(--muted); }
+    .check.done { color: var(--accent); }
+    .tag { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: .8rem; background: var(--panel); color: var(--muted); margin-left: .35rem; }
+    hr { border: 0; border-top: 1px solid var(--border); margin: 2.5rem 0 1.5rem; }
+  </style>
+</head>
+<body>
+
+<h1>proto-mcp — TODO</h1>
+
+<blockquote>
+  <p>Working doc for incremental build of the Proton MCP daemon described in
+  the design spec (root of this repo, pasted into the kick-off conversation).
+  Keep this in sync as you go. Update statuses; move stale stuff to the
+  "Done / decided" section at the bottom rather than deleting it.</p>
+  <p>Resumption rule: a future Claude Code session should be able to open this
+  file and continue work without re-reading the original conversation. Add
+  any context that future-you will need.</p>
+</blockquote>
+
+<h2>Status at a glance</h2>
+<ul>
+  <li><span class="check done">[x]</span> Phase 0 — repo skeleton, Go toolchain, pinned deps, auth smoke test</li>
+  <li><span class="check">[ ]</span> Phase 1 — SQLite + full backfill of message metadata</li>
+  <li><span class="check">[ ]</span> Phase 2 — event-loop sync, lazy body decrypt, FTS5 search</li>
+  <li><span class="check">[ ]</span> Phase 3 — MCP server (hand-rolled JSON-RPC over stdio for now)</li>
+  <li><span class="check">[ ]</span> Phase 4 — policy engine + audit log + Touch ID approval broker</li>
+  <li><span class="check">[ ]</span> Phase 5 — write tools (drafts, send, trash, label/folder CRUD)</li>
+  <li><span class="check">[ ]</span> Phase 6 — Unix socket daemon, shim, launchd, Keychain, lock/unlock</li>
+  <li><span class="check">[ ]</span> Phase 7 — polish (rate limit, log rotation, signing/notarization, docs)</li>
+</ul>
+
+<h2>Quickstart for whoever picks this up</h2>
+<pre><code># build
+go build -o bin/protonmcp ./cmd/protonmcp
+
+# fully interactive — prompts for whatever it needs, passwords are
+# echo-off via /dev/tty, TOTP and mailbox password are asked only if
+# the server actually requires them
+./bin/protonmcp whoami
+
+# scripted — env vars override interactive prompts
+PROTONMCP_EMAIL=you@proton.me \
+PROTONMCP_PASSWORD='...' \
+PROTONMCP_TOTP=123456 \
+  ./bin/protonmcp whoami
+</code></pre>
+<p>Successful output prints user ID, primary address, address count, password
+mode, 2FA mode, storage used, and login+unlock duration.</p>
+
+<h2>Repo layout</h2>
+<pre><code>cmd/
+  protonmcp/        # CLI entry point — currently only `whoami`
+internal/
+  cli/              # /dev/tty prompt helpers (echo off for secrets)
+  proton/           # go-proton-api wrapper: Login, Session, key unlock
+  config/           # (empty — placeholder for policy.yaml loading)
+helpers/
+  touchid/          # (empty — Swift Touch ID helper goes here in Phase 4)
+docs/               # (empty — threat model + tool reference land here)
+</code></pre>
+
+<h2>Phase 0 — Foundation <span class="tag">done</span></h2>
+<ul>
+  <li><span class="check done">[x]</span> <code>go mod init github.com/just-an-oldsalt/proto-mcp</code>. Spec calls out
+    <code>protonmcp</code> as the working name; no wittier alt has stuck. Folder /
+    repo are <code>proto-mcp</code>; binary is <code>protonmcp</code>.</li>
+  <li><span class="check done">[x]</span> Pinned <code>github.com/ProtonMail/go-proton-api</code> to
+    <code>v0.4.1-0.20260319112440-799673ddc2db</code> — the version proton-bridge
+    <code>v3.24.2</code> ships with.</li>
+  <li><span class="check done">[x]</span> Mirrored Bridge's <code>replace</code> directive for resty
+    (<code>github.com/ProtonMail/resty/v2</code>) — required, replace directives in
+    dependencies don't propagate.</li>
+  <li><span class="check done">[x]</span> <code>cmd/protonmcp</code> with <code>whoami</code> subcommand. Interactive
+    prompts by default; env vars override for scripting.</li>
+  <li><span class="check done">[x]</span> <code>internal/proton.Login</code> does SRP login → optional Auth2FA → GetUser
+    → GetAddresses → GetSalts → key unlock. Wipes keyring on <code>Session.Close</code>.</li>
+  <li><span class="check done">[x]</span> App version header impersonates Bridge: <code>macos-bridge@3.24.2</code>. Proton
+    validates AppVersion against an allowlist; using our own ID would 400.
+    <strong>Decision to revisit:</strong> apply for our own client identifier before
+    any public release.</li>
+</ul>
+
+<h2>Phase 1 — Local SQLite mirror <span class="tag">next up</span></h2>
+<p>Goal: cold backfill of message metadata into a local SQLite store so reads
+and search can be answered offline.</p>
+<ul>
+  <li><span class="check">[ ]</span> Decide migration tool: <code>pressly/goose</code> vs <code>golang-migrate</code>. Goose has
+    embedded migrations and is simpler. Pick goose unless we hit a wall.</li>
+  <li><span class="check">[ ]</span> Add <code>internal/store</code> package wrapping <code>database/sql</code> + <code>mattn/go-sqlite3</code>.
+    Open <code>~/Library/Application Support/protonmcp/store.db</code> with WAL mode.</li>
+  <li><span class="check">[ ]</span> Implement schema from the design spec — see "Local SQLite schema
+    (sketch)" section. Tables: <code>messages</code>, <code>message_labels</code>, <code>labels</code>,
+    <code>messages_fts</code> (FTS5 virtual), <code>sync_state</code>, <code>audit_log</code>.</li>
+  <li><span class="check">[ ]</span> <code>proton.Session</code> helper <code>ListAllMessageMetadata(ctx)</code> that pages
+    through <code>client.GetMessageMetadataPage</code> (check exact name in
+    <code>message.go</code>) and yields <code>MessageMetadata</code> items.</li>
+  <li><span class="check">[ ]</span> Cold backfill command: <code>protonmcp backfill</code> — reads creds via env
+    (same as whoami for now), logs in, drains pages, writes rows, prints
+    progress every N batches.</li>
+  <li><span class="check">[ ]</span> Persist sync cursor: after backfill, call <code>client.GetLatestEventID</code>
+    (check name) and store under <code>sync_state</code> key <code>event_cursor</code>.</li>
+  <li><span class="check">[ ]</span> <strong>Skip body fetch in this phase.</strong> Body decryption is in Phase 2.
+    Just metadata: envelope fields, label IDs, folder, flags.</li>
+</ul>
+<h3>Gotchas</h3>
+<ul>
+  <li>The page size for <code>GetMessageMetadataPage</code> is API-capped at 150; loop
+    with the right cursor or filter.</li>
+  <li>Some accounts have hundreds of thousands of messages. Print a count
+    first and confirm before draining — backfill is the only operation
+    that scans the whole mailbox.</li>
+</ul>
+
+<h2>Phase 2 — Sync loop + lazy decrypt + FTS</h2>
+<ul>
+  <li><span class="check">[ ]</span> <code>internal/sync</code> goroutine. Calls <code>client.GetEvent(ctx, cursor)</code> every
+    <code>poll_interval</code> (30s active, 5m idle). Applies the diff: created,
+    updated, deleted messages; label changes; folder moves; etc. Use
+    <code>proton.Event</code> and <code>EventResponse</code> types.</li>
+  <li><span class="check">[ ]</span> On first <code>mail.read</code> for a given message_id, fetch the full message
+    (<code>client.GetFullMessage</code> or <code>GetMessage</code> — verify), decrypt body
+    using the appropriate address keyring (<code>Session.AddrKRs[addressID]</code>),
+    cache <code>body_text</code>/<code>body_html</code> in the row, set <code>body_cached_at = now</code>.</li>
+  <li><span class="check">[ ]</span> FTS5 index population: triggers on insert/update of <code>messages</code> mirror
+    relevant columns into <code>messages_fts</code>. Tokenizer <code>porter unicode61</code>.</li>
+  <li><span class="check">[ ]</span> Search implementation: translate a small query DSL
+    (<code>from:alice subject:gear</code>) into FTS5 <code>MATCH</code> syntax + WHERE clauses.</li>
+</ul>
+<h3>Gotchas</h3>
+<ul>
+  <li>HTML body must be sanitized before returning to the LLM. Use
+    <code>microcosm-cc/bluemonday</code> strict policy. Strip <code>&lt;script&gt;</code>, <code>&lt;iframe&gt;</code>,
+    remote image <code>src</code> (tracking pixels).</li>
+  <li>Snippets: Proton-side snippets can be empty. Generate locally from
+    decrypted body text — first 200 chars of the text body, collapse
+    whitespace, strip quoted-reply markers (<code>&gt; </code>).</li>
+  <li>Body cache TTL: 24h per design spec. Run a periodic prune.</li>
+</ul>
+
+<h2>Phase 3 — MCP server (read tools only)</h2>
+<p>Spec calls for hand-rolled JSON-RPC, not a library. ~200 lines.</p>
+<ul>
+  <li><span class="check">[ ]</span> <code>internal/mcp</code> package: framing (Content-Length headers per LSP-style
+    stdio, or newline-delimited — check current MCP spec), request/reply
+    types, registry mapping <code>tool_name → handler</code>.</li>
+  <li><span class="check">[ ]</span> Wire read tools first: <code>mail.list</code>, <code>mail.search</code>, <code>mail.read</code>,
+    <code>mail.read_thread</code>, <code>mail.list_attachments</code>, <code>account.whoami</code>,
+    <code>labels.list</code>, <code>folders.list</code>.</li>
+  <li><span class="check">[ ]</span> <code>cmd/protonmcp serve-stdio</code> subcommand: reads JSON-RPC from stdin,
+    writes to stdout. This is what Claude Desktop will spawn directly
+    in the <strong>interim</strong> (before the daemon+shim split lands in Phase 6).</li>
+  <li><span class="check">[ ]</span> End-to-end test from Claude Desktop with a local config pointing to
+    this binary. Confirm <code>mail.list</code> and <code>mail.search</code> round-trip.</li>
+</ul>
+
+<h2>Phase 4 — Policy engine, audit log, Touch ID</h2>
+<ul>
+  <li><span class="check">[ ]</span> <code>internal/policy</code>: YAML loader for <code>policy.default.yaml</code> (embedded
+    with <code>//go:embed</code>) and <code>~/Library/Application Support/protonmcp/policy.yaml</code>
+    (user override, shallow-merged on tool keys). Default policy verbatim
+    from spec.</li>
+  <li><span class="check">[ ]</span> Hot reload on <code>SIGHUP</code> and <code>protonmcp policy reload</code>. Invalid YAML
+    keeps the previous policy in place.</li>
+  <li><span class="check">[ ]</span> Middleware that wraps every tool handler:
+    <code>decide(tool, args, caller) → allow|prompt|deny</code>. Decisions written
+    to <code>audit_log</code> before action attempt; outcome filled in after.</li>
+  <li><span class="check">[ ]</span> Audit log writer: SQLite row + JSONL mirror at
+    <code>~/Library/Application Support/protonmcp/audit.log</code> for tailing.
+    Redact per spec rules (body sha256+bytes, never literal body or
+    passwords; recipient addresses logged in full).</li>
+  <li><span class="check">[ ]</span> Swift Touch ID helper at <code>helpers/touchid/main.swift</code> (~50 LOC).
+    Build with <code>swiftc -O -o helpers/touchid/protonmcp-touchid main.swift</code>.
+    Reads structured JSON payload from stdin (title, body, caller),
+    shows <code>LAContext.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics)</code>,
+    exits 0 on approve / 1 on deny / 2 on cancel.</li>
+  <li><span class="check">[ ]</span> <code>internal/approval</code>: broker that execs the Swift helper, parses the
+    result, caches approvals per-tool for the configured <code>ttl</code>. For
+    <code>confirm: true</code> tools, also drive a native <code>NSAlert</code> for the
+    second-step confirmation showing literal operation details (see
+    spec "Approval prompt content" section).</li>
+</ul>
+
+<h2>Phase 5 — Write tools</h2>
+<p>All gated through Phase 4 middleware.</p>
+<ul>
+  <li><span class="check">[ ]</span> Drafts: <code>mail.draft_create</code>, <code>_update</code>, <code>_delete</code>, <code>_list</code>. These are
+    <code>allow</code> by policy (no external effect).</li>
+  <li><span class="check">[ ]</span> Send family: <code>mail.send</code>, <code>mail.send_draft</code>, <code>mail.reply</code>,
+    <code>mail.reply_all</code>, <code>mail.forward</code>. All <code>prompt</code> + <code>confirm: true</code> +
+    <code>rate_limit: 20/hour</code>. Confirmation prompt must include literal
+    recipient list and subject (per spec).</li>
+  <li><span class="check">[ ]</span> Trash and permanent delete: <code>mail.trash</code> (prompt, ttl 2m),
+    <code>mail.delete_permanent</code> (prompt + confirm). <code>mail.empty_trash</code> and
+    <code>mail.empty_spam</code> default to <code>deny</code> — opt-in only via user policy.</li>
+  <li><span class="check">[ ]</span> Organize: <code>mail.move</code>, <code>mail.archive</code>, label apply/remove, mark
+    read/unread, star/unstar. Mostly <code>allow</code> (reversible) except
+    <code>mail.move</code> which is <code>prompt + ttl: 5m</code>.</li>
+  <li><span class="check">[ ]</span> Labels/folders CRUD. Creation/rename = <code>prompt</code>; deletion =
+    <code>prompt + confirm</code>.</li>
+</ul>
+
+<h2>Phase 6 — Daemon, IPC, multi-client</h2>
+<p>This is the architecture flip described in the spec under "Why not
+stdio-only?". The MCP-over-stdio interim build from Phase 3 keeps working
+during this transition.</p>
+<ul>
+  <li><span class="check">[ ]</span> <code>cmd/protonmcpd</code> long-running daemon. Listens on
+    <code>~/Library/Application Support/protonmcp/protonmcp.sock</code>.
+    Peer-credential check via <code>SO_PEERCRED</code> (only matching UID accepted).</li>
+  <li><span class="check">[ ]</span> <code>cmd/protonmcp-shim</code> — stdio↔socket bridge MCP clients spawn.
+    Forwards JSON-RPC frames either direction. Discovers the daemon
+    socket via well-known path.</li>
+  <li><span class="check">[ ]</span> <code>cmd/protonmcp install</code> writes a launchd plist to
+    <code>~/Library/LaunchAgents/zone.dort.protonmcp.plist</code> and <code>launchctl load</code>s
+    it. <code>protonmcp uninstall</code> reverses. Picks a stable label — see
+    "Open: naming" below.</li>
+  <li><span class="check">[ ]</span> Keychain integration: store mailbox password (and optional TOTP
+    secret — see open question) in macOS Keychain via the Security
+    framework. ACL restricts access to the signed <code>protonmcpd</code> binary.
+    Use <code>keybase/go-keychain</code> or shell out to <code>security</code> CLI for v1.</li>
+  <li><span class="check">[ ]</span> Lock/unlock state machine. Triggers per spec:
+    <code>com.apple.screenIsLocked</code> distributed notification,
+    <code>NSWorkspaceWillSleepNotification</code>, idle timeout
+    (<code>idle_lock_minutes</code>, default 30), <code>protonmcp lock</code> CLI, <code>SIGUSR1</code>.
+    In LOCKED state every tool call returns
+    <code>{error: "daemon_locked", recovery: "run 'protonmcp unlock'"}</code>.
+    Sync loop pauses but preserves <code>event_cursor</code>.</li>
+  <li><span class="check">[ ]</span> <code>protonmcp setup</code> interactive flow per spec:
+    "Proton email / Password / 2FA code / Touch ID consent to store
+    credentials / install plist / start daemon".</li>
+  <li><span class="check">[ ]</span> <code>protonmcp</code> CLI subcommands: <code>status</code>, <code>lock</code>, <code>unlock</code>,
+    <code>policy reload</code>, <code>audit tail</code>, <code>audit query --tool ... --since ...</code>.</li>
+</ul>
+
+<h2>Phase 7 — Polish</h2>
+<ul>
+  <li><span class="check">[ ]</span> Rate limiting per tool, per-window token bucket. Hard cap regardless
+    of policy (e.g. <code>mail.send: 20/hour</code> even under <code>allow</code>).</li>
+  <li><span class="check">[ ]</span> Token refresh on 401 — register <code>AuthHandler</code> / <code>DeauthHandler</code> on
+    the proton.Client (see <code>client.go:53,60</code> in the SDK). On <code>Deauth</code>
+    transition daemon to LOCKED.</li>
+  <li><span class="check">[ ]</span> Log rotation: 50MB cap, keep 10 generations.</li>
+  <li><span class="check">[ ]</span> Code signing + notarization for distribution. Even for local use,
+    Touch ID prompt looks worse on unsigned binaries.</li>
+  <li><span class="check">[ ]</span> README with threat model summary (one-paragraph version is in the
+    spec — expand).</li>
+  <li><span class="check">[ ]</span> GitHub Actions: lint (golangci-lint), test, build artifacts.</li>
+</ul>
+
+<h2>FIDO2 / passkey 2FA support</h2>
+<p>The current code only handles TOTP. If an account has FIDO2 + TOTP, we
+fall through to TOTP transparently. If an account has FIDO2 <em>only</em>, login
+errors out with a pointer to add TOTP in Proton settings as a stop-gap.</p>
+<p>Implementing native FIDO2 means:</p>
+<ul>
+  <li>Parse the WebAuthn challenge from <code>auth.TwoFA.FIDO2.AuthenticationOptions</code>
+    (it's <code>any</code> in the SDK — likely a JSON-encoded
+    <code>PublicKeyCredentialRequestOptions</code>).</li>
+  <li>Drive the authenticator. On macOS this means either:
+    <ul>
+      <li><strong>Platform authenticator</strong> (Touch ID / passkey via iCloud Keychain):
+        use the <code>AuthenticationServices</code> framework
+        (<code>ASAuthorizationController</code> with
+        <code>ASAuthorizationPlatformPublicKeyCredentialAssertionRequest</code>).
+        Requires a small Swift helper similar to the planned Touch ID prompt
+        helper.</li>
+      <li><strong>Roaming authenticator</strong> (USB / NFC security key like YubiKey):
+        shell out to <code>fido2-assert</code> from <code>libfido2</code> (Homebrew:
+        <code>brew install libfido2</code>), or link against it via cgo.</li>
+    </ul>
+  </li>
+  <li>Submit the assertion as <code>proton.FIDO2Req</code> to
+    <code>client.Auth2FA(ctx, Auth2FAReq{FIDO2: ...})</code>. Field mapping:
+    <code>ClientData</code>, <code>AuthenticatorData</code>, <code>Signature</code>, <code>CredentialID</code> (note:
+    <code>CredentialID</code> in the SDK is <code>[]int</code>, probably a byte-by-byte JSON
+    encoding — verify against the SDK before sending).</li>
+</ul>
+<p>Estimated effort: ~1 day for platform-authenticator only, ~2-3 days for
+roaming key support too. Probably worth bundling with the Touch ID
+approval helper from Phase 4 since both want a Swift helper that drives
+LocalAuthentication / AuthenticationServices.</p>
+
+<h2>Open questions still to decide</h2>
+<table>
+  <thead>
+    <tr><th>#</th><th>Question</th><th>Status</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>1</td>
+      <td>MCP framing — newline-delimited JSON-RPC vs LSP-style Content-Length headers. Settle when starting Phase 3.</td>
+      <td>open</td>
+    </tr>
+    <tr>
+      <td>2</td>
+      <td>TOTP secret storage — store the secret in Keychain so unlock is hands-free, or always re-prompt? Storing defeats the second factor. <strong>Lean: re-prompt only.</strong></td>
+      <td>open</td>
+    </tr>
+    <tr>
+      <td>3</td>
+      <td>HTML sanitization library — <code>bluemonday</code> strict policy is the default plan.</td>
+      <td>leaning bluemonday</td>
+    </tr>
+    <tr>
+      <td>4</td>
+      <td>Multi-address sending — spec defers to v1.1. Track <code>from: address</code> parameter in send tool schemas as TODO.</td>
+      <td>deferred</td>
+    </tr>
+    <tr>
+      <td>5</td>
+      <td><code>mail.read: allow</code> default means a malicious email can prompt-inject Claude into reading more. Accepted in spec. Document loudly in README threat model.</td>
+      <td>accepted, document</td>
+    </tr>
+    <tr>
+      <td>6</td>
+      <td>Shim discovery path — <code>protonmcp install</code> writes absolute path of the shim into <code>~/Library/Application Support/Claude/claude_desktop_config.json</code>.</td>
+      <td>decided in spec</td>
+    </tr>
+    <tr>
+      <td>7</td>
+      <td>Naming — <code>protonmcp</code> is the working name. Folder is <code>proto-mcp</code>. No wittier alt has stuck. Reverse-DNS label <code>zone.dort.protonmcp</code> is a placeholder, change before publishing.</td>
+      <td>open, not blocking</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>Discovered gotchas (keep this list growing)</h2>
+<ul>
+  <li><code>go-proton-api</code> ships with a <code>replace</code> directive pointing resty at
+    <code>github.com/ProtonMail/resty/v2</code>. <strong>Replace directives don't propagate
+    from dependencies</strong> — must be mirrored in our <code>go.mod</code>. Without it,
+    builds fail on missing <code>resty.MultiPartStream</code> / <code>NewByteMultipartStream</code>.</li>
+  <li><code>WithAppVersion</code> is validated server-side against a known allowlist.
+    Random strings get rejected. Use a real client identifier
+    (<code>macos-bridge@&lt;ver&gt;</code>) for now.</li>
+  <li><code>proton.Keys.Primary()</code> <strong>panics</strong> if no primary key exists. Guard with
+    <code>len(user.Keys) &gt; 0</code>. (We don't currently guard the "keys but no primary"
+    case — every Proton account has one, but if you hit a weird account add
+    the iteration manually.)</li>
+  <li><code>proton.Auth.TwoFA.Enabled</code> is <code>0</code> when 2FA is disabled, otherwise one
+    of the <code>TwoFAStatus</code> constants. <code>HasFIDO2AndTOTP</code> falls back to TOTP
+    transparently; <code>HasFIDO2</code> alone errors with workaround instructions.</li>
+</ul>
+
+<h2>Done / decided</h2>
+<ul>
+  <li>2026-05-21 — Picked hand-rolled JSON-RPC over <code>mark3labs/mcp-go</code>.</li>
+  <li>2026-05-21 — Pinned go-proton-api to Bridge v3.24.2's version
+    (<code>v0.4.1-0.20260319112440-799673ddc2db</code>).</li>
+  <li>2026-05-21 — Module path <code>github.com/just-an-oldsalt/proto-mcp</code> matches
+    the private GitHub repo created on the same day.</li>
+  <li>2026-05-21 — <code>whoami</code> works end-to-end from env-var credentials.</li>
+  <li>2026-05-21 — Converted project docs from Markdown to HTML to keep
+    formatting under our control instead of GitHub's renderer.</li>
+</ul>
+
+</body>
+</html>
