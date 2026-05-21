@@ -29,14 +29,23 @@ const HostURL = "https://mail-api.proton.me"
 const AppVersion = "macos-bridge@3.24.2"
 
 // Credentials is everything needed to bring the daemon from cold start to
-// a fully-unlocked session. PROTONMCP_MAILBOX_PASSWORD only applies when
-// the account uses the legacy two-password mode; for one-password accounts
-// (the common case) leave it empty and Password is reused.
+// a fully-unlocked session. MailboxPassword only applies when the account
+// uses the legacy two-password mode; for one-password accounts (the common
+// case) leave it empty and Password is reused.
+//
+// AskTOTP and AskMailboxPassword are optional callbacks invoked mid-login,
+// after the server reveals whether 2FA and a separate mailbox password are
+// required. This avoids forcing the caller to pre-collect credentials the
+// account may not need. If a credential is required, the matching string
+// field is empty, and the callback is nil, Login returns a clear error.
 type Credentials struct {
 	Email           string
 	Password        string
 	MailboxPassword string // optional; empty falls back to Password
 	TOTP            string // optional; required if account has TOTP 2FA
+
+	AskTOTP            func() (string, error)
+	AskMailboxPassword func() (string, error)
 }
 
 // Session is the unlocked-state bundle returned by Login. The caller owns
@@ -125,11 +134,20 @@ func Login(ctx context.Context, mgr *gpa.Manager, creds Credentials) (*Session, 
 	case 0:
 		// no 2FA
 	case gpa.HasTOTP:
-		if creds.TOTP == "" {
-			cleanup()
-			return nil, errors.New("proton: account requires TOTP code (set PROTONMCP_TOTP)")
+		totp := creds.TOTP
+		if totp == "" && creds.AskTOTP != nil {
+			v, err := creds.AskTOTP()
+			if err != nil {
+				cleanup()
+				return nil, fmt.Errorf("prompt totp: %w", err)
+			}
+			totp = v
 		}
-		if err := client.Auth2FA(ctx, gpa.Auth2FAReq{TwoFactorCode: creds.TOTP}); err != nil {
+		if totp == "" {
+			cleanup()
+			return nil, errors.New("proton: account requires TOTP code")
+		}
+		if err := client.Auth2FA(ctx, gpa.Auth2FAReq{TwoFactorCode: totp}); err != nil {
 			cleanup()
 			return nil, fmt.Errorf("2fa: %w", err)
 		}
@@ -142,12 +160,24 @@ func Login(ctx context.Context, mgr *gpa.Manager, creds Credentials) (*Session, 
 	}
 
 	mailboxPass := creds.MailboxPassword
+	if auth.PasswordMode == gpa.TwoPasswordMode && mailboxPass == "" {
+		if creds.AskMailboxPassword == nil {
+			cleanup()
+			return nil, errors.New("proton: account uses two-password mode; mailbox password required")
+		}
+		v, err := creds.AskMailboxPassword()
+		if err != nil {
+			cleanup()
+			return nil, fmt.Errorf("prompt mailbox password: %w", err)
+		}
+		if v == "" {
+			cleanup()
+			return nil, errors.New("proton: mailbox password is empty")
+		}
+		mailboxPass = v
+	}
 	if mailboxPass == "" {
 		mailboxPass = creds.Password
-	}
-	if auth.PasswordMode == gpa.TwoPasswordMode && creds.MailboxPassword == "" {
-		cleanup()
-		return nil, errors.New("proton: account uses two-password mode; set PROTONMCP_MAILBOX_PASSWORD")
 	}
 
 	user, err := client.GetUser(ctx)

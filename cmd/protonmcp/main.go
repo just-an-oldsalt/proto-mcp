@@ -20,6 +20,7 @@ import (
 
 	gpa "github.com/ProtonMail/go-proton-api"
 
+	"github.com/just-an-oldsalt/proto-mcp/internal/cli"
 	protonclient "github.com/just-an-oldsalt/proto-mcp/internal/proton"
 )
 
@@ -57,14 +58,15 @@ Usage:
   protonmcp <command>
 
 Commands:
-  whoami    Log in via env-var credentials and print account summary.
+  whoami    Log in and print account summary. Missing credentials are
+            prompted interactively (passwords use echo-off /dev/tty).
   help      Show this help.
 
-Environment (for whoami):
-  PROTONMCP_EMAIL              Required. Proton login email.
-  PROTONMCP_PASSWORD           Required. Login password.
-  PROTONMCP_MAILBOX_PASSWORD   Optional. Only for legacy two-password accounts.
-  PROTONMCP_TOTP               Optional. Required if the account has TOTP 2FA.`)
+Environment (override prompts; useful for scripting):
+  PROTONMCP_EMAIL              Proton login email.
+  PROTONMCP_PASSWORD           Login password.
+  PROTONMCP_MAILBOX_PASSWORD   Only for legacy two-password accounts.
+  PROTONMCP_TOTP               Required if the account has TOTP 2FA.`)
 }
 
 func runWhoami(ctx context.Context) error {
@@ -73,9 +75,29 @@ func runWhoami(ctx context.Context) error {
 		Password:        os.Getenv("PROTONMCP_PASSWORD"),
 		MailboxPassword: os.Getenv("PROTONMCP_MAILBOX_PASSWORD"),
 		TOTP:            os.Getenv("PROTONMCP_TOTP"),
+		AskTOTP: func() (string, error) {
+			return cli.PromptLine("TOTP code: ")
+		},
+		AskMailboxPassword: func() (string, error) {
+			return cli.PromptSecret("Mailbox password (two-password mode): ")
+		},
+	}
+	if creds.Email == "" {
+		v, err := cli.PromptLine("Proton email: ")
+		if err != nil {
+			return fmt.Errorf("read email: %w", err)
+		}
+		creds.Email = v
+	}
+	if creds.Password == "" {
+		v, err := cli.PromptSecret("Password: ")
+		if err != nil {
+			return fmt.Errorf("read password: %w", err)
+		}
+		creds.Password = v
 	}
 	if creds.Email == "" || creds.Password == "" {
-		return errors.New("PROTONMCP_EMAIL and PROTONMCP_PASSWORD must be set")
+		return errors.New("email and password are required")
 	}
 
 	mgr := protonclient.NewManager("")

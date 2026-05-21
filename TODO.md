@@ -26,21 +26,15 @@
 # build
 go build -o bin/protonmcp ./cmd/protonmcp
 
-# verify auth (one-password account, no 2FA)
-PROTONMCP_EMAIL=you@proton.me \
-PROTONMCP_PASSWORD='...' \
-  ./bin/protonmcp whoami
+# fully interactive — prompts for whatever it needs, passwords are
+# echo-off via /dev/tty, TOTP and mailbox password are asked only if
+# the server actually requires them
+./bin/protonmcp whoami
 
-# with TOTP 2FA
+# scripted — env vars override interactive prompts
 PROTONMCP_EMAIL=you@proton.me \
 PROTONMCP_PASSWORD='...' \
 PROTONMCP_TOTP=123456 \
-  ./bin/protonmcp whoami
-
-# with legacy two-password mailbox
-PROTONMCP_EMAIL=you@proton.me \
-PROTONMCP_PASSWORD='login-pass' \
-PROTONMCP_MAILBOX_PASSWORD='mailbox-pass' \
   ./bin/protonmcp whoami
 ```
 
