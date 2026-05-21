@@ -112,6 +112,24 @@ func NewManager(host string) *gpa.Manager {
 	)
 }
 
+func doTOTP(ctx context.Context, client *gpa.Client, creds Credentials) error {
+	totp := creds.TOTP
+	if totp == "" && creds.AskTOTP != nil {
+		v, err := creds.AskTOTP()
+		if err != nil {
+			return fmt.Errorf("prompt totp: %w", err)
+		}
+		totp = v
+	}
+	if totp == "" {
+		return errors.New("proton: account requires TOTP code")
+	}
+	if err := client.Auth2FA(ctx, gpa.Auth2FAReq{TwoFactorCode: totp}); err != nil {
+		return fmt.Errorf("2fa: %w", err)
+	}
+	return nil
+}
+
 // Login performs SRP login, submits the TOTP code if the server requires
 // one, fetches user/addresses/salts, and unlocks the PGP keyring. On any
 // failure the partially-built client is closed before returning.
@@ -130,30 +148,21 @@ func Login(ctx context.Context, mgr *gpa.Manager, creds Credentials) (*Session, 
 		client.Close()
 	}
 
+	// 2FA. We only implement TOTP today. FIDO2 (security keys / passkeys)
+	// is tracked in TODO.md; if the account has FIDO2+TOTP we transparently
+	// use TOTP, if it's FIDO2-only the user gets a pointer to add TOTP in
+	// Proton settings as a workaround.
 	switch auth.TwoFA.Enabled {
 	case 0:
 		// no 2FA
-	case gpa.HasTOTP:
-		totp := creds.TOTP
-		if totp == "" && creds.AskTOTP != nil {
-			v, err := creds.AskTOTP()
-			if err != nil {
-				cleanup()
-				return nil, fmt.Errorf("prompt totp: %w", err)
-			}
-			totp = v
-		}
-		if totp == "" {
+	case gpa.HasTOTP, gpa.HasFIDO2AndTOTP:
+		if err := doTOTP(ctx, client, creds); err != nil {
 			cleanup()
-			return nil, errors.New("proton: account requires TOTP code")
+			return nil, err
 		}
-		if err := client.Auth2FA(ctx, gpa.Auth2FAReq{TwoFactorCode: totp}); err != nil {
-			cleanup()
-			return nil, fmt.Errorf("2fa: %w", err)
-		}
-	case gpa.HasFIDO2, gpa.HasFIDO2AndTOTP:
+	case gpa.HasFIDO2:
 		cleanup()
-		return nil, errors.New("proton: FIDO2 2FA is not supported yet; use TOTP")
+		return nil, errors.New("proton: this account uses FIDO2 (security key / passkey) as its only 2FA method, which protonmcp does not support yet. Workaround: in the Proton web app go to Settings → All settings → Account → Two-factor authentication and add an Authenticator-app (TOTP) method alongside your security key. Native FIDO2 support is tracked in TODO.md.")
 	default:
 		cleanup()
 		return nil, fmt.Errorf("proton: unknown 2FA mode %d", auth.TwoFA.Enabled)
