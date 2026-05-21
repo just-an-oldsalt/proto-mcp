@@ -1,0 +1,24 @@
+# Build output
+/bin/
+/dist/
+
+# Top-level built binaries (anchored so they don't match cmd/protonmcp/ etc.)
+/protonmcp
+/protonmcpd
+/protonmcp-shim
+/protonmcp-touchid
+
+# Local config / data
+*.db
+*.db-wal
+*.db-shm
+*.log
+.env
+.env.*
+!.env.example
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
