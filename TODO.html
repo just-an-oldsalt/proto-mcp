@@ -92,7 +92,7 @@
 <h2>Status at a glance</h2>
 <ul>
   <li><span class="check done">[x]</span> Phase 0 — repo skeleton, Go toolchain, pinned deps, auth smoke test</li>
-  <li><span class="check">[ ]</span> Phase 1 — SQLite + full backfill of message metadata</li>
+  <li><span class="check">[~]</span> Phase 1 — SQLite + full backfill of message metadata <em>(storage layer done; backfill pending)</em></li>
   <li><span class="check">[ ]</span> Phase 2 — event-loop sync, lazy body decrypt, FTS5 search</li>
   <li><span class="check">[ ]</span> Phase 3 — MCP server (hand-rolled JSON-RPC over stdio for now)</li>
   <li><span class="check">[ ]</span> Phase 4 — policy engine + audit log + Touch ID approval broker</li>
@@ -152,22 +152,25 @@ docs/               # (empty — threat model + tool reference land here)
     any public release.</li>
 </ul>
 
-<h2>Phase 1 — Local SQLite mirror <span class="tag">next up</span></h2>
+<h2>Phase 1 — Local SQLite mirror <span class="tag">in progress</span></h2>
 <p>Goal: cold backfill of message metadata into a local SQLite store so reads
 and search can be answered offline.</p>
 <ul>
-  <li><span class="check">[ ]</span> Decide migration tool: <code>pressly/goose</code> vs <code>golang-migrate</code>. Goose has
-    embedded migrations and is simpler. Pick goose unless we hit a wall.</li>
-  <li><span class="check">[ ]</span> Add <code>internal/store</code> package wrapping <code>database/sql</code> + <code>mattn/go-sqlite3</code>.
-    Open <code>~/Library/Application Support/protonmcp/store.db</code> with WAL mode.</li>
-  <li><span class="check">[ ]</span> Implement schema from the design spec — see "Local SQLite schema
-    (sketch)" section. Tables: <code>messages</code>, <code>message_labels</code>, <code>labels</code>,
-    <code>messages_fts</code> (FTS5 virtual), <code>sync_state</code>, <code>audit_log</code>.</li>
+  <li><span class="check done">[x]</span> Picked <code>pressly/goose/v3</code> for migrations (embedded via <code>//go:embed</code>),
+    <code>modernc.org/sqlite</code> for the driver — pure Go, no cgo, FTS5 built in.</li>
+  <li><span class="check done">[x]</span> <code>internal/store</code> package: <code>Open(path)</code> returns a <code>*Store</code> wrapping
+    <code>*sql.DB</code>, applies migrations, sets WAL + foreign_keys pragmas. Default
+    path is <code>~/Library/Application Support/protonmcp/store.db</code> (override via
+    <code>XDG_DATA_HOME</code>).</li>
+  <li><span class="check done">[x]</span> Schema implemented in <code>0001_initial.sql</code>: <code>messages</code>, <code>message_labels</code>
+    (FK + cascade), <code>labels</code>, <code>messages_fts</code> (FTS5 with insert/update/delete
+    triggers), <code>sync_state</code>, <code>audit_log</code>. Tests cover insert/get,
+    FTS5 search, cascade delete, label replacement, sync_state round-trip.</li>
   <li><span class="check">[ ]</span> <code>proton.Session</code> helper <code>ListAllMessageMetadata(ctx)</code> that pages
     through <code>client.GetMessageMetadataPage</code> (check exact name in
     <code>message.go</code>) and yields <code>MessageMetadata</code> items.</li>
-  <li><span class="check">[ ]</span> Cold backfill command: <code>protonmcp backfill</code> — reads creds via env
-    (same as whoami for now), logs in, drains pages, writes rows, prints
+  <li><span class="check">[ ]</span> Cold backfill command: <code>protonmcp backfill</code> — logs in (reusing
+    the interactive flow from whoami), drains pages, writes rows, prints
     progress every N batches.</li>
   <li><span class="check">[ ]</span> Persist sync cursor: after backfill, call <code>client.GetLatestEventID</code>
     (check name) and store under <code>sync_state</code> key <code>event_cursor</code>.</li>
@@ -412,6 +415,13 @@ LocalAuthentication / AuthenticationServices.</p>
   <li><code>proton.Auth.TwoFA.Enabled</code> is <code>0</code> when 2FA is disabled, otherwise one
     of the <code>TwoFAStatus</code> constants. <code>HasFIDO2AndTOTP</code> falls back to TOTP
     transparently; <code>HasFIDO2</code> alone errors with workaround instructions.</li>
+  <li><code>modernc.org/sqlite</code> registers its driver as <code>"sqlite"</code> (no <code>3</code>) and
+    takes pragmas via DSN as <code>?_pragma=name(value)&amp;_pragma=...</code>. <em>Goose</em>
+    still expects dialect <code>"sqlite3"</code> though — driver name and goose dialect
+    are different concepts and need to be set independently.</li>
+  <li>Goose splits SQL files on <code>;</code> by default, which breaks <code>CREATE TRIGGER
+    ... BEGIN ... END;</code> blocks (they contain inner semicolons). Wrap each
+    trigger in <code>-- +goose StatementBegin</code> / <code>-- +goose StatementEnd</code>.</li>
 </ul>
 
 <h2>Done / decided</h2>
@@ -424,6 +434,9 @@ LocalAuthentication / AuthenticationServices.</p>
   <li>2026-05-21 — <code>whoami</code> works end-to-end from env-var credentials.</li>
   <li>2026-05-21 — Converted project docs from Markdown to HTML to keep
     formatting under our control instead of GitHub's renderer.</li>
+  <li>2026-05-21 — Picked <code>modernc.org/sqlite</code> + <code>pressly/goose/v3</code>. Pure-Go
+    SQLite avoids cgo build-tag footguns (mattn/go-sqlite3 needs
+    <code>-tags sqlite_fts5</code> for FTS5; easy to forget, hard to debug).</li>
 </ul>
 
 </body>
