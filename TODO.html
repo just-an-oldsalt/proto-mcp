@@ -87,12 +87,19 @@
   <p>Resumption rule: a future Claude Code session should be able to open this
   file and continue work without re-reading the original conversation. Add
   any context that future-you will need.</p>
+  <p><strong>Security invariants live in <code>SECURITY.md</code> (project root)</strong> — that
+  doc is the source of truth for the credential / logging / trust-model
+  rules. Every PR should reference which Foundational invariants it
+  upholds (or explicitly waive, with rationale). Phase 1.5 below is the
+  initial batch of work that locks those invariants in before more code
+  lands on them.</p>
 </blockquote>
 
 <h2>Status at a glance</h2>
 <ul>
   <li><span class="check done">[x]</span> Phase 0 — repo skeleton, Go toolchain, pinned deps, auth smoke test</li>
-  <li><span class="check">[~]</span> Phase 1 — SQLite + full backfill of message metadata <em>(code complete, awaiting smoke test against real account)</em></li>
+  <li><span class="check done">[x]</span> Phase 1 — SQLite + full backfill of message metadata <em>(spot-checked 100 msgs in 781ms; full 64k drain in progress)</em></li>
+  <li><span class="check">[ ]</span> <strong>Phase 1.5 — Security foundations <em>(blocks Phase 2 — see <code>SECURITY.md</code>)</em></strong></li>
   <li><span class="check">[ ]</span> Phase 2 — event-loop sync, lazy body decrypt, FTS5 search</li>
   <li><span class="check">[ ]</span> Phase 3 — MCP server (hand-rolled JSON-RPC over stdio for now)</li>
   <li><span class="check">[ ]</span> Phase 4 — policy engine + audit log + Touch ID approval broker</li>
@@ -194,6 +201,96 @@ and search can be answered offline.</p>
   <li>Some accounts have hundreds of thousands of messages. Print a count
     first and confirm before draining — backfill is the only operation
     that scans the whole mailbox.</li>
+</ul>
+
+<h2>Phase 1.5 — Security foundations <span class="tag">blocks Phase 2</span></h2>
+<p>External audit (see <code>SECURITY.md</code> in repo root) flagged eight
+foundational invariants that get exponentially more expensive to retrofit
+once Phases 2-7 spread credentials / logging / trust assumptions across
+more files. This phase locks them in before Phase 2 lands more code that
+would otherwise need re-plumbing.</p>
+
+<h3>Must land before Phase 2 starts</h3>
+<ul>
+  <li><span class="check">[ ]</span> <code>internal/secret</code> package: <code>Secret</code> wraps a
+    <code>[]byte</code>, exposes <code>Bytes()</code> / <code>Zero()</code>, returns <code>"[REDACTED]"</code> from
+    <code>String()</code>, returns an error from <code>MarshalJSON</code>.
+    <em>(SECURITY Foundational #1, fixes H-1, L-2)</em></li>
+  <li><span class="check">[ ]</span> Plumb <code>Secret</code> through
+    <code>proton.Credentials.{Password, MailboxPassword, TOTP}</code> and the
+    SRP-derived <code>saltedPass</code>. Zero on <code>Session.Close</code> and on any error
+    path before return. <em>(H-1, H-2)</em></li>
+  <li><span class="check">[ ]</span> Plumb <code>Secret</code> through <code>internal/cli</code> prompts;
+    explicitly zero the <code>term.ReadPassword</code> <code>[]byte</code> before returning.
+    <em>(L-2)</em></li>
+  <li><span class="check">[ ]</span> Call <code>os.Unsetenv("PROTONMCP_PASSWORD")</code>
+    (and the other secret-bearing envs) immediately after copying into a
+    <code>Secret</code>. Caps the <code>ps eww</code> / <code>/proc/&lt;pid&gt;/environ</code> window. <em>(H-1)</em></li>
+  <li><span class="check">[ ]</span> <code>internal/logging</code>: <code>log/slog</code>-based logger
+    with a <code>ReplaceAttr</code> hook redacting known sensitive keys
+    (<code>password</code>, <code>mailbox_password</code>, <code>totp</code>, <code>auth_token</code>,
+    <code>refresh_token</code>, <code>body</code>, <code>body_html</code>). Set as the default before
+    any subcommand starts. <em>(Foundational #2)</em></li>
+  <li><span class="check">[ ]</span> Detached short-timeout context inside
+    <code>cleanup()</code> in <code>proton.Login</code> and inside <code>Session.Close</code>, so
+    Ctrl-C during login still revokes the server-side session.
+    <em>(H-3)</em></li>
+  <li><span class="check">[ ]</span> <code>sync.Once</code>-driven shutdown path wired
+    through <code>signal.NotifyContext</code> that explicitly zeroes <code>Credentials</code>
+    and <code>saltedPass</code> <em>and</em> calls <code>Session.Close</code> even on SIGTERM.
+    <em>(H-2)</em></li>
+  <li><span class="check">[ ]</span> <code>syscall.Umask(0o077)</code> at process start
+    so every file the daemon creates is owner-only by default. <em>(M-3)</em></li>
+  <li><span class="check">[ ]</span> <code>os.Chmod(0o600)</code> on <code>store.db</code> and its
+    <code>-wal</code> / <code>-shm</code> siblings after first <code>Ping</code>. <em>(M-2)</em></li>
+  <li><span class="check">[ ]</span> Surface <code>AppVersion</code> string in
+    <code>whoami</code> output and log a one-line warning that it impersonates
+    Bridge. <em>(M-1)</em></li>
+  <li><span class="check">[ ]</span> Hygiene quick wins:
+    <ul>
+      <li><code>prompt.go</code> err handling — return non-EOF errors even when
+        the line is non-empty. <em>(L-1)</em></li>
+      <li>Reject (or wire a real flag parser for) unknown subcommand
+        arguments instead of silently discarding via <code>_ = args</code>.
+        <em>(L-3)</em></li>
+      <li>Build the SQLite DSN via <code>net/url</code> instead of string
+        concat — closes the <code>?_pragma=</code> injection vector before the
+        store path becomes user-controllable. <em>(L-4)</em></li>
+      <li>Register <code>SIGHUP</code> in <code>signal.NotifyContext</code> now (no-op
+        until Phase 4 wires policy reload to it). <em>(L-5)</em></li>
+      <li><code>go mod tidy</code> to drop the duplicate <code>golang.org/x/crypto</code>
+        v0.48.0 alongside v0.50.0. <em>(L-6)</em></li>
+    </ul>
+  </li>
+</ul>
+
+<h3>Folded into later phases (cross-references)</h3>
+<ul>
+  <li><strong>MCP trust model</strong> (Foundational #3) → Phase 3. Unix-domain
+    stdio only, <code>SO_PEERCRED</code> + UID match, init-time panic on TCP bind so
+    the invariant can't regress silently.</li>
+  <li><strong>Default-deny tool policy</strong> (Foundational #4) → Phase 4. Unknown
+    tool = deny; allow list is explicit.</li>
+  <li><strong>Token persistence story</strong> (Foundational #5) → Phase 6. Document
+    which tokens persist, under whose ACL, and what <code>protonmcp lock</code>
+    zeroes — answer before Keychain code lands or it becomes a junk
+    drawer.</li>
+  <li><strong>Login rate limit</strong> (Foundational #6) → Phase 7 (or earlier if a
+    bug burns us). Per-tool limits aren't enough on their own; a buggy
+    MCP client looping on auth failure can trip Proton's anti-abuse.</li>
+  <li><strong>HTML sanitization at the MCP boundary</strong> (Foundational #7) →
+    Phases 2-3. Store raw HTML in SQLite; sanitize via <code>bluemonday</code> on
+    the way out to MCP. Raw stays in case a stricter policy needs to
+    be re-applied later.</li>
+  <li><strong>govulncheck + Dependabot</strong> (Foundational #8) → Phase 7 polish,
+    but pulled forward to Phase 2 if dep count grows.</li>
+  <li><strong>Sentinel error types + classification</strong> (M-4, M-5) → Phase 4
+    alongside the structured-logging-touches-errors work. Define
+    <code>ErrUnlockFailed</code> / <code>ErrUserCanceled</code> / <code>ErrAuthFailed</code> /
+    <code>ErrNetwork</code> so future log redaction has something to match on.</li>
+  <li><strong>Prompt-injection runtime banner</strong> (open question #5,
+    Foundational #7) → Phase 3 first-run UX, not just a README line.</li>
+  <li><strong>CI release-artifact hygiene</strong> (L-8) → Phase 7 GitHub Actions.</li>
 </ul>
 
 <h2>Phase 2 — Sync loop + lazy decrypt + FTS</h2>
@@ -447,6 +544,11 @@ LocalAuthentication / AuthenticationServices.</p>
   <li>2026-05-21 — Picked <code>modernc.org/sqlite</code> + <code>pressly/goose/v3</code>. Pure-Go
     SQLite avoids cgo build-tag footguns (mattn/go-sqlite3 needs
     <code>-tags sqlite_fts5</code> for FTS5; easy to forget, hard to debug).</li>
+  <li>2026-05-21 — External read-only audit produced <code>SECURITY.md</code>;
+    inserted <strong>Phase 1.5 — Security foundations</strong> between Phase 1 and
+    Phase 2 to lock in the <code>Secret</code> type, structured logger with
+    redaction, file-perm hardening, and credential lifecycle invariants
+    before more code is built on top of them.</li>
 </ul>
 
 </body>
