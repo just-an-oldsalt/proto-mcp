@@ -13,6 +13,8 @@ import (
 
 	gpa "github.com/ProtonMail/go-proton-api"
 	"github.com/ProtonMail/gopenpgp/v2/crypto"
+
+	"github.com/just-an-oldsalt/proto-mcp/internal/secret"
 )
 
 // HostURL is the production Proton Mail API endpoint, matching what
@@ -28,24 +30,35 @@ const HostURL = "https://mail-api.proton.me"
 // pretending to be Bridge.
 const AppVersion = "macos-bridge@3.24.2"
 
-// Credentials is everything needed to bring the daemon from cold start to
-// a fully-unlocked session. MailboxPassword only applies when the account
-// uses the legacy two-password mode; for one-password accounts (the common
-// case) leave it empty and Password is reused.
+// Credentials is everything needed to bring the daemon from cold start
+// to a fully-unlocked session. MailboxPassword only applies when the
+// account uses the legacy two-password mode; for one-password accounts
+// (the common case) leave it empty and Password is reused.
 //
-// AskTOTP and AskMailboxPassword are optional callbacks invoked mid-login,
-// after the server reveals whether 2FA and a separate mailbox password are
-// required. This avoids forcing the caller to pre-collect credentials the
-// account may not need. If a credential is required, the matching string
-// field is empty, and the callback is nil, Login returns a clear error.
+// All credential fields are secret.Secret values. Callers are expected
+// to call Zero() (or the Credentials.Zero helper) once login completes
+// so the byte material doesn't linger on the heap. The Email field is
+// plain string — it identifies but isn't a credential.
+//
+// AskTOTP and AskMailboxPassword are optional callbacks invoked mid-
+// login, after the server reveals whether 2FA and a separate mailbox
+// password are required. Returning a Secret keeps the lifecycle
+// promise end-to-end.
 type Credentials struct {
 	Email           string
-	Password        string
-	MailboxPassword string // optional; empty falls back to Password
-	TOTP            string // optional; required if account has TOTP 2FA
+	Password        secret.Secret
+	MailboxPassword secret.Secret // empty falls back to Password
+	TOTP            secret.Secret // required if account has TOTP 2FA
 
-	AskTOTP            func() (string, error)
-	AskMailboxPassword func() (string, error)
+	AskTOTP            func() (secret.Secret, error)
+	AskMailboxPassword func() (secret.Secret, error)
+}
+
+// Zero wipes every secret field. Idempotent.
+func (c *Credentials) Zero() {
+	c.Password.Zero()
+	c.MailboxPassword.Zero()
+	c.TOTP.Zero()
 }
 
 // Session is the unlocked-state bundle returned by Login. The caller owns
@@ -112,19 +125,21 @@ func NewManager(host string) *gpa.Manager {
 	)
 }
 
-func doTOTP(ctx context.Context, client *gpa.Client, creds Credentials) error {
-	totp := creds.TOTP
-	if totp == "" && creds.AskTOTP != nil {
+func doTOTP(ctx context.Context, client *gpa.Client, creds *Credentials) error {
+	if creds.TOTP.Empty() && creds.AskTOTP != nil {
 		v, err := creds.AskTOTP()
 		if err != nil {
 			return fmt.Errorf("prompt totp: %w", err)
 		}
-		totp = v
+		creds.TOTP = v
 	}
-	if totp == "" {
+	if creds.TOTP.Empty() {
 		return errors.New("proton: account requires TOTP code")
 	}
-	if err := client.Auth2FA(ctx, gpa.Auth2FAReq{TwoFactorCode: totp}); err != nil {
+	// Auth2FA takes a string; the SDK doesn't accept []byte for the TOTP
+	// field. The string copy lives until GC, which is a small leak but
+	// the TOTP code itself is short-lived (30s validity) and one-shot.
+	if err := client.Auth2FA(ctx, gpa.Auth2FAReq{TwoFactorCode: string(creds.TOTP.Bytes())}); err != nil {
 		return fmt.Errorf("2fa: %w", err)
 	}
 	return nil
@@ -133,12 +148,17 @@ func doTOTP(ctx context.Context, client *gpa.Client, creds Credentials) error {
 // Login performs SRP login, submits the TOTP code if the server requires
 // one, fetches user/addresses/salts, and unlocks the PGP keyring. On any
 // failure the partially-built client is closed before returning.
-func Login(ctx context.Context, mgr *gpa.Manager, creds Credentials) (*Session, error) {
-	if creds.Email == "" || creds.Password == "" {
+//
+// Login mutates creds via the AskTOTP / AskMailboxPassword callbacks (the
+// prompts may populate the corresponding Secret fields). After Login
+// returns — success or failure — the caller should call creds.Zero() to
+// wipe the credential material.
+func Login(ctx context.Context, mgr *gpa.Manager, creds *Credentials) (*Session, error) {
+	if creds.Email == "" || creds.Password.Empty() {
 		return nil, errors.New("proton: email and password are required")
 	}
 
-	client, auth, err := mgr.NewClientWithLogin(ctx, creds.Email, []byte(creds.Password))
+	client, auth, err := mgr.NewClientWithLogin(ctx, creds.Email, creds.Password.Bytes())
 	if err != nil {
 		return nil, fmt.Errorf("srp login: %w", err)
 	}
@@ -149,9 +169,9 @@ func Login(ctx context.Context, mgr *gpa.Manager, creds Credentials) (*Session, 
 	}
 
 	// 2FA. We only implement TOTP today. FIDO2 (security keys / passkeys)
-	// is tracked in TODO.md; if the account has FIDO2+TOTP we transparently
-	// use TOTP, if it's FIDO2-only the user gets a pointer to add TOTP in
-	// Proton settings as a workaround.
+	// is tracked in TODO.html; if the account has FIDO2+TOTP we
+	// transparently use TOTP, if it's FIDO2-only the user gets a pointer
+	// to add TOTP in Proton settings as a workaround.
 	switch auth.TwoFA.Enabled {
 	case 0:
 		// no 2FA
@@ -162,14 +182,16 @@ func Login(ctx context.Context, mgr *gpa.Manager, creds Credentials) (*Session, 
 		}
 	case gpa.HasFIDO2:
 		cleanup()
-		return nil, errors.New("proton: this account uses FIDO2 (security key / passkey) as its only 2FA method, which protonmcp does not support yet. Workaround: in the Proton web app go to Settings → All settings → Account → Two-factor authentication and add an Authenticator-app (TOTP) method alongside your security key. Native FIDO2 support is tracked in TODO.md.")
+		return nil, errors.New("proton: this account uses FIDO2 (security key / passkey) as its only 2FA method, which protonmcp does not support yet. Workaround: in the Proton web app go to Settings → All settings → Account → Two-factor authentication and add an Authenticator-app (TOTP) method alongside your security key. Native FIDO2 support is tracked in TODO.html.")
 	default:
 		cleanup()
 		return nil, fmt.Errorf("proton: unknown 2FA mode %d", auth.TwoFA.Enabled)
 	}
 
-	mailboxPass := creds.MailboxPassword
-	if auth.PasswordMode == gpa.TwoPasswordMode && mailboxPass == "" {
+	// Resolve the mailbox password. For one-password accounts the login
+	// password is reused. For two-password accounts we need a separate
+	// secret (from env, or prompted via the callback).
+	if auth.PasswordMode == gpa.TwoPasswordMode && creds.MailboxPassword.Empty() {
 		if creds.AskMailboxPassword == nil {
 			cleanup()
 			return nil, errors.New("proton: account uses two-password mode; mailbox password required")
@@ -179,14 +201,15 @@ func Login(ctx context.Context, mgr *gpa.Manager, creds Credentials) (*Session, 
 			cleanup()
 			return nil, fmt.Errorf("prompt mailbox password: %w", err)
 		}
-		if v == "" {
+		if v.Empty() {
 			cleanup()
 			return nil, errors.New("proton: mailbox password is empty")
 		}
-		mailboxPass = v
+		creds.MailboxPassword = v
 	}
-	if mailboxPass == "" {
-		mailboxPass = creds.Password
+	mailboxBytes := creds.MailboxPassword.Bytes()
+	if len(mailboxBytes) == 0 {
+		mailboxBytes = creds.Password.Bytes()
 	}
 
 	user, err := client.GetUser(ctx)
@@ -213,13 +236,21 @@ func Login(ctx context.Context, mgr *gpa.Manager, creds Credentials) (*Session, 
 	}
 	primaryKey := user.Keys.Primary()
 
-	saltedPass, err := salts.SaltForKey([]byte(mailboxPass), primaryKey.ID)
+	saltedRaw, err := salts.SaltForKey(mailboxBytes, primaryKey.ID)
 	if err != nil {
 		cleanup()
 		return nil, fmt.Errorf("salt for primary key: %w", err)
 	}
+	// Wrap and zero the raw buffer right away — saltedKeyPass is just
+	// as sensitive as the mailbox password (it derives the user PGP
+	// key) and we don't want it sitting on the heap after Unlock.
+	saltedPass := secret.New(saltedRaw)
+	for i := range saltedRaw {
+		saltedRaw[i] = 0
+	}
+	defer saltedPass.Zero()
 
-	userKR, addrKRs, err := gpa.Unlock(user, addrs, saltedPass, nil)
+	userKR, addrKRs, err := gpa.Unlock(user, addrs, saltedPass.Bytes(), nil)
 	if err != nil {
 		cleanup()
 		return nil, fmt.Errorf("unlock keyring: %w (wrong mailbox password?)", err)
@@ -235,4 +266,3 @@ func Login(ctx context.Context, mgr *gpa.Manager, creds Credentials) (*Session, 
 		TwoFA:        auth.TwoFA.Enabled,
 	}, nil
 }
-

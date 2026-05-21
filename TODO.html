@@ -212,17 +212,24 @@ that already touches those files (cross-referenced below).</p>
 
 <h3>Branches in this phase</h3>
 
-<p><strong>1.5/A — <code>security/secret-type</code></strong>. Foundation for everything else.</p>
+<p><strong>1.5/A — <code>security/secret-type</code></strong> <span class="tag">done</span>. Foundation for everything else.</p>
 <ul>
-  <li><span class="check">[ ]</span> <code>internal/secret</code> package: <code>Secret</code> wraps
+  <li><span class="check done">[x]</span> <code>internal/secret</code> package: <code>Secret</code> wraps
     <code>[]byte</code>, exposes <code>Bytes()</code> / <code>Zero()</code>, returns <code>"[REDACTED]"</code> from
-    <code>String()</code>, returns an error from <code>MarshalJSON</code>. <em>(Foundational #1)</em></li>
-  <li><span class="check">[ ]</span> Plumb <code>Secret</code> through
+    <code>String() / GoString() / Format()</code> (covers every fmt verb),
+    returns <code>ErrRefusedJSON</code> from <code>MarshalJSON</code>. <em>(Foundational #1)</em></li>
+  <li><span class="check done">[x]</span> Plumbed <code>Secret</code> through
     <code>proton.Credentials.{Password, MailboxPassword, TOTP}</code>, the
-    SRP-derived <code>saltedPass</code>, and <code>internal/cli</code> prompts. Zero the
-    <code>term.ReadPassword</code> <code>[]byte</code> before returning. <em>(H-1, H-2, L-2)</em></li>
-  <li><span class="check">[ ]</span> <code>os.Unsetenv</code> each <code>PROTONMCP_*</code> secret-bearing
+    SRP-derived <code>saltedPass</code> (wrapped + zeroed via defer after
+    Unlock), and <code>internal/cli.PromptSecret</code> (zeroes the
+    <code>term.ReadPassword</code> buffer). <em>(H-1, H-2, L-2)</em></li>
+  <li><span class="check done">[x]</span> <code>os.Unsetenv</code> each <code>PROTONMCP_*</code> secret-bearing
     env after copying into a <code>Secret</code>. <em>(H-1)</em></li>
+  <li><span class="check done">[x]</span> <code>Credentials.Zero()</code> helper wired into <code>defer</code>
+    in <code>runWhoami</code> and <code>runBackfill</code>.</li>
+  <li><span class="check done">[x]</span> Also picked up L-1: tightened
+    <code>PromptLine</code>'s err handling to surface non-EOF errors rather
+    than swallow them when the line was non-empty.</li>
 </ul>
 
 <p><strong>1.5/B — <code>security/signal-cleanup</code></strong>. Builds on A; locks down

@@ -59,6 +59,7 @@ func runBackfill(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	defer creds.Zero()
 
 	mgr := protonclient.NewManager("")
 	defer mgr.Close()
