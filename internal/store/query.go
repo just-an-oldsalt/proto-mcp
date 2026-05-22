@@ -71,10 +71,28 @@ func parseQuery(input string) parsedQuery {
 	}
 
 	if len(ftsTerms) > 0 {
+		// SECURITY C-9. Phrase-wrap every term so FTS5 metachars
+		// (NEAR, ^, *, parentheses, etc.) lose their operator
+		// meaning. Users who write a bare term get a phrase-match
+		// against that token; users who try to write an FTS5
+		// expression get the literal string matched as a phrase.
+		// Defense-in-depth against query-injection-class DoS like
+		// `NEAR/0 "a" "b"` against a large corpus.
+		quoted := make([]string, 0, len(ftsTerms))
+		for _, t := range ftsTerms {
+			quoted = append(quoted, ftsQuote(t))
+		}
 		// Default to AND across terms (FTS5 implicit).
-		p.fts = strings.Join(ftsTerms, " ")
+		p.fts = strings.Join(quoted, " ")
 	}
 	return p
+}
+
+// ftsQuote wraps a term in FTS5 phrase-form, escaping embedded
+// double-quotes per the FTS5 syntax (a literal " inside a phrase
+// is doubled: "" → ").
+func ftsQuote(term string) string {
+	return `"` + strings.ReplaceAll(term, `"`, `""`) + `"`
 }
 
 // tokenizeQuery splits the input on whitespace, respecting double-
