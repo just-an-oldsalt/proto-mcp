@@ -107,13 +107,24 @@ func tryResume(ctx context.Context) (*sessionBundle, error) {
 	}
 
 	bundle := &sessionBundle{Session: sess, Manager: mgr, Jar: jar}
+
+	// Important: NewClientWithRefresh hands back rotated tokens but
+	// does NOT fire the SDK's AuthHandler — that hook only triggers
+	// on the auto-refresh-on-401 path inside the Client. Without an
+	// explicit save here, the Keychain still holds the OLD refresh
+	// token and the next process hits 400 / 422 on its own resume.
+	if err := persistSession(bundle); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: failed to update Keychain with rotated tokens (%v)\n", err)
+	}
+
 	wireKeystoreSync(bundle)
 	return bundle, nil
 }
 
 // persistSession writes the session's resumable fields (tokens, salted
-// pass, cookies) to the Keychain. Called once at first-login time;
-// subsequent rotations go through wireKeystoreSync's hook.
+// pass, cookies) to the Keychain. Called both at first-login time and
+// immediately after a successful Resume — Resume's refresh response
+// carries rotated tokens that must replace the stored ones.
 func persistSession(b *sessionBundle) error {
 	access, refresh := b.Session.Tokens()
 	return keystore.Save(keystore.Live{

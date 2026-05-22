@@ -76,10 +76,15 @@ func PromptLine(ctx context.Context, label string) (string, error) {
 	}
 	r := bufio.NewReader(tty)
 	line, err := r.ReadString('\n')
+	// Always check ctx first: if the watcher closed the tty, ReadString
+	// returns whatever bytes happened to be in the buffer plus io.EOF.
+	// Treating that as a clean read would swallow the cancel and let
+	// the next prompt run (the "^C at email, falls through to password"
+	// UX bug). ctx wins over partial data.
+	if ctx.Err() != nil {
+		return "", ctx.Err()
+	}
 	if err != nil && err != io.EOF {
-		if ctx.Err() != nil {
-			return "", ctx.Err()
-		}
 		return "", err
 	}
 	return strings.TrimRight(line, "\r\n"), nil
@@ -109,6 +114,12 @@ func PromptSecret(ctx context.Context, label string) (secret.Secret, error) {
 	}
 	pw, err := term.ReadPassword(int(tty.Fd()))
 	fmt.Fprintln(tty)
+	// Same ctx-first rule as PromptLine: closed-tty after cancel can
+	// surface as a clean return on some platforms.
+	if ctx.Err() != nil {
+		zero(pw)
+		return secret.Secret{}, ctx.Err()
+	}
 	if err != nil {
 		zero(pw)
 		if ctx.Err() != nil {
