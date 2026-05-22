@@ -7,12 +7,14 @@
 package proton
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httputil"
 	"os"
+	"regexp"
 	"sync"
 	"time"
 
@@ -25,8 +27,16 @@ import (
 
 // debugTransport wraps an http.RoundTripper to dump every request and
 // response (headers + body) to out. Wired in via PROTONMCP_DEBUG=1.
-// Bodies are dumped in full — only enable while reproducing a bug,
-// and remember the output contains refresh tokens.
+//
+// SECURITY B-2 / B-12: this used to dump verbatim, which leaked
+// refresh tokens, access tokens, TOTP codes, and Authorization
+// headers to stderr — bypassing the slog redactor entirely. We now
+// run the dump through redactDump first, which strips known-secret
+// headers, looks for token-shaped strings in JSON bodies, and
+// replaces them with [REDACTED] markers. Imperfect (a hand-crafted
+// payload could still slip through), so the package-init message
+// still warns that debug output is sensitive and shouldn't be
+// shared. But the common shapes are caught.
 type debugTransport struct {
 	next http.RoundTripper
 	out  *os.File
@@ -35,16 +45,50 @@ type debugTransport struct {
 func (d *debugTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	reqDump, err := httputil.DumpRequestOut(req, true)
 	if err == nil {
-		fmt.Fprintf(d.out, "\n=== REQUEST ===\n%s\n", reqDump)
+		fmt.Fprintf(d.out, "\n=== REQUEST ===\n%s\n", redactDump(reqDump))
 	}
 	resp, rtErr := d.next.RoundTrip(req)
 	if resp != nil {
 		respDump, err := httputil.DumpResponse(resp, true)
 		if err == nil {
-			fmt.Fprintf(d.out, "\n=== RESPONSE ===\n%s\n", respDump)
+			fmt.Fprintf(d.out, "\n=== RESPONSE ===\n%s\n", redactDump(respDump))
 		}
 	}
 	return resp, rtErr
+}
+
+// dumpHeaderRedactRE matches sensitive HTTP header values for redaction
+// in the debug dump. The header name (group 1) is preserved so the
+// dump still tells you which headers were present.
+var dumpHeaderRedactRE = regexp.MustCompile(`(?im)^(Authorization|Cookie|Set-Cookie|X-Pm-Uid|X-Pm-Human-Verification-Token|Proxy-Authorization):.*$`)
+
+// dumpBodyTokenRE matches JSON-shaped credential fields likely to
+// appear in /auth/v4 responses: AccessToken, RefreshToken, TwoFactorCode,
+// SaltedKeyPass*, etc. The value is replaced with "[REDACTED]" while
+// the key is preserved so the dump still tells you which fields were
+// in the payload.
+var dumpBodyTokenRE = regexp.MustCompile(`"(AccessToken|RefreshToken|TwoFactorCode|TwoFA|Password|MailboxPassword|SaltedKeyPass[A-Za-z]*|ClientProof|ClientEphemeral|ServerProof|UID)"\s*:\s*"[^"]*"`)
+
+// redactDump scrubs an httputil.Dump* output before printing. Two
+// passes: header-line regex and JSON-body field regex. Both preserve
+// the field/header name so the dump remains diagnostically useful.
+func redactDump(b []byte) []byte {
+	b = dumpHeaderRedactRE.ReplaceAllFunc(b, func(line []byte) []byte {
+		// Find the colon separator.
+		idx := bytes.IndexByte(line, ':')
+		if idx < 0 {
+			return line
+		}
+		return append(append([]byte{}, line[:idx]...), []byte(": [REDACTED]")...)
+	})
+	b = dumpBodyTokenRE.ReplaceAllFunc(b, func(match []byte) []byte {
+		idx := bytes.IndexByte(match, ':')
+		if idx < 0 {
+			return match
+		}
+		return append(append([]byte{}, match[:idx]...), []byte(`: "[REDACTED]"`)...)
+	})
+	return b
 }
 
 // shutdownTimeout caps how long the session-revoke + close path is

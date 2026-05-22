@@ -86,6 +86,8 @@ func main() {
 		}
 	case "backfill":
 		err = runBackfill(ctx, args)
+	case "read":
+		err = runRead(ctx, args)
 	case "help", "-h", "--help":
 		usage()
 		return
@@ -115,6 +117,9 @@ Commands:
   backfill   Drain message metadata into the local SQLite mirror. Same
              session-resume behavior as whoami.
              Flags: --db <path>, --yes (skip confirm), --limit <n>.
+  read       Print a single decrypted message (text + sanitized HTML)
+             as JSON. Served from local cache when possible.
+             Flags: --db <path>, --refresh (ignore cache).
   help       Show this help.
 
 The session is persisted in the macOS Keychain (service

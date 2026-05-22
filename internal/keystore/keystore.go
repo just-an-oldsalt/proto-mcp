@@ -13,7 +13,6 @@
 package keystore
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -72,17 +71,21 @@ func (l *Live) Zero() {
 
 // savedBlob is the on-disk shape (in the Keychain blob). Kept private
 // so callers can't accidentally hand a json.Marshal-able struct around
-// the codebase. All fields are strings / JSON-safe types because
-// Keychain stores bytes and we want a stable schema independent of
-// secret.Secret internals.
+// the codebase.
+//
+// SaltedKeyPass is []byte rather than a base64'd string deliberately
+// (SECURITY B-1): encoding/json natively marshals []byte → base64 on
+// write and base64 → []byte on read, so the raw key material goes
+// through json.Marshal as a slice we can zero (defer zero(data) below),
+// not as a Go string that lives in the GC heap until reclaimed.
 type savedBlob struct {
-	Email            string         `json:"email"`
-	UID              string         `json:"uid"`
-	AccessToken      string         `json:"access_token"`
-	RefreshToken     string         `json:"refresh_token"`
-	SaltedKeyPassB64 string         `json:"salted_key_pass_b64"`
-	Cookies          []*http.Cookie `json:"cookies,omitempty"`
-	Version          int            `json:"v"` // schema version, for future migrations
+	Email         string         `json:"email"`
+	UID           string         `json:"uid"`
+	AccessToken   string         `json:"access_token"`
+	RefreshToken  string         `json:"refresh_token"`
+	SaltedKeyPass []byte         `json:"salted_key_pass"`
+	Cookies       []*http.Cookie `json:"cookies,omitempty"`
+	Version       int            `json:"v"`
 }
 
 // blobVersion gets bumped when the JSON shape changes incompatibly.
@@ -93,7 +96,8 @@ type savedBlob struct {
 //
 //	v1: original {email, uid, access_token, refresh_token, salted_key_pass_b64}
 //	v2: added cookies (required for cold-start refresh — see Live doc)
-const blobVersion = 2
+//	v3: SaltedKeyPass migrated from base64 string to []byte (SECURITY B-1)
+const blobVersion = 3
 
 // Save writes (or overwrites) the single session slot.
 func Save(l Live) error {
@@ -101,13 +105,13 @@ func Save(l Live) error {
 		return errors.New("keystore: refusing to save incomplete session (need email, uid, refresh_token)")
 	}
 	blob := savedBlob{
-		Email:            l.Email,
-		UID:              l.UID,
-		AccessToken:      l.AccessToken,
-		RefreshToken:     l.RefreshToken,
-		SaltedKeyPassB64: base64.StdEncoding.EncodeToString(l.SaltedKeyPass.Bytes()),
-		Cookies:          l.Cookies,
-		Version:          blobVersion,
+		Email:         l.Email,
+		UID:           l.UID,
+		AccessToken:   l.AccessToken,
+		RefreshToken:  l.RefreshToken,
+		SaltedKeyPass: l.SaltedKeyPass.Bytes(),
+		Cookies:       l.Cookies,
+		Version:       blobVersion,
 	}
 	data, err := json.Marshal(blob)
 	if err != nil {
@@ -162,19 +166,18 @@ func Load() (Live, error) {
 			blob.Version, blobVersion)
 	}
 
-	saltedRaw, err := base64.StdEncoding.DecodeString(blob.SaltedKeyPassB64)
-	if err != nil {
-		return Live{}, fmt.Errorf("decode salted_key_pass: %w", err)
-	}
 	live := Live{
 		Email:         blob.Email,
 		UID:           blob.UID,
 		AccessToken:   blob.AccessToken,
 		RefreshToken:  blob.RefreshToken,
-		SaltedKeyPass: secret.New(saltedRaw),
+		SaltedKeyPass: secret.New(blob.SaltedKeyPass),
 		Cookies:       blob.Cookies,
 	}
-	zero(saltedRaw)
+	// Zero the unmarshaled bytes so the only copy of the salted key
+	// material now lives inside the Secret. The data buffer at the
+	// top of this function will also be zeroed by its defer.
+	zero(blob.SaltedKeyPass)
 	return live, nil
 }
 
