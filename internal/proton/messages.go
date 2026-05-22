@@ -16,11 +16,31 @@ import (
 // /mail/v4/messages. Larger requests are silently clamped.
 const MessagePageSize = 150
 
+// MaxRawJSONBytes caps how much of MessageMetadata's JSON we keep in
+// the raw_json column. SECURITY B-9. A malicious or misbehaving server
+// returning a multi-MiB metadata blob would otherwise be an unbounded
+// DoS via the SQLite write — and the per-row blob would never be
+// useful at that size. 1 MiB is generous; typical metadata is <4 KiB.
+const MaxRawJSONBytes = 1 << 20
+
+// MaxBackfillPages caps how many pages ForEachMessageMetadataPage
+// will drain. SECURITY B-9. With 150-row pages and a 10 000-page cap,
+// the helper can drain mailboxes of up to 1.5M messages — well past
+// Proton's published account limits, so anything beyond should be
+// treated as adversarial (or as a logic bug).
+const MaxBackfillPages = 10000
+
+// ErrMaxPages is returned by ForEachMessageMetadataPage when
+// MaxBackfillPages is hit. Callers can wrap this with context (e.g.,
+// "drained 1.5M messages and there's still more — aborting").
+var ErrMaxPages = fmt.Errorf("proton: hit MaxBackfillPages (%d) — refusing to continue", MaxBackfillPages)
+
 // ForEachMessageMetadataPage walks every page of message metadata for
 // the authenticated account, calling fn for each batch in API order.
 // Pagination is API-side; the helper just drives it until a short page.
 //
 // fn returning an error aborts the walk and returns that error.
+// Returns ErrMaxPages if the page count crosses MaxBackfillPages.
 func (s *Session) ForEachMessageMetadataPage(
 	ctx context.Context,
 	filter gpa.MessageFilter,
@@ -33,6 +53,9 @@ func (s *Session) ForEachMessageMetadataPage(
 	for page := 0; ; page++ {
 		if err := ctx.Err(); err != nil {
 			return err
+		}
+		if page >= MaxBackfillPages {
+			return ErrMaxPages
 		}
 		batch, err := s.Client.GetMessageMetadataPage(ctx, page, MessagePageSize, filter)
 		if err != nil {
@@ -78,6 +101,12 @@ func ToStoreMessage(m gpa.MessageMetadata) (store.Message, error) {
 	raw, err := json.Marshal(m)
 	if err != nil {
 		return store.Message{}, fmt.Errorf("marshal raw metadata: %w", err)
+	}
+	// SECURITY B-9. Cap raw_json to keep a misbehaving server from
+	// blowing up our SQLite. Truncated rows keep the prefix for
+	// debuggability with an explicit marker.
+	if len(raw) > MaxRawJSONBytes {
+		raw = append(raw[:MaxRawJSONBytes], []byte(`..."[truncated]"`)...)
 	}
 
 	toJSON, err := marshalAddressList(m.ToList)

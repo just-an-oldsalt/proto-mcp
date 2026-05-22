@@ -90,6 +90,8 @@ func main() {
 		err = runRead(ctx, args)
 	case "search":
 		err = runSearch(ctx, args)
+	case "sync":
+		err = runSync(ctx, args)
 	case "help", "-h", "--help":
 		usage()
 		return
@@ -127,6 +129,11 @@ Commands:
              before:2026-01-01  after:2025-12-01  has:attachment
              plus bare full-text terms.
              Flags: --db <path>, --limit n, --offset n.
+  sync       Drain pending events into the local mirror (incremental
+             update from the last stored event cursor). Phase 6's
+             daemon will call this on its own cadence; the CLI is for
+             one-shot manual updates.
+             Flags: --db <path>.
   help       Show this help.
 
 The session is persisted in the macOS Keychain (service
