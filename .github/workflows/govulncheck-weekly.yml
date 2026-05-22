@@ -1,0 +1,32 @@
+name: govulncheck (weekly)
+
+# Catch upstream CVEs that surface between PRs. The CI workflow runs
+# govulncheck on every PR / push to main; this is the backstop for
+# vulnerabilities that get reported against deps we already have.
+
+on:
+  schedule:
+    # Mondays 14:00 UTC (09:00 ET). Far enough from midnight that
+    # most CVE feeds have settled, far enough from working hours
+    # that an open issue doesn't block a workday.
+    - cron: "0 14 * * 1"
+  workflow_dispatch: # also runnable on demand from the Actions tab
+
+permissions:
+  contents: read
+  issues: write # so the workflow can open an issue on findings
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+          cache: true
+
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...

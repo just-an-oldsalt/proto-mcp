@@ -1,0 +1,31 @@
+version: 2
+
+# Group dependency PRs weekly to keep the noise manageable. Bridge-
+# adjacent ProtonMail packages and the resty fork are pinned via the
+# `replace` directive (see go.mod) and are deliberately NOT auto-
+# updated — they have to track proton-bridge releases.
+updates:
+  - package-ecosystem: gomod
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "14:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
+    groups:
+      go-deps:
+        patterns:
+          - "*"
+        exclude-patterns:
+          - "github.com/ProtonMail/*"
+          - "github.com/go-resty/resty/v2"
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "14:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 3
