@@ -92,6 +92,12 @@ func main() {
 		err = runSearch(ctx, args)
 	case "sync":
 		err = runSync(ctx, args)
+	case "serve-stdio":
+		err = runServeStdio(ctx, args)
+	case "install":
+		err = runInstall(ctx, args)
+	case "uninstall":
+		err = runUninstall(ctx, args)
 	case "help", "-h", "--help":
 		usage()
 		return
@@ -134,6 +140,16 @@ Commands:
              daemon will call this on its own cadence; the CLI is for
              one-shot manual updates.
              Flags: --db <path>.
+  serve-stdio
+             Run as a Model Context Protocol server over stdin/stdout
+             (JSON-RPC, NDJSON framed). What Claude Desktop spawns to
+             talk to the read tools. Don't run by hand; use install
+             to register with Claude Desktop instead.
+             Flags: --db <path>.
+  install    Register protonmcp in Claude Desktop's config so the
+             desktop app launches it as an MCP server. Idempotent.
+             Flags: --dry-run (print what would be written).
+  uninstall  Remove protonmcp from Claude Desktop's config.
   help       Show this help.
 
 The session is persisted in the macOS Keychain (service
