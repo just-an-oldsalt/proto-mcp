@@ -4,7 +4,7 @@ go 1.26.3
 
 require (
 	github.com/ProtonMail/go-proton-api v0.4.1-0.20260319112440-799673ddc2db
-	github.com/ProtonMail/gopenpgp/v2 v2.9.0-proton
+	github.com/ProtonMail/gopenpgp/v2 v2.10.0
 	github.com/go-resty/resty/v2 v2.7.0
 	github.com/keybase/go-keychain v0.0.1
 	github.com/microcosm-cc/bluemonday v1.0.27
@@ -17,7 +17,7 @@ require (
 require (
 	github.com/ProtonMail/bcrypt v0.0.0-20211005172633-e235017c1baf // indirect
 	github.com/ProtonMail/gluon v0.17.1-0.20260225115619-c0f05c033a4a // indirect
-	github.com/ProtonMail/go-crypto v1.3.0-proton // indirect
+	github.com/ProtonMail/go-crypto v1.4.1 // indirect
 	github.com/ProtonMail/go-mime v0.0.0-20230322103455-7d82a3887f2f // indirect
 	github.com/ProtonMail/go-srp v0.0.7 // indirect
 	github.com/PuerkitoBio/goquery v1.8.1 // indirect
