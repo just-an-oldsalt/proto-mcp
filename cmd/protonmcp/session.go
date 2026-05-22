@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 
@@ -30,6 +31,30 @@ func (b *sessionBundle) Close() {
 	if b.Manager != nil {
 		b.Manager.Close()
 	}
+}
+
+// acquireSessionResumeOnly tries to rebuild a session from the
+// Keychain blob alone. If that fails — for any reason — it returns
+// a clear error instead of falling through to interactive prompts.
+//
+// Used by `protonmcp serve-stdio`, which is spawned by Claude
+// Desktop with no controlling TTY. Falling through to PromptLine in
+// that environment fails opaquely ("no controlling tty available")
+// in the middle of MCP initialization; better to refuse early with
+// a message that points at the fix.
+func acquireSessionResumeOnly(ctx context.Context) (*sessionBundle, error) {
+	bundle, err := tryResume(ctx)
+	if err != nil {
+		if errors.Is(err, keystore.ErrNotFound) {
+			return nil, fmt.Errorf(
+				"no stored Proton session — run `protonmcp login` from a terminal " +
+					"before launching the MCP server (MCP can't prompt for credentials)")
+		}
+		return nil, fmt.Errorf(
+			"stored session unusable (%v) — run `protonmcp logout && protonmcp login` "+
+				"from a terminal to refresh credentials", err)
+	}
+	return bundle, nil
 }
 
 // acquireSession is the unified login-or-resume helper. Flow:

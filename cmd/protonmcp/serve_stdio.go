@@ -56,13 +56,14 @@ func runServeStdio(ctx context.Context, args []string) error {
 	}
 	defer st.Close()
 
-	// Q4 decision: acquire the session EAGERLY at initialize time
-	// (i.e., before we even start the JSON-RPC loop). If Keychain
-	// is empty or refresh is dead, this fails loudly — Claude
-	// Desktop surfaces "MCP server failed to start" — rather than
-	// having the first tools/call hang for 30s on cold SRP.
-	acquireCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
-	bundle, err := acquireSession(acquireCtx)
+	// Q4 decision: acquire the session EAGERLY at initialize time —
+	// AND in resume-only mode, since Claude Desktop spawns us with
+	// no controlling TTY. Any failure here surfaces as "MCP server
+	// failed to start" in Claude Desktop with a stderr message
+	// telling the user to run `protonmcp login` from a real
+	// terminal first.
+	acquireCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	bundle, err := acquireSessionResumeOnly(acquireCtx)
 	cancel()
 	if err != nil {
 		return fmt.Errorf("acquire session: %w", err)

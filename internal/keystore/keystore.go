@@ -13,6 +13,7 @@
 package keystore
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -161,8 +162,26 @@ func Load() (Live, error) {
 	if err := json.Unmarshal(data, &blob); err != nil {
 		return Live{}, fmt.Errorf("decode blob: %w", err)
 	}
-	if blob.Version != blobVersion {
-		return Live{}, fmt.Errorf("keystore: unknown blob version %d (expected %d) — delete & re-login",
+
+	// Version migrations. v3 is current; older versions read with a
+	// compat decoder + are silently rewritten as v3 on the next Save
+	// (the caller of Load is typically about to call Resume → which
+	// triggers a token rotation → which fires OnAuthUpdate → which
+	// re-Saves). No user action required.
+	switch blob.Version {
+	case blobVersion:
+		// happy path
+	case 2:
+		// v2 stored the salted key pass as a base64 STRING under the
+		// "salted_key_pass_b64" field. Decode it here, populate the
+		// v3-shaped slice in `blob` so the rest of Load doesn't care.
+		raw, err := loadV2Salt(data)
+		if err != nil {
+			return Live{}, fmt.Errorf("migrate v2 blob: %w", err)
+		}
+		blob.SaltedKeyPass = raw
+	default:
+		return Live{}, fmt.Errorf("keystore: unknown blob version %d (expected %d) — run `protonmcp logout && protonmcp login`",
 			blob.Version, blobVersion)
 	}
 
@@ -179,6 +198,27 @@ func Load() (Live, error) {
 	// top of this function will also be zeroed by its defer.
 	zero(blob.SaltedKeyPass)
 	return live, nil
+}
+
+// v2 used a base64-encoded string for the salted key pass. The bytes
+// it encodes are identical to what v3 ships as a []byte (Go's json
+// happens to encode []byte to base64 too), so the migration is just
+// "decode the string, install it in the new field."
+func loadV2Salt(data []byte) ([]byte, error) {
+	var legacy struct {
+		B64 string `json:"salted_key_pass_b64"`
+	}
+	if err := json.Unmarshal(data, &legacy); err != nil {
+		return nil, fmt.Errorf("decode legacy field: %w", err)
+	}
+	if legacy.B64 == "" {
+		return nil, errors.New("v2 blob missing salted_key_pass_b64 field")
+	}
+	raw, err := base64.StdEncoding.DecodeString(legacy.B64)
+	if err != nil {
+		return nil, fmt.Errorf("decode legacy base64: %w", err)
+	}
+	return raw, nil
 }
 
 // Delete removes the stored session. Returns nil if no entry exists
