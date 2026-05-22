@@ -7,10 +7,13 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/just-an-oldsalt/proto-mcp/internal/mcp"
 	"github.com/just-an-oldsalt/proto-mcp/internal/mcptools"
+	"github.com/just-an-oldsalt/proto-mcp/internal/policy"
 	"github.com/just-an-oldsalt/proto-mcp/internal/store"
 )
 
@@ -71,8 +74,55 @@ func runServeStdio(ctx context.Context, args []string) error {
 	defer bundle.Close()
 	defer bundle.Session.Close()
 
+	// Phase 4: construct the policy engine BEFORE the MCP server so
+	// SIGHUP reload + the PID file land before any tool call. The
+	// engine itself is wired into the MCP middleware in 4/D; today
+	// it's loaded so `protonmcp policy reload` works against this
+	// daemon instance and so the override file is validated at
+	// startup (rather than first tool call).
+	overridePath, err := policy.DefaultOverridePath()
+	if err != nil {
+		return fmt.Errorf("policy override path: %w", err)
+	}
+	engine, err := policy.New(ctx, overridePath, slog.Default())
+	if err != nil {
+		return fmt.Errorf("policy engine: %w", err)
+	}
+
+	// PID file so `protonmcp policy reload` can find us. Held by an
+	// advisory flock so a second serve-stdio fails fast rather than
+	// stomping. cleanup removes the file on normal shutdown.
+	pidPath, err := policy.DefaultPIDPath()
+	if err != nil {
+		return fmt.Errorf("pid file path: %w", err)
+	}
+	pidCleanup, err := policy.WritePIDFile(pidPath)
+	if err != nil {
+		return fmt.Errorf("pid file: %w", err)
+	}
+	defer pidCleanup()
+
+	// SIGHUP → policy reload. Installed AFTER main.go drops HUP
+	// from its NotifyContext, so the signal arrives here and only
+	// here. The handler logs success/failure but never crashes the
+	// daemon — a malformed override file keeps the previous policy
+	// in place per Engine.Reload semantics.
+	hupCh := make(chan os.Signal, 1)
+	signal.Notify(hupCh, syscall.SIGHUP)
+	defer signal.Stop(hupCh)
+	go func() {
+		for range hupCh {
+			if rerr := engine.Reload(); rerr != nil {
+				slog.Warn("policy reload failed; previous policy retained", "err", rerr.Error())
+				continue
+			}
+			slog.Info("policy reloaded")
+		}
+	}()
+
 	// Build the MCP server, register every read tool.
 	srv := mcp.New(slog.Default())
+	_ = engine // policy engine wired into the middleware in PR 4/D
 	for _, tl := range mcptools.All(mcptools.Deps{
 		Session: bundle.Session,
 		Store:   st,
