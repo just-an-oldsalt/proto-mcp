@@ -37,6 +37,12 @@ var secretEnvNames = []string{
 }
 
 func main() {
+	// Owner-only umask so every file the process creates (store.db,
+	// future audit logs, body cache) is 0o600 / 0o700 by default.
+	// SECURITY M-3. Note: macOS doesn't enforce umask on Keychain
+	// items — those are protected by Keychain ACL instead.
+	syscall.Umask(0o077)
+
 	// Install the redacting slog logger before anything else so any
 	// stderr log calls that follow are filtered. SECURITY Foundational #2.
 	logging.Setup(os.Stderr)
@@ -59,13 +65,25 @@ func main() {
 	var err error
 	switch cmd {
 	case "login":
-		err = runLogin(ctx, args)
+		err = requireNoArgs("login", args)
+		if err == nil {
+			err = runLogin(ctx, args)
+		}
 	case "logout":
-		err = runLogout(ctx, args)
+		err = requireNoArgs("logout", args)
+		if err == nil {
+			err = runLogout(ctx, args)
+		}
 	case "inspect":
-		err = runInspect(ctx, args)
+		err = requireNoArgs("inspect", args)
+		if err == nil {
+			err = runInspect(ctx, args)
+		}
 	case "whoami":
-		err = runWhoami(ctx)
+		err = requireNoArgs("whoami", args)
+		if err == nil {
+			err = runWhoami(ctx)
+		}
 	case "backfill":
 		err = runBackfill(ctx, args)
 	case "help", "-h", "--help":
@@ -196,7 +214,21 @@ func runWhoami(ctx context.Context) error {
 		float64(sess.User.MaxSpace)/1024/1024,
 	)
 	fmt.Printf("  Login + unlock: %s\n", time.Since(start).Round(time.Millisecond))
+	fmt.Printf("  Client header:  %s   (impersonating Proton Bridge; see TODO open question #7)\n",
+		protonclient.AppVersion)
 	return nil
+}
+
+// requireNoArgs fails with a clear error if extra positional arguments
+// were passed to a subcommand that takes none. Better than silently
+// discarding via `_ = args` — the latter hides typos like
+// `protonmcp whoami --json` (intended a flag, got swallowed).
+// SECURITY L-3.
+func requireNoArgs(cmd string, args []string) error {
+	if len(args) == 0 {
+		return nil
+	}
+	return fmt.Errorf("subcommand %q takes no arguments; got %v", cmd, args)
 }
 
 func coalesce(vals ...string) string {

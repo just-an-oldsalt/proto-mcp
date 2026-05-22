@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"os"
 	"testing"
 	"time"
 )
@@ -16,6 +17,28 @@ func mustOpen(t *testing.T) *Store {
 	}
 	t.Cleanup(func() { _ = s.Close() })
 	return s
+}
+
+func TestOnDiskPerms(t *testing.T) {
+	// SECURITY M-2: Open must produce a 0o600 store.db, even if the
+	// process umask was set to something looser. Open's explicit
+	// Chmod closes the gap.
+	dir := t.TempDir()
+	path := dir + "/store.db"
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat store.db: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("store.db perms = %#o, want 0o600", perm)
+	}
 }
 
 func TestOpenAppliesMigrations(t *testing.T) {

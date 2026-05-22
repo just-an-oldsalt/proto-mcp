@@ -15,6 +15,7 @@ import (
 	"embed"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 
@@ -61,12 +62,9 @@ func Open(path string) (*Store, error) {
 		}
 	}
 
-	// modernc.org/sqlite registers itself as "sqlite". The DSN options
-	// turn on busy_timeout and ensure pragmas survive across connections
-	// in the pool.
-	dsn := path + "?_pragma=busy_timeout(5000)&_pragma=foreign_keys(on)"
-	if path != ":memory:" {
-		dsn += "&_pragma=journal_mode(WAL)&_pragma=synchronous(normal)"
+	dsn, err := buildDSN(path)
+	if err != nil {
+		return nil, err
 	}
 
 	db, err := sql.Open("sqlite", dsn)
@@ -78,12 +76,51 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("ping sqlite: %w", err)
 	}
 
+	// Tighten perms on the on-disk SQLite files. The umask the process
+	// runs under should already make this 0o600, but be explicit —
+	// process umask can be unset by callers, and the -wal / -shm
+	// sidecar files may have been created with default modes by an
+	// older version of the binary. SECURITY M-2.
+	if path != ":memory:" {
+		for _, suffix := range []string{"", "-wal", "-shm"} {
+			p := path + suffix
+			if _, statErr := os.Stat(p); statErr == nil {
+				_ = os.Chmod(p, 0o600)
+			}
+		}
+	}
+
 	if err := migrate(db); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
 
 	return &Store{DB: db, Path: path}, nil
+}
+
+// buildDSN constructs a modernc.org/sqlite DSN for the given path with
+// the pragmas we want. Built via net/url rather than string concat
+// (SECURITY L-4) so a path with unusual characters can't accidentally
+// inject extra _pragma=... fragments. The "?_pragma=..." form is
+// modernc-specific; the driver name is "sqlite", which is also why
+// goose's dialect arg is "sqlite3" (the name and the dialect are
+// independent concepts in our setup — see the gotchas list in TODO).
+func buildDSN(path string) (string, error) {
+	if path == ":memory:" {
+		// In-memory DBs reject most pragmas and don't survive across
+		// connections; busy_timeout and FK enforcement are still
+		// useful for the unit tests that use ":memory:".
+		v := url.Values{}
+		v.Add("_pragma", "busy_timeout(5000)")
+		v.Add("_pragma", "foreign_keys(on)")
+		return path + "?" + v.Encode(), nil
+	}
+	v := url.Values{}
+	v.Add("_pragma", "busy_timeout(5000)")
+	v.Add("_pragma", "foreign_keys(on)")
+	v.Add("_pragma", "journal_mode(WAL)")
+	v.Add("_pragma", "synchronous(normal)")
+	return path + "?" + v.Encode(), nil
 }
 
 // Close closes the underlying database. Safe to call on a nil receiver.
