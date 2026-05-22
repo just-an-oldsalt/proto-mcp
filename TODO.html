@@ -102,7 +102,7 @@
   <li><span class="check done">[x]</span> Phase 1.5 — Security foundations (A/B/C/D/E/F all merged; see <code>SECURITY.md</code> for the audit they came from)</li>
   <li><span class="check done">[x]</span> Phase 2 — sanitize / body-fetch / search / sync (A/B/C/D all merged; SECURITY re-audit follow-ups B-1/2/3/4/9/10/12 folded in)</li>
   <li><span class="check done">[x]</span> Phase 3 — MCP server (A/B/C all merged; SECURITY C-8 + C-9 folded in; Foundational #3 enforced via trustguard.go)</li>
-  <li><span class="check">[ ]</span> Phase 4 — policy engine + audit log + Touch ID approval broker</li>
+  <li><span class="check done">[x]</span> Phase 4 — policy + audit + Touch ID + middleware (A/B/C/D all merged; closes Foundational #4 default-deny, B-15 SIGHUP, M-4/M-5 sentinels, B-4 shared redactor)</li>
   <li><span class="check">[ ]</span> Phase 5 — write tools (drafts, send, trash, label/folder CRUD)</li>
   <li><span class="check">[ ]</span> Phase 6 — Unix socket daemon, shim, launchd, Keychain, lock/unlock</li>
   <li><span class="check">[ ]</span> Phase 7 — polish (rate limit, log rotation, signing/notarization, docs)</li>
@@ -771,7 +771,12 @@ the integration moment — easier to land after B is solid.</p>
     limitation.</li>
 </ul>
 
-<h2>Phase 4 — Policy engine, audit log, Touch ID <span class="tag">planning</span></h2>
+<h2>Phase 4 — Policy engine, audit log, Touch ID <span class="tag">done</span></h2>
+<p><strong>Landed:</strong> #32 4/A policy + mcperrors + caller + SIGHUP rewire,
+#33 4/B audit + extracted redactor, #34 4/C TouchID broker +
+Swift helper + Makefile, #35 4/D MCP middleware. Closes
+Foundational #4 (default-deny), B-15 (SIGHUP overloaded),
+M-4/M-5 (sentinels), B-4 (shared redactor across logging + audit).</p>
 <p>Lays the gating infrastructure for Phase 5's write tools — does not
 add write tools itself. Decomposed into four branches (A/B/C
 independent, D integrates).</p>

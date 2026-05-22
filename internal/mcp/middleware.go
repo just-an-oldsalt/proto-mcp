@@ -1,0 +1,211 @@
+package mcp
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"runtime/debug"
+	"time"
+
+	"github.com/just-an-oldsalt/proto-mcp/internal/approval"
+	"github.com/just-an-oldsalt/proto-mcp/internal/audit"
+	"github.com/just-an-oldsalt/proto-mcp/internal/caller"
+	"github.com/just-an-oldsalt/proto-mcp/internal/mcperrors"
+	"github.com/just-an-oldsalt/proto-mcp/internal/policy"
+	"github.com/just-an-oldsalt/proto-mcp/internal/redact"
+)
+
+// Middleware wires together the audit log, policy engine, and
+// approval broker around every tool call. It's an implementation
+// detail of Server — exposed as a type so the wrapped call can be
+// unit-tested in isolation without spinning up an NDJSON loop.
+//
+// Construction via WithPolicy / WithAudit / WithApproval options on
+// mcp.New. All three are optional; when any of them is nil the
+// corresponding pipeline stage is skipped:
+//
+//	policy   nil → every tool implicitly DecisionAllow
+//	audit    nil → no audit row written
+//	approval nil → DecisionPrompt becomes DecisionDeny (the safe
+//	               fallback — if there's no broker we can't ask the
+//	               user, so we refuse)
+//
+// This shape preserves Phase-3 test behavior (mcp.New(logger) with
+// no options is unchanged) while letting serve-stdio inject the
+// full pipeline.
+type Middleware struct {
+	policy   *policy.Engine
+	audit    *audit.Writer
+	broker   *approval.Broker
+	resolver *caller.Resolver
+}
+
+// runTool is the per-call pipeline that replaces the inline
+// t.Handler(...) call at the bottom of handleToolsCall.
+//
+//	1. Resolve caller identity (cached for the life of the
+//	   process).
+//	2. Begin an audit row with redacted args + the upcoming
+//	   policy decision.
+//	3. Ask the policy engine. deny → fill row, return ErrorResult.
+//	4. If prompt → ask the broker. ErrUserCanceled / ErrAuthFailed
+//	   → fill row, return ErrorResult.
+//	5. Run the tool handler. recover() in the defer converts panics
+//	   to outcome=error so a buggy handler can't crash the daemon.
+//	6. Complete the audit row.
+//
+// The function NEVER returns a *Error for tool-execution failures —
+// those land in ToolResult.isError so the LLM sees the message,
+// per the spec.
+func (m *Middleware) runTool(ctx context.Context, t Tool, args json.RawMessage, logger Logger) (result *ToolResult, jrErr *Error) {
+	var (
+		callerInfo     caller.Caller
+		auditID        int64
+		outcome        = audit.OutcomeError // pessimistic default — flip on success
+		errMsg         string
+		approvalSource string
+		started        = time.Now()
+	)
+
+	if m.resolver != nil {
+		callerInfo = m.resolver.Resolve()
+	}
+
+	if m.audit != nil {
+		auditID = m.audit.Begin(ctx, &audit.Entry{
+			Caller:         callerInfo,
+			Tool:           t.Name,
+			ArgsJSON:       redact.JSON(args),
+			PolicyDecision: "",
+		})
+	}
+
+	defer func() {
+		if r := recover(); r != nil {
+			outcome = audit.OutcomeError
+			errMsg = fmt.Sprintf("handler panic: %v", r)
+			logger.Warn("tool handler panicked",
+				"tool", t.Name, "panic", fmt.Sprintf("%v", r),
+				"stack", string(debug.Stack()))
+			result = ErrorResult("%s crashed: %v", t.Name, r)
+			jrErr = nil
+		}
+		if m.audit != nil {
+			m.audit.Complete(ctx, auditID, outcome, approvalSource, errMsg, time.Since(started))
+		}
+	}()
+
+	// Policy stage.
+	decision := policy.DecisionAllow
+	var pol *policy.ToolPolicy
+	if m.policy != nil {
+		decision, pol = m.policy.Decide(t.Name, args, callerInfo)
+	}
+	if m.audit != nil && auditID != 0 {
+		// Backfill the decision now that we have it. We do this in
+		// the same UPDATE Complete uses; minor inefficiency vs
+		// holding decision aside and writing once, but the audit
+		// row reflects the decision even if a panic happens before
+		// Complete runs.
+		_ = updateDecision(ctx, m.audit, auditID, string(decision))
+	}
+
+	switch decision {
+	case policy.DecisionDeny:
+		outcome = audit.OutcomeDenied
+		errMsg = "policy denied"
+		return ErrorResult("tool %s denied by policy", t.Name), nil
+	case policy.DecisionPrompt:
+		if m.broker == nil {
+			// No broker configured but policy says prompt → safe
+			// fallback is deny. Better than letting an unsafe op
+			// through silently.
+			outcome = audit.OutcomeDenied
+			errMsg = "approval broker unavailable"
+			logger.Warn("tool requires approval but no broker is configured",
+				"tool", t.Name)
+			return ErrorResult("tool %s requires approval but the approval broker is not available", t.Name), nil
+		}
+		src, perr := m.broker.Request(ctx, approval.Request{
+			Tool:   t.Name,
+			Caller: callerInfo,
+			Args:   args,
+			Policy: *pol,
+			Title:  defaultPromptTitle(t.Name),
+			Body:   defaultPromptBody(t.Name, args, pol),
+		})
+		if perr != nil {
+			outcome = audit.OutcomeDenied
+			errMsg = perr.Error()
+			if errors.Is(perr, mcperrors.ErrUserCanceled) {
+				return ErrorResult("user canceled %s", t.Name), nil
+			}
+			return ErrorResult("approval failed: %v", perr), nil
+		}
+		approvalSource = src
+	case policy.DecisionAllow:
+		approvalSource = "policy"
+	}
+
+	// Handler.
+	res, herr := t.Handler(Context{
+		Std: ctx,
+		Caller: CallerInfo{
+			PID:    callerInfo.PID,
+			UID:    callerInfo.UID,
+			Binary: callerInfo.Binary,
+		},
+	}, args)
+	if herr != nil {
+		var jr *Error
+		if errors.As(herr, &jr) {
+			outcome = audit.OutcomeError
+			errMsg = herr.Error()
+			return nil, jr
+		}
+		outcome = audit.OutcomeError
+		errMsg = herr.Error()
+		logger.Warn("tool execution failed", "tool", t.Name, "err", herr.Error())
+		return ErrorResult("%s failed: %v", t.Name, herr), nil
+	}
+	if res == nil {
+		outcome = audit.OutcomeError
+		errMsg = "tool returned nil result with no error"
+		return nil, NewError(CodeInternalError,
+			fmt.Sprintf("tool %s returned nil result with no error", t.Name))
+	}
+	outcome = audit.OutcomeOK
+	return res, nil
+}
+
+// Logger is the minimal subset of *slog.Logger the middleware uses.
+// Defined here so the middleware doesn't depend on the concrete
+// logger type (makes tests trivial — pass any slog.Logger).
+type Logger interface {
+	Warn(msg string, args ...any)
+}
+
+// defaultPromptTitle / defaultPromptBody build the strings shown to
+// the user when a tool is gated by prompt. Phase 5 will likely
+// per-tool customize these (e.g., mail_send wants the recipient
+// list literal in the body); for Phase 4 the generic shape is
+// sufficient.
+func defaultPromptTitle(tool string) string {
+	return "Approve " + tool + "?"
+}
+
+func defaultPromptBody(tool string, args json.RawMessage, _ *policy.ToolPolicy) string {
+	if len(args) == 0 {
+		return tool + " was requested by an MCP client."
+	}
+	return tool + " was requested by an MCP client with args:\n" + string(redact.JSON(args))
+}
+
+// updateDecision backfills policy_decision into the audit row that
+// Begin created with an empty decision. Defined here rather than on
+// audit.Writer because it's specific to the middleware's pipeline
+// (audit doesn't know about policy.Decision strings).
+func updateDecision(ctx context.Context, w *audit.Writer, id int64, decision string) error {
+	return w.SetDecision(ctx, id, decision)
+}

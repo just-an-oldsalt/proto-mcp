@@ -127,13 +127,28 @@ type Tool struct {
 type Handler func(ctx Context, params json.RawMessage) (*ToolResult, error)
 
 // Context is a small bag of per-call state. Kept as a struct rather
-// than passing context.Context directly so future additions (request
-// ID for tracing, caller identity in Phase 4 policy decisions) don't
+// than passing context.Context directly so future additions don't
 // break the Handler signature.
 type Context struct {
 	// Std is the standard context for cancellation / deadlines.
 	// Handlers that make HTTP calls should pass it through.
 	Std context.Context
+
+	// Caller identifies the parent process. Populated by the
+	// middleware in Phase 4 (zero-valued for Phase-3 tests that
+	// construct mcp.New without options). Phase 5 write tools may
+	// inspect this for per-caller allowed-recipients enforcement.
+	Caller CallerInfo
+}
+
+// CallerInfo is the bag of fields handlers see about who called
+// them. Mirrors caller.Caller's shape; defined here as a plain
+// struct rather than a type alias so internal/mcp/types.go doesn't
+// have to import internal/caller (the middleware file already does).
+type CallerInfo struct {
+	PID    int
+	UID    int
+	Binary string
 }
 
 // Initialize / InitializeResult are the handshake message shapes per

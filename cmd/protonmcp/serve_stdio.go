@@ -11,6 +11,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/just-an-oldsalt/proto-mcp/internal/approval"
+	"github.com/just-an-oldsalt/proto-mcp/internal/audit"
+	"github.com/just-an-oldsalt/proto-mcp/internal/caller"
 	"github.com/just-an-oldsalt/proto-mcp/internal/mcp"
 	"github.com/just-an-oldsalt/proto-mcp/internal/mcptools"
 	"github.com/just-an-oldsalt/proto-mcp/internal/policy"
@@ -120,9 +123,48 @@ func runServeStdio(ctx context.Context, args []string) error {
 		}
 	}()
 
-	// Build the MCP server, register every read tool.
-	srv := mcp.New(slog.Default())
-	_ = engine // policy engine wired into the middleware in PR 4/D
+	// Phase 4 middleware bits — audit writer + approval broker on
+	// top of the policy engine built above.
+	jsonlPath, err := audit.DefaultJSONLPath()
+	if err != nil {
+		return fmt.Errorf("audit path: %w", err)
+	}
+	auditWriter, err := audit.New(st.DB, jsonlPath, slog.Default())
+	if err != nil {
+		return fmt.Errorf("audit writer: %w", err)
+	}
+	defer auditWriter.Close()
+
+	helperPath, err := approval.ResolveHelperPath(os.Args[0])
+	var broker *approval.Broker
+	if err != nil {
+		// Missing helper isn't fatal — read tools are allow-by-policy,
+		// they don't need the broker. Tools with decision:prompt
+		// will safe-fall-through to deny via Middleware's nil-broker
+		// branch. Log loudly so the user knows write tools won't
+		// work until they run `make touchid`.
+		slog.Warn("touchid helper not found; prompted tools will be denied",
+			"hint", "run `make touchid` from the repo root",
+			"err", err.Error())
+	} else {
+		broker, err = approval.New(helperPath, slog.Default())
+		if err != nil {
+			return fmt.Errorf("approval broker: %w", err)
+		}
+	}
+
+	resolver := caller.New()
+
+	// Build the MCP server with the full Phase-4 middleware stack.
+	opts := []mcp.Option{
+		mcp.WithPolicy(engine),
+		mcp.WithAudit(auditWriter),
+		mcp.WithCallerResolver(resolver),
+	}
+	if broker != nil {
+		opts = append(opts, mcp.WithApproval(broker))
+	}
+	srv := mcp.New(slog.Default(), opts...)
 	for _, tl := range mcptools.All(mcptools.Deps{
 		Session: bundle.Session,
 		Store:   st,
