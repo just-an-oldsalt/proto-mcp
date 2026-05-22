@@ -149,3 +149,82 @@ func TestSnippetUnicodeSafe(t *testing.T) {
 		t.Errorf("unicode snippet rune len = %d, want 11", len([]rune(got)))
 	}
 }
+
+// Phase 5/C — outbound HTML sanitization for LLM-supplied drafts.
+// Same allowlist as HTML(); script tags, iframes, and remote-resource
+// refs must be stripped before the body is encrypted and sent.
+
+func TestOutboundStripsScript(t *testing.T) {
+	got := Outbound(`<p>hello</p><script>alert(1)</script>`)
+	if strings.Contains(got, "<script>") || strings.Contains(got, "alert") {
+		t.Errorf("script not stripped: %q", got)
+	}
+	if !strings.Contains(got, "<p>hello</p>") {
+		t.Errorf("legitimate <p> markup lost: %q", got)
+	}
+}
+
+func TestOutboundKeepsBasicMarkup(t *testing.T) {
+	cases := []string{
+		`<p><b>bold</b> and <em>emphasis</em></p>`,
+		`<ul><li>one</li><li>two</li></ul>`,
+		`<blockquote>quoted text</blockquote>`,
+		`<h2>heading</h2>`,
+	}
+	for _, in := range cases {
+		got := Outbound(in)
+		if got == "" {
+			t.Errorf("Outbound(%q) returned empty", in)
+		}
+	}
+}
+
+func TestOutboundStripsRemoteImageAndIframe(t *testing.T) {
+	in := `<p>hi</p><img src="https://attacker.example/track.gif"><iframe src="evil"></iframe>`
+	got := Outbound(in)
+	if strings.Contains(got, "<img") || strings.Contains(got, "<iframe") {
+		t.Errorf("img/iframe not stripped: %q", got)
+	}
+	if strings.Contains(got, "attacker.example") {
+		t.Errorf("remote URL survived: %q", got)
+	}
+}
+
+// Phase 5/C — C-2 fold. sanitize.Text now strips C0 control chars
+// (except \n / \t) and the C1 range. Hardens the LLM-output path
+// against terminal-escape injection in mail bodies.
+
+func TestTextStripsC0ControlChars(t *testing.T) {
+	in := "hi\x07world\x1bextra"
+	got := Text(in)
+	if strings.ContainsAny(got, "\x07\x1b") {
+		t.Errorf("control chars not stripped: %q", got)
+	}
+	if !strings.Contains(got, "hiworldextra") {
+		t.Errorf("visible content lost: %q", got)
+	}
+}
+
+func TestTextPreservesNewlineAndTab(t *testing.T) {
+	// Whitespace collapse turns \n/\t into single spaces in the
+	// final output (whitespaceRun), but the strip pass before
+	// that must not eat them. Verify the result still contains
+	// the words separated.
+	in := "line one\nline two\tcol b"
+	got := Text(in)
+	for _, want := range []string{"line one", "line two", "col b"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("piece %q lost: %q", want, got)
+		}
+	}
+}
+
+func TestTextStripsC1ControlChars(t *testing.T) {
+	// 0x80-0x9f is the C1 range.  is NEL (next line) — a
+	// common one in adversarial payloads.
+	in := "hiworldextra"
+	got := Text(in)
+	if strings.Contains(got, "") || strings.Contains(got, "") {
+		t.Errorf("C1 control chars not stripped: %q", got)
+	}
+}

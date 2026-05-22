@@ -67,6 +67,11 @@ func All(deps Deps) []mcp.Tool {
 		foldersCreate(deps),
 		foldersUpdate(deps),
 		foldersDelete(deps),
+		// Phase 5/C — drafts (outbound sanitization on the encrypt path).
+		mailDraftCreate(deps),
+		mailDraftUpdate(deps),
+		mailDraftDelete(deps),
+		mailDraftList(deps),
 	}
 }
 
