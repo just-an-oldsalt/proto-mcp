@@ -53,7 +53,7 @@ func mailList(deps Deps) mcp.Tool {
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
-				"folder":      {"type": "string", "description": "One of: inbox, sent, drafts, archive, trash, spam, all"},
+				"folder":      {"type": "string", "description": "One of: inbox, sent, drafts, archive, trash, spam. Pass \"all\" (or \"any\") to list across every folder."},
 				"label_id":    {"type": "string"},
 				"limit":       {"type": "integer", "minimum": 1, "maximum": 200, "default": 50},
 				"cursor":      {"type": "string", "description": "Opaque pagination cursor from a previous response"},
@@ -71,10 +71,21 @@ func mailList(deps Deps) mcp.Tool {
 					return nil, mcp.NewError(mcp.CodeInvalidParams, "mail_list: "+err.Error())
 				}
 			}
+			// Defect D1/D2: when the LLM passes folder="all" / "any" /
+			// "all_mail", interpret as "no folder filter" rather than
+			// a literal WHERE folder='all' (which would match only the
+			// historical fallback bucket primaryFolder used to write).
+			// Empty string already means no filter — these aliases
+			// match the LLM's natural-language intent.
+			folder := in.Folder
+			switch folder {
+			case "all", "any", "all_mail", "*":
+				folder = ""
+			}
 			opts := store.SearchOpts{
 				Limit: in.Limit,
 				Filter: store.ListFilter{
-					Folder:     in.Folder,
+					Folder:     folder,
 					LabelID:    in.LabelID,
 					UnreadOnly: in.UnreadOnly,
 				},

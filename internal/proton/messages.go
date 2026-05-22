@@ -144,9 +144,14 @@ func ToStoreMessage(m gpa.MessageMetadata) (store.Message, error) {
 
 // primaryFolder picks the canonical folder location for a message from
 // its label IDs. Proton stores virtual folders (AllMail/AllDrafts/AllSent)
-// alongside the real one; we prefer the concrete folder. Returns "all"
-// when no system folder is present (rare — usually only for custom
-// folders, which we'll wire through label.type=3 in a later phase).
+// alongside the real one; we prefer the concrete folder. Returns "" (no
+// system folder) for messages that only have user-defined labels — the
+// LLM-side "all" verb on mail_list explicitly maps to "no folder filter",
+// so a literal "all" value here would shadow that.
+//
+// Defects D1/D2 fix (2026-05-22): previously returned the literal "all",
+// which created a real bucket the LLM kept hitting when it asked for
+// "all folders." See DEFECTS.html.
 func primaryFolder(labelIDs []string) string {
 	priority := []struct {
 		id, name string
@@ -167,7 +172,7 @@ func primaryFolder(labelIDs []string) string {
 			return p.name
 		}
 	}
-	return "all"
+	return ""
 }
 
 // marshalAddressList renders a Proton address list into the

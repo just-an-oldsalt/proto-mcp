@@ -47,16 +47,30 @@ func parseQuery(input string) parsedQuery {
 		case "subject":
 			p.likes["subject"] = val
 		case "in":
-			p.folder = strings.ToLower(val)
+			lower := strings.ToLower(val)
+			// D1/D2: "in:all" is the DSL form of folder="all". Same
+			// LLM intent — list across every folder. Treat as no
+			// folder filter rather than a literal match.
+			switch lower {
+			case "all", "any", "all_mail", "*":
+				// leave p.folder empty → no folder filter
+			default:
+				p.folder = lower
+			}
 		case "has":
 			if strings.EqualFold(val, "attachment") || strings.EqualFold(val, "attachments") {
 				p.hasAttachment = true
 			}
-		case "before":
+		case "before", "until":
+			// Defect D3: "until" as an alias for "before". The LLM
+			// reaches for since/until naturally; was previously
+			// falling through to the unknown-prefix path and
+			// becoming a bare FTS term that matched nothing.
 			if t, ok := parseSearchDate(val); ok {
 				p.before = t
 			}
-		case "after":
+		case "after", "since":
+			// Defect D3: "since" alias for "after".
 			if t, ok := parseSearchDate(val); ok {
 				p.after = t
 			}

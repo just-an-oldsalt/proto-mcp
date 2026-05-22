@@ -178,3 +178,62 @@ func TestSearchSnippet(t *testing.T) {
 		t.Errorf("snippet didn't truncate: %q", hits[0].Snippet)
 	}
 }
+
+// TestSearchInAllSkipsFolderFilter pins the D1/D2 fix: "in:all" in
+// the DSL is a synonym for "no folder filter" rather than a literal
+// match. Same intent the LLM has when it asks for folder="all" on
+// mail_list. Aliases also include any / all_mail / *.
+func TestSearchInAllSkipsFolderFilter(t *testing.T) {
+	s := mustOpen(t)
+	seed(t, s)
+	ctx := context.Background()
+
+	for _, alias := range []string{"all", "any", "all_mail", "*"} {
+		hits, err := s.Search(ctx, "in:"+alias, SearchOpts{})
+		if err != nil {
+			t.Fatalf("in:%s: %v", alias, err)
+		}
+		// 3 seeded messages span inbox + archive. With folder
+		// filter cleared, all three come back.
+		if len(hits) != 3 {
+			t.Errorf("in:%s returned %d hits, want 3 (all seeded msgs)", alias, len(hits))
+		}
+	}
+}
+
+// TestSearchSinceUntilAliases pins the D3 fix: "since" and "until"
+// in the DSL alias to "after" and "before". Previously they fell
+// through to the unknown-prefix path and became bare FTS terms that
+// matched nothing, so date filters silently no-op'd.
+func TestSearchSinceUntilAliases(t *testing.T) {
+	s := mustOpen(t)
+	seed(t, s)
+	ctx := context.Background()
+
+	// since:2026-03-02 → m2 (2026-03-05) and m3 (2026-03-10), not m1 (2026-03-01).
+	hits, err := s.Search(ctx, "since:2026-03-02", SearchOpts{})
+	if err != nil {
+		t.Fatalf("since: %v", err)
+	}
+	if len(hits) != 2 {
+		t.Errorf("since:2026-03-02 → %d hits, want 2", len(hits))
+	}
+
+	// until:2026-03-09 (exclusive) → m1 (03-01) and m2 (03-05), not m3 (03-10).
+	hits, err = s.Search(ctx, "until:2026-03-09", SearchOpts{})
+	if err != nil {
+		t.Fatalf("until: %v", err)
+	}
+	if len(hits) != 2 {
+		t.Errorf("until:2026-03-09 → %d hits, want 2", len(hits))
+	}
+
+	// Combined.
+	hits, err = s.Search(ctx, "since:2026-03-02 until:2026-03-09", SearchOpts{})
+	if err != nil {
+		t.Fatalf("since+until: %v", err)
+	}
+	if len(hits) != 1 || hits[0].MessageID != "m2" {
+		t.Errorf("since+until → %d hits, want 1 (m2): %+v", len(hits), hits)
+	}
+}
