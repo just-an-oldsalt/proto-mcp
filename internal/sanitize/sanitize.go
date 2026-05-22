@@ -75,6 +75,22 @@ func HTML(input string) string {
 	return htmlPolicy.Sanitize(input)
 }
 
+// Outbound sanitizes LLM-supplied HTML before it's encrypted and
+// shipped to recipients. Same allowlist as HTML() — every reason
+// that policy was the right answer for INBOUND mail (scripts /
+// tracking pixels / remote-image refs hidden in exotic markup) is
+// equally a reason to enforce it OUTBOUND. The LLM should not be
+// able to send what we wouldn't accept from a stranger.
+//
+// Why an alias: the inbound and outbound use cases are different
+// enough that a future tightening on one shouldn't surprise the
+// other. Today Outbound is HTML(); if outbound ever needs different
+// rules (e.g. allow <a href> for explicit hyperlinks the LLM was
+// told to include), this is the seam.
+func Outbound(input string) string {
+	return HTML(input)
+}
+
 // quotedReplyLine matches lines that are pure quoted-reply markers
 // ("> something" or "> > something"). Used by Text() to drop the
 // in-line reply history — for snippets we want the new content,
@@ -114,6 +130,7 @@ func Text(input string) string {
 		return ""
 	}
 	out := htmlTagStripper.ReplaceAllString(input, " ")
+	out = stripControlChars(out)
 
 	var lines []string
 	for _, line := range strings.Split(out, "\n") {
@@ -125,6 +142,35 @@ func Text(input string) string {
 	out = strings.Join(lines, " ")
 	out = whitespaceRun.ReplaceAllString(out, " ")
 	return strings.TrimSpace(out)
+}
+
+// stripControlChars drops C0 (< 0x20, excluding \n and \t) and C1
+// (0x80–0x9F) control bytes from s. SECURITY C-2: terminal escape
+// sequences and zero-width control bytes embedded in mail bodies
+// can corrupt LLM output, hide content from human reviewers, or
+// break terminal rendering when the body is dumped to stdout via
+// CLI tools. The few control chars we keep (\n, \t) carry real
+// structure; everything else is at best invisible and at worst
+// adversarial.
+func stripControlChars(s string) string {
+	if s == "" {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		switch {
+		case r == '\n' || r == '\t':
+			b.WriteRune(r)
+		case r < 0x20:
+			// C0 control char — drop.
+		case r >= 0x7f && r <= 0x9f:
+			// DEL (0x7f) and C1 control range — drop.
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 // Snippet returns up to maxRunes runes from Text(input), suitable for
