@@ -312,18 +312,32 @@ Pulls the Phase 6 Keychain token-persistence story forward.</p>
     wrong for interactive UX.</li>
 </ul>
 
-<p><strong>1.5/E — <code>security/file-hardening</code></strong>. Small file-system + error
-hygiene fixes. Best to bundle.</p>
+<p><strong>1.5/E — <code>security/file-hardening</code></strong> <span class="tag">done</span>.
+Small file-system + error hygiene fixes.</p>
 <ul>
-  <li><span class="check">[ ]</span> <code>syscall.Umask(0o077)</code> at process start. <em>(M-3)</em></li>
-  <li><span class="check">[ ]</span> <code>os.Chmod(0o600)</code> on <code>store.db</code> +
-    <code>-wal</code> / <code>-shm</code> after first <code>Ping</code>. <em>(M-2)</em></li>
-  <li><span class="check">[ ]</span> Surface <code>AppVersion</code> in <code>whoami</code> output +
-    log warning that it impersonates Bridge. <em>(M-1)</em></li>
-  <li><span class="check">[ ]</span> Tighten <code>prompt.go</code> err handling (L-1),
-    reject unknown subcommand args via real flag parser (L-3), build
-    SQLite DSN via <code>net/url</code> (L-4), <code>go mod tidy</code> drop dupe
-    <code>golang.org/x/crypto</code> (L-6).</li>
+  <li><span class="check done">[x]</span> <code>syscall.Umask(0o077)</code> at the top of
+    <code>main()</code>. Every file the process creates is owner-only by
+    default. <em>(M-3)</em></li>
+  <li><span class="check done">[x]</span> <code>os.Chmod(0o600)</code> on <code>store.db</code> +
+    <code>-wal</code> / <code>-shm</code> after <code>Ping</code>. Defensive against callers
+    invoking us under a looser umask. <em>(M-2)</em></li>
+  <li><span class="check done">[x]</span> <code>whoami</code> output now includes the
+    <code>AppVersion</code> string and a one-line note that it's
+    impersonating Bridge. Sets expectations before Proton revokes
+    the appversion. <em>(M-1)</em></li>
+  <li><span class="check done">[x]</span> <code>requireNoArgs</code> rejects trailing
+    positional arguments on <code>login</code>/<code>logout</code>/<code>whoami</code>/<code>inspect</code>
+    — typos like <code>protonmcp whoami --json</code> now fail loudly instead
+    of being silently discarded. <em>(L-3)</em></li>
+  <li><span class="check done">[x]</span> SQLite DSN built via <code>net/url.Values</code>
+    instead of string concat. Closes the <code>?_pragma=…</code> injection
+    vector for the future <code>--db</code> flag. <em>(L-4)</em></li>
+  <li><span class="check done">[x]</span> <code>go mod tidy</code> dropped the duplicate
+    <code>golang.org/x/crypto v0.48.0</code>; <code>v0.50.0</code> is the only one
+    left. <em>(L-6)</em></li>
+  <li><span class="check done">[x]</span> New test <code>TestOnDiskPerms</code> verifies
+    a real on-disk store.db is created with mode 0o600 (independent
+    of process umask).</li>
 </ul>
 
 <p><strong>1.5/F — <code>ci/initial-workflows</code></strong>. Pulled forward from Phase 7.</p>

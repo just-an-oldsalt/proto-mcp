@@ -5,6 +5,8 @@ go 1.26.3
 require (
 	github.com/ProtonMail/go-proton-api v0.4.1-0.20260319112440-799673ddc2db
 	github.com/ProtonMail/gopenpgp/v2 v2.9.0-proton
+	github.com/go-resty/resty/v2 v2.7.0
+	github.com/keybase/go-keychain v0.0.1
 	github.com/pressly/goose/v3 v3.27.1
 	golang.org/x/term v0.42.0
 	modernc.org/sqlite v1.50.1
@@ -25,9 +27,7 @@ require (
 	github.com/emersion/go-message v0.16.0 // indirect
 	github.com/emersion/go-textwrapper v0.0.0-20200911093747-65d896831594 // indirect
 	github.com/emersion/go-vcard v0.0.0-20230331202150-f3d26859ccd3 // indirect
-	github.com/go-resty/resty/v2 v2.7.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
-	github.com/keybase/go-keychain v0.0.1 // indirect
 	github.com/mattn/go-isatty v0.0.21 // indirect
 	github.com/mfridman/interpolate v0.0.2 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
