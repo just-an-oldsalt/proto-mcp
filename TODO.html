@@ -103,7 +103,7 @@
   <li><span class="check done">[x]</span> Phase 2 — sanitize / body-fetch / search / sync (A/B/C/D all merged; SECURITY re-audit follow-ups B-1/2/3/4/9/10/12 folded in)</li>
   <li><span class="check done">[x]</span> Phase 3 — MCP server (A/B/C all merged; SECURITY C-8 + C-9 folded in; Foundational #3 enforced via trustguard.go)</li>
   <li><span class="check done">[x]</span> Phase 4 — policy + audit + Touch ID + middleware (A/B/C/D all merged; closes Foundational #4 default-deny, B-15 SIGHUP, M-4/M-5 sentinels, B-4 shared redactor)</li>
-  <li><span class="check">[ ]</span> Phase 5 — write tools (drafts, send, trash, label/folder CRUD)</li>
+  <li><span class="check done">[x]</span> Phase 5 — write tools (A/B/C/D all merged; C-2 closed; rate-limit + allowed_recipients middleware live)</li>
   <li><span class="check">[ ]</span> Phase 6 — Unix socket daemon, shim, launchd, Keychain, lock/unlock</li>
   <li><span class="check">[ ]</span> Phase 7 — polish (rate limit, log rotation, signing/notarization, docs)</li>
 </ul>
@@ -941,7 +941,12 @@ mail_delete:  { decision: prompt, confirm: true,  ttl: 0 }
   <li>Audit log growth is unbounded — Phase 6/7 polish adds rotation.</li>
 </ul>
 
-<h2>Phase 5 — Write tools <span class="tag">planning</span></h2>
+<h2>Phase 5 — Write tools <span class="tag">done</span></h2>
+<p><strong>Landed:</strong> #38 5/A state mutations (mark_read/unread, move, label, trash),
+#39 5/B labels+folders CRUD, #40 5/C drafts + outbound sanitize + C-2 control-char fold,
+#41 5/D send family + rate-limit + allowed_recipients middleware + per-tool prompt body.
+Closes C-2 (sanitize.Text strips C0/C1), the outbound HTML sanitization gap, and the
+Phase-4-deferred rate_limit / allowed_recipients enforcement.</p>
 <p>All gated through Phase 4 middleware. Pre-declared policy stubs
 already exist for every tool in <code>internal/policy/default.yaml</code>.
 Decomposed into four branches A/B/C/D, sequenced in increasing risk.</p>

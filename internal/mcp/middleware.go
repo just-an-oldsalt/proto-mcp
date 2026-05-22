@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"runtime/debug"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/just-an-oldsalt/proto-mcp/internal/approval"
@@ -15,6 +17,43 @@ import (
 	"github.com/just-an-oldsalt/proto-mcp/internal/policy"
 	"github.com/just-an-oldsalt/proto-mcp/internal/redact"
 )
+
+// firstDisallowedRecipient returns "" if every recipient in extracted
+// matches at least one entry in allowed; otherwise returns the first
+// non-matching address. Allowed entries can be either a full address
+// ("alice@example.com") or a domain suffix ("@example.com" matches
+// any address ending in @example.com).
+func firstDisallowedRecipient(extracted, allowed []string) string {
+	if len(allowed) == 0 {
+		return ""
+	}
+	full := map[string]struct{}{}
+	var domains []string
+	for _, a := range allowed {
+		if strings.HasPrefix(a, "@") {
+			domains = append(domains, strings.ToLower(a))
+		} else {
+			full[strings.ToLower(a)] = struct{}{}
+		}
+	}
+	for _, addr := range extracted {
+		lower := strings.ToLower(addr)
+		if _, ok := full[lower]; ok {
+			continue
+		}
+		matched := false
+		for _, d := range domains {
+			if strings.HasSuffix(lower, d) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return addr
+		}
+	}
+	return ""
+}
 
 // Middleware wires together the audit log, policy engine, and
 // approval broker around every tool call. It's an implementation
@@ -39,6 +78,13 @@ type Middleware struct {
 	audit    *audit.Writer
 	broker   *approval.Broker
 	resolver *caller.Resolver
+	rate     *rateLimiter
+}
+
+func (m *Middleware) ensureRate() {
+	if m.rate == nil {
+		m.rate = newRateLimiter()
+	}
 }
 
 // runTool is the per-call pipeline that replaces the inline
@@ -111,6 +157,34 @@ func (m *Middleware) runTool(ctx context.Context, t Tool, args json.RawMessage, 
 		_ = updateDecision(ctx, m.audit, auditID, string(decision))
 	}
 
+	// Phase 5/D — rate limit check happens BEFORE recipient
+	// allowlist and BEFORE approval. A flood of denied calls
+	// doesn't burn through approval prompts; a flood of
+	// approval-prompted calls doesn't bypass rate limits. Order:
+	// rate → recipients → broker → handler.
+	if pol != nil && pol.RateLimit != "" {
+		m.ensureRate()
+		key := t.Name + "|" + strconv.Itoa(callerInfo.PID)
+		if ok, reason := m.rate.Allow(key, pol.RateLimit); !ok {
+			outcome = audit.OutcomeDenied
+			errMsg = reason
+			return ErrorResult("%s denied: %s", t.Name, reason), nil
+		}
+	}
+
+	// Phase 5/D — recipient allowlist. Tool registers a Recipients
+	// extractor; middleware compares against pol.AllowedRecipients.
+	// Empty allowlist (zero or nil) = no restriction. Domain entries
+	// start with "@" (e.g. "@example.com" matches alice@example.com).
+	if pol != nil && len(pol.AllowedRecipients) > 0 && t.Recipients != nil {
+		extracted := t.Recipients(args)
+		if bad := firstDisallowedRecipient(extracted, pol.AllowedRecipients); bad != "" {
+			outcome = audit.OutcomeDenied
+			errMsg = "recipient " + bad + " not on allowlist"
+			return ErrorResult("%s denied: recipient %s not on allowlist", t.Name, bad), nil
+		}
+	}
+
 	switch decision {
 	case policy.DecisionDeny:
 		outcome = audit.OutcomeDenied
@@ -127,13 +201,20 @@ func (m *Middleware) runTool(ctx context.Context, t Tool, args json.RawMessage, 
 				"tool", t.Name)
 			return ErrorResult("tool %s requires approval but the approval broker is not available", t.Name), nil
 		}
+		// Phase 5/D — per-tool prompt body. Send-family tools build
+		// a literal "To: ... Subject: ..." string so the user reads
+		// exactly what they're approving in the NSAlert.
+		title, body := defaultPromptTitle(t.Name), defaultPromptBody(t.Name, args, pol)
+		if t.PromptBody != nil {
+			title, body = t.PromptBody(args)
+		}
 		src, perr := m.broker.Request(ctx, approval.Request{
 			Tool:   t.Name,
 			Caller: callerInfo,
 			Args:   args,
 			Policy: *pol,
-			Title:  defaultPromptTitle(t.Name),
-			Body:   defaultPromptBody(t.Name, args, pol),
+			Title:  title,
+			Body:   body,
 		})
 		if perr != nil {
 			outcome = audit.OutcomeDenied
