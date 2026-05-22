@@ -29,6 +29,14 @@ jobs:
       - name: go build
         run: go build ./...
 
+      - name: build touchid helper
+        # Phase 4/C — the Swift helper for Touch ID prompts. macos-14
+        # has swiftc preinstalled. We verify it BUILDS here even
+        # though no Go test exercises it; the broker tests use a
+        # POSIX shell-script fixture so they're fast and don't need
+        # biometric hardware.
+        run: make touchid
+
       - name: go test
         run: go test -race ./...
 
