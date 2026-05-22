@@ -941,23 +941,138 @@ mail_delete:  { decision: prompt, confirm: true,  ttl: 0 }
   <li>Audit log growth is unbounded — Phase 6/7 polish adds rotation.</li>
 </ul>
 
-<h2>Phase 5 — Write tools</h2>
-<p>All gated through Phase 4 middleware.</p>
+<h2>Phase 5 — Write tools <span class="tag">planning</span></h2>
+<p>All gated through Phase 4 middleware. Pre-declared policy stubs
+already exist for every tool in <code>internal/policy/default.yaml</code>.
+Decomposed into four branches A/B/C/D, sequenced in increasing risk.</p>
+
+<h3>Decisions locked from sign-off</h3>
 <ul>
-  <li><span class="check">[ ]</span> Drafts: <code>mail.draft_create</code>, <code>_update</code>, <code>_delete</code>, <code>_list</code>. These are
-    <code>allow</code> by policy (no external effect).</li>
-  <li><span class="check">[ ]</span> Send family: <code>mail.send</code>, <code>mail.send_draft</code>, <code>mail.reply</code>,
-    <code>mail.reply_all</code>, <code>mail.forward</code>. All <code>prompt</code> + <code>confirm: true</code> +
-    <code>rate_limit: 20/hour</code>. Confirmation prompt must include literal
-    recipient list and subject (per spec).</li>
-  <li><span class="check">[ ]</span> Trash and permanent delete: <code>mail.trash</code> (prompt, ttl 2m),
-    <code>mail.delete_permanent</code> (prompt + confirm). <code>mail.empty_trash</code> and
-    <code>mail.empty_spam</code> default to <code>deny</code> — opt-in only via user policy.</li>
-  <li><span class="check">[ ]</span> Organize: <code>mail.move</code>, <code>mail.archive</code>, label apply/remove, mark
-    read/unread, star/unstar. Mostly <code>allow</code> (reversible) except
-    <code>mail.move</code> which is <code>prompt + ttl: 5m</code>.</li>
-  <li><span class="check">[ ]</span> Labels/folders CRUD. Creation/rename = <code>prompt</code>; deletion =
-    <code>prompt + confirm</code>.</li>
+  <li><strong>Single <code>message_id</code> per tool call.</strong> No bulk
+    ops in v1 — Touch ID UX gets weird with "approve 47 messages",
+    and audit rows stay per-message-coherent.</li>
+  <li><strong>Outbound HTML sanitized</strong> through
+    <code>internal/sanitize</code> before encryption. Same bluemonday
+    policy as inbound. The LLM can format text but can't embed
+    scripts, tracking pixels, or remote-resource refs.</li>
+  <li><strong>No attachments in v1.</strong> Drafts + send are text /
+    sanitized HTML only. Attachment encryption is its own complexity
+    (per-recipient key packets, multipart); slot for Phase 7.</li>
+</ul>
+
+<h3>Branches in this phase</h3>
+
+<p><strong>5/A — <code>phase-5/state-changes</code></strong>. No deps.</p>
+<ul>
+  <li><span class="check">[ ]</span> <code>mail_mark_read</code>,
+    <code>mail_mark_unread</code> (allow-by-policy — reversible).</li>
+  <li><span class="check">[ ]</span> <code>mail_move</code>,
+    <code>mail_label</code>, <code>mail_trash</code> (prompt + ttl 5m).</li>
+  <li><span class="check">[ ]</span> Mirror updated after every state
+    change so subsequent <code>mail_list</code> calls see the new state
+    without waiting for the sync loop.</li>
+</ul>
+
+<p><strong>5/B — <code>phase-5/labels-folders</code></strong>. No deps.</p>
+<ul>
+  <li><span class="check">[ ]</span> <code>labels_create</code> /
+    <code>_update</code> / <code>_delete</code> (prompt; delete is
+    confirm:true).</li>
+  <li><span class="check">[ ]</span> <code>folders_create</code> /
+    <code>_update</code> / <code>_delete</code> (same shape; unified
+    via Proton's <code>LabelType</code> field).</li>
+</ul>
+
+<p><strong>5/C — <code>phase-5/drafts</code></strong>. Light dep on 5/A
+(body-cache invalidation).</p>
+<ul>
+  <li><span class="check">[ ]</span> <code>mail_draft_create</code>,
+    <code>_update</code>, <code>_delete</code>, <code>_list</code>. Body
+    encrypted by SDK with sender's keyring; persisted on Proton.</li>
+  <li><span class="check">[ ]</span>
+    <code>internal/sanitize.Outbound(html)</code> — new helper.
+    LLM-supplied HTML bodies run through it before encryption. Strips
+    scripts, iframes, remote images; keeps p / b / em / ul / ol / etc.
+    Same bluemonday policy as Phase 2's inbound path.</li>
+  <li><span class="check">[ ]</span> <strong>C-2 fold</strong>:
+    <code>sanitize.Text</code> strips C0 control chars
+    (<code>&lt; 0x20</code> except <code>\n</code>/<code>\t</code>) and
+    the C1 range. Five-line addition; closes the open audit finding.</li>
+</ul>
+
+<p><strong>5/D — <code>phase-5/send</code></strong>. Depends on 5/C.</p>
+<ul>
+  <li><span class="check">[ ]</span> <code>mail_send</code>,
+    <code>mail_send_draft</code>, <code>mail_reply</code>,
+    <code>mail_reply_all</code>, <code>mail_forward</code>.</li>
+  <li><span class="check">[ ]</span> Per-recipient encryption via SDK
+    helpers: <code>GetPublicKeys</code> → <code>SendPreferences</code>
+    map → <code>SendDraftReq.AddTextPackage</code> →
+    <code>SendDraft</code>. Internal Proton recipients get
+    <code>InternalScheme</code>; external get PGPMIME / PGPInline /
+    Clear depending on their published key.</li>
+  <li><span class="check">[ ]</span> <strong>Rate-limit enforcement</strong>
+    (new middleware stage). Token bucket keyed by
+    <code>(tool, caller.PID)</code>; limits parsed from policy's
+    <code>rate_limit: "20/hour"</code> field (parsed by Phase 4, until
+    now ignored). Bucket exceeded → handler doesn't run, audit
+    outcome=denied.</li>
+  <li><span class="check">[ ]</span> <strong>allowed_recipients enforcement</strong>
+    (new middleware stage). Accepts full addresses
+    (<code>alice@example.com</code>) and domain suffixes
+    (<code>@example.com</code>). Mismatch → denied BEFORE Touch ID
+    fires (no prompt for a doomed send).</li>
+  <li><span class="check">[ ]</span> <strong>Per-tool prompt body</strong>:
+    send-family NSAlert shows literal recipient list + subject
+    instead of the generic redacted-args dump. The user reads
+    exactly what they're approving.</li>
+  <li><span class="check">[ ]</span> <code>mail_delete_permanent</code>:
+    handler implemented; default policy remains <code>deny</code> so
+    only users who explicitly override get the verb.</li>
+</ul>
+
+<h3>Audits closed / touched</h3>
+<ul>
+  <li><strong>C-2</strong> (control char strip in
+    <code>sanitize.Text</code>) — folded into 5/C.</li>
+  <li><strong>Outbound HTML sanitization gap</strong> — closed by
+    5/C's <code>Outbound</code>.</li>
+  <li><strong>Rate-limit field unenforced</strong> — closed by 5/D
+    middleware stage.</li>
+  <li><strong>allowed_recipients unenforced</strong> — closed by 5/D
+    middleware stage.</li>
+</ul>
+
+<h3>Deferred to Phase 6/7</h3>
+<ul>
+  <li><strong>C-1</strong> (cached plaintext bodies at rest) — drafts
+    add to the surface; FS-level encryption / Keychain-wrapped DB
+    key still Phase 6.</li>
+  <li><strong>Attachments</strong> — Phase 7 polish.</li>
+  <li><strong><code>mail_empty_trash</code> /
+    <code>mail_empty_spam</code></strong> — spec mentions but no stubs
+    in default.yaml; Phase 7 once we know whether anyone wants them.</li>
+  <li><strong>Rate-limit persistence across restarts</strong> — token
+    bucket is in-memory in Phase 5; Phase 6's daemon model gives
+    persistent state.</li>
+</ul>
+
+<h3>Risks</h3>
+<ul>
+  <li><strong>First irreversible operation.</strong> <code>mail_send</code>
+    can't be undone. Touch ID + NSAlert + literal recipient list +
+    allowed_recipients allowlist are the safety nets. Plan: extra
+    cautious testing on a personal address before the first real
+    send.</li>
+  <li><strong>Send-path complexity.</strong> Per-recipient encryption
+    is the bulk of new code. SDK helpers hide the crypto; the
+    orchestration is ~200–300 lines. Bridge code is the reference if
+    we hit edge cases.</li>
+  <li><strong>HTML sanitization vs LLM intent.</strong> If the LLM
+    wants to send <code>&lt;a href="..."&gt;</code>, our inbound
+    policy strips the tag entirely. Outbound policy will do the
+    same for consistency — readers see what senders see. Revisit if
+    users complain.</li>
 </ul>
 
 <h2>Phase 6 — Daemon, IPC, multi-client</h2>
