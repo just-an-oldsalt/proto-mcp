@@ -493,35 +493,67 @@ Phase 1.5.</p>
     "apply diffs" concept that bleeds into Phase 6's daemon work.</li>
 </ul>
 
-<h3>Open questions for sign-off</h3>
+<h3>Decisions from sign-off</h3>
 <ul>
-  <li><strong>Q1. HTML policy strictness.</strong> Two choices:
-    <ol>
-      <li><em>UGCPolicy-style</em>: keep most structural HTML, just strip
-        scripts / iframes / remote images. LLM sees rich formatting.</li>
-      <li><em>Strict policy</em>: strip down to text + basic formatting
-        (<code>p / br / b / i / a</code>). Smaller prompt budget, less surface
-        for prompt-injection embedded in cleverly-encoded HTML.</li>
-    </ol>
-    Leaning toward (2) — prompt-injection risk is the dominant
-    concern, and an LLM can read either format. Confirm or override.</li>
-  <li><strong>Q2. Threading algorithm.</strong> Simple <code>In-Reply-To</code>
-    chasing, or full RFC 5322 jwz threading with subject-normalization
-    fallback? Latter handles mailing-list threads where some replies
-    drop the header. ~3x the code but matches what mail clients do.
-    Leaning simple-for-now, document the limitation.</li>
-  <li><strong>Q3. Sync CLI vs daemon-only.</strong> Should <code>protonmcp sync</code>
-    exist as a one-shot subcommand, or only run inside the future
-    daemon? Leaning yes-CLI for testability + the rare case where
-    a user wants to manually nudge the mirror forward.</li>
-  <li><strong>Q4. Search DSL scope.</strong> The list above (from / to /
-    subject / in / before / after / has:attachment) is the maximal
-    v1 set. Minimum viable is <code>from:</code> + <code>subject:</code> + bare
-    terms. Anything else you want trimmed?</li>
-  <li><strong>Q5. <code>protonmcp read</code> output shape.</strong> JSON dump
-    (consistent with eventual MCP responses) or human-readable?
-    Leaning JSON now, add <code>--pretty</code> later.</li>
+  <li><strong>Q1: Strict policy.</strong> bluemonday with a minimal
+    allowlist (<code>p</code>, <code>br</code>, <code>b</code>, <code>i</code>, <code>a</code>, <code>ul</code>, <code>ol</code>,
+    <code>li</code>, <code>h1</code>-<code>h4</code>, <code>blockquote</code>). Everything else
+    stripped. Scripts / iframes / remote images stripped unconditionally.
+    Prompt-injection risk dominates; LLM reads either format fine.</li>
+  <li><strong>Q2: Simple In-Reply-To chasing.</strong> Document the
+    mailing-list limitation; full RFC 5322 / jwz threading is its
+    own follow-up if it bites in practice.</li>
+  <li><strong>Q3: Yes,</strong> ship <code>protonmcp sync</code> as a one-shot CLI.
+    Phase 6 daemon will call into the same <code>RunOnce</code>.</li>
+  <li><strong>Q4: Full DSL.</strong> <code>from</code> / <code>to</code> / <code>subject</code> /
+    <code>in</code> / <code>before</code> / <code>after</code> / <code>has:attachment</code> + bare
+    FTS5 terms.</li>
+  <li><strong>Q5: JSON output</strong> for <code>protonmcp read</code>. Same shape
+    Phase 3's MCP server will return.</li>
 </ul>
+
+<h3>Re-audit folded into Phase 2 scope</h3>
+<p>The SECURITY.md re-audit (post-Phase-1.5, see file root for full
+findings) flagged items that interact directly with Phase 2 work.
+Treat these as line items <em>within</em> the relevant branch rather
+than separate fix-up branches:</p>
+<ul>
+  <li><strong>B-10 (secure_delete=ON)</strong> → blocker for 2/B.
+    Must land <strong>before</strong> body text starts hitting SQLite, or
+    deleted-message plaintext lingers in free pages. One pragma
+    line in <code>store.buildDSN</code>.</li>
+  <li><strong>B-9 (backfill unbounded)</strong> → handled in 2/C alongside
+    the sync-loop bounds work (max-pages + per-row size guard).
+    Same code shape, easier to land together.</li>
+  <li><strong>B-1 (SaltedKeyPass string round-trip)</strong>,
+    <strong>B-3 (Live value-passed → Zero never called)</strong> → both
+    keystore. Bundle into 2/B since 2/B is the first phase that
+    re-touches keystore.Load (for the encrypted body fetch the
+    Session needs the addr keyring, which the bundle already has,
+    so this isn't a strict dependency — just convenient).</li>
+  <li><strong>B-4 (denylist redactor with blind spots)</strong>,
+    <strong>updated foundational #1 (value-heuristic backstop)</strong> →
+    land alongside 2/B's first slog calls so the audit log work
+    in Phase 4 inherits a non-leaky filter.</li>
+  <li><strong>B-2, B-12 (debugTransport bypasses redactor; TOTP visible
+    on dump)</strong> → fold into 2/B as the debug-transport refactor
+    (strip Authorization / token-shaped values from <code>httputil.Dump</code>
+    output before printing).</li>
+  <li><strong>B-5 (weekly govulncheck on Ubuntu)</strong> → trivial,
+    one-line fix in the cron workflow. Cut as a <em>pre-Phase-2</em>
+    hotfix PR before 2/A starts; doesn't touch any code.</li>
+  <li><strong>B-7 (Keychain ACL: any user-process can read)</strong> →
+    paperwork only for Phase 2. Loud paragraph in SECURITY.md +
+    a warning line in <code>protonmcp login</code>'s success output. Cut
+    as the same hotfix PR as B-5.</li>
+  <li><strong>B-8 (silent logout best-effort)</strong> → one-line warning
+    in <code>cmd/protonmcp/login.go</code>'s revoke path. Hotfix PR.</li>
+  <li><strong>B-11 (inspect.go truncates but writes to stdout)</strong> →
+    gate behind PROTONMCP_DEBUG=1 in the same hotfix.</li>
+</ul>
+<p>Net Phase 2 plan: one <strong>pre-Phase-2 hotfix PR</strong> (B-5, B-7
+docs, B-8, B-11) lands first, then 2/A &rarr; 2/B (with B-1, B-3, B-4,
+B-10 folded in) &rarr; 2/D &rarr; 2/C (with B-9 folded in).</p>
 
 <h3>Gotchas inherited from the original spec</h3>
 <ul>
