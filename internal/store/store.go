@@ -107,12 +107,12 @@ func Open(path string) (*Store, error) {
 // independent concepts in our setup — see the gotchas list in TODO).
 func buildDSN(path string) (string, error) {
 	if path == ":memory:" {
-		// In-memory DBs reject most pragmas and don't survive across
-		// connections; busy_timeout and FK enforcement are still
-		// useful for the unit tests that use ":memory:".
 		v := url.Values{}
 		v.Add("_pragma", "busy_timeout(5000)")
 		v.Add("_pragma", "foreign_keys(on)")
+		// secure_delete is no-op for in-memory but keep it on so the
+		// test code path mirrors production.
+		v.Add("_pragma", "secure_delete(on)")
 		return path + "?" + v.Encode(), nil
 	}
 	v := url.Values{}
@@ -120,6 +120,12 @@ func buildDSN(path string) (string, error) {
 	v.Add("_pragma", "foreign_keys(on)")
 	v.Add("_pragma", "journal_mode(WAL)")
 	v.Add("_pragma", "synchronous(normal)")
+	// SECURITY B-10. With Phase 2 about to start caching plaintext
+	// message bodies, deleted rows must be zeroed in SQLite free
+	// pages rather than just marked unused. secure_delete is on a
+	// per-table basis when set via PRAGMA but applies to ALL writes
+	// when set as a DB-level pragma here.
+	v.Add("_pragma", "secure_delete(on)")
 	return path + "?" + v.Encode(), nil
 }
 

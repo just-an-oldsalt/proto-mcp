@@ -35,6 +35,13 @@ func runInspect(_ context.Context, _ []string) error {
 		}
 		return err
 	}
+	// SECURITY B-3. Inspect doesn't hand ownership of the secret
+	// material to a Session that would zero it on Close, so do it
+	// here. (Other Load callers — session.go's tryResume, login.go's
+	// runLogout — pass the Secret into Resume which transfers
+	// ownership; zeroing there would zero the bytes the Session
+	// is still using.)
+	defer stored.Zero()
 
 	fmt.Println("Keychain blob contents:")
 	fmt.Printf("  Email:        %s\n", stored.Email)

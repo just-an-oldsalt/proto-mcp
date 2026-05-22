@@ -200,6 +200,84 @@ func (s *Store) GetSyncState(ctx context.Context, key string) (string, error) {
 	return v, nil
 }
 
+// BodyTTL is how long a cached body counts as fresh. After this, the
+// row's body_* columns are treated as missing (GetCachedBody returns
+// ErrNotFound). Re-fetch will replace them. The sync loop's
+// invalidate-on-update is the primary mechanism for staleness; this
+// TTL is the defense-in-depth backstop. Per design spec.
+const BodyTTL = 24 * time.Hour
+
+// CachedBody holds the post-decryption text + sanitized HTML for a
+// single message, plus the cache timestamp.
+type CachedBody struct {
+	Text     string
+	HTML     string
+	CachedAt time.Time
+
+	// ThreadID — if set, also persisted to messages.thread_id when
+	// passed to SetCachedBody. Phase 2 uses this to reconstruct
+	// threading from RFC 2822 In-Reply-To / References headers after
+	// the body fetch.
+	ThreadID string
+}
+
+// SetCachedBody writes the decrypted-and-sanitized body for a message.
+// Updates body_text / body_html / body_cached_at on the row. If
+// b.ThreadID is non-empty, also overwrites messages.thread_id.
+func (s *Store) SetCachedBody(ctx context.Context, msgID string, b CachedBody) error {
+	if b.CachedAt.IsZero() {
+		b.CachedAt = time.Now().UTC()
+	}
+	if b.ThreadID == "" {
+		_, err := s.DB.ExecContext(ctx,
+			`UPDATE messages SET body_text = ?, body_html = ?, body_cached_at = ? WHERE id = ?`,
+			b.Text, b.HTML, b.CachedAt.Unix(), msgID,
+		)
+		if err != nil {
+			return fmt.Errorf("set cached body %s: %w", msgID, err)
+		}
+		return nil
+	}
+	_, err := s.DB.ExecContext(ctx,
+		`UPDATE messages SET body_text = ?, body_html = ?, body_cached_at = ?, thread_id = ? WHERE id = ?`,
+		b.Text, b.HTML, b.CachedAt.Unix(), b.ThreadID, msgID,
+	)
+	if err != nil {
+		return fmt.Errorf("set cached body %s: %w", msgID, err)
+	}
+	return nil
+}
+
+// GetCachedBody returns the cached body for a message, or ErrNotFound
+// if the body has never been cached OR the cache is older than
+// BodyTTL. A stale cache is silently treated as missing; the caller
+// is expected to fall through to a fresh fetch.
+func (s *Store) GetCachedBody(ctx context.Context, msgID string) (CachedBody, error) {
+	var (
+		text     sql.NullString
+		html     sql.NullString
+		cachedAt sql.NullInt64
+	)
+	err := s.DB.QueryRowContext(ctx,
+		`SELECT body_text, body_html, body_cached_at FROM messages WHERE id = ?`,
+		msgID,
+	).Scan(&text, &html, &cachedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return CachedBody{}, ErrNotFound
+	}
+	if err != nil {
+		return CachedBody{}, fmt.Errorf("get cached body %s: %w", msgID, err)
+	}
+	if !cachedAt.Valid || cachedAt.Int64 == 0 {
+		return CachedBody{}, ErrNotFound
+	}
+	ts := time.Unix(cachedAt.Int64, 0).UTC()
+	if time.Since(ts) > BodyTTL {
+		return CachedBody{}, ErrNotFound
+	}
+	return CachedBody{Text: text.String, HTML: html.String, CachedAt: ts}, nil
+}
+
 func boolToInt(b bool) int {
 	if b {
 		return 1
