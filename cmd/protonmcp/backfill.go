@@ -55,22 +55,15 @@ func runBackfill(ctx context.Context, args []string) error {
 	}
 	defer st.Close()
 
-	creds, err := collectCredentials()
-	if err != nil {
-		return err
-	}
-	defer creds.Zero()
-
-	mgr := protonclient.NewManager("")
-	defer mgr.Close()
-
-	loginCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	acquireCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
-	sess, err := protonclient.Login(loginCtx, mgr, creds)
+	bundle, err := acquireSession(acquireCtx)
 	if err != nil {
 		return err
 	}
-	defer sess.Close()
+	defer bundle.Close()
+	defer bundle.Session.Close()
+	sess := bundle.Session
 
 	cursor, err := sess.LatestEventID(ctx)
 	if err != nil {
@@ -84,7 +77,7 @@ func runBackfill(ctx context.Context, args []string) error {
 	}
 	fmt.Printf("Account has %d messages.\n", total)
 	if total > *confirmThreshold && !*yes {
-		ans, err := cli.PromptLine(fmt.Sprintf("Drain all %d into local store? [y/N]: ", total))
+		ans, err := cli.PromptLine(ctx, fmt.Sprintf("Drain all %d into local store? [y/N]: ", total))
 		if err != nil {
 			return err
 		}

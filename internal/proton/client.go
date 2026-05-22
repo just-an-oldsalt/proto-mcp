@@ -10,14 +10,42 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httputil"
+	"os"
 	"sync"
 	"time"
 
 	gpa "github.com/ProtonMail/go-proton-api"
 	"github.com/ProtonMail/gopenpgp/v2/crypto"
+	"github.com/go-resty/resty/v2"
 
 	"github.com/just-an-oldsalt/proto-mcp/internal/secret"
 )
+
+// debugTransport wraps an http.RoundTripper to dump every request and
+// response (headers + body) to out. Wired in via PROTONMCP_DEBUG=1.
+// Bodies are dumped in full — only enable while reproducing a bug,
+// and remember the output contains refresh tokens.
+type debugTransport struct {
+	next http.RoundTripper
+	out  *os.File
+}
+
+func (d *debugTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	reqDump, err := httputil.DumpRequestOut(req, true)
+	if err == nil {
+		fmt.Fprintf(d.out, "\n=== REQUEST ===\n%s\n", reqDump)
+	}
+	resp, rtErr := d.next.RoundTrip(req)
+	if resp != nil {
+		respDump, err := httputil.DumpResponse(resp, true)
+		if err == nil {
+			fmt.Fprintf(d.out, "\n=== RESPONSE ===\n%s\n", respDump)
+		}
+	}
+	return resp, rtErr
+}
 
 // shutdownTimeout caps how long the session-revoke + close path is
 // willing to wait. Five seconds is generous for a single HTTPS round-
@@ -47,6 +75,17 @@ const HostURL = "https://mail-api.proton.me"
 // pretending to be Bridge.
 const AppVersion = "macos-bridge@3.24.2"
 
+// UserAgent is the User-Agent header sent on every API request.
+//
+// Bridge installs an AddPreRequestHook to set this; without it, the Go
+// http.Client defaults to "Go-http-client/1.1". Empirically the default
+// is enough to trip Proton's anti-abuse: refresh tokens get marked as
+// single-use even after a clean rotation, which manifests as "first
+// resume works, every subsequent one 400s". Mimicking Bridge's User-
+// Agent (alongside the existing AppVersion / cookie jar mimicry) is
+// what keeps the session a session.
+const UserAgent = "ProtonMail-Bridge/3.24.2 (macOS)"
+
 // Credentials is everything needed to bring the daemon from cold start
 // to a fully-unlocked session. MailboxPassword only applies when the
 // account uses the legacy two-password mode; for one-password accounts
@@ -67,8 +106,8 @@ type Credentials struct {
 	MailboxPassword secret.Secret // empty falls back to Password
 	TOTP            secret.Secret // required if account has TOTP 2FA
 
-	AskTOTP            func() (secret.Secret, error)
-	AskMailboxPassword func() (secret.Secret, error)
+	AskTOTP            func(context.Context) (secret.Secret, error)
+	AskMailboxPassword func(context.Context) (secret.Secret, error)
 }
 
 // Zero wipes every secret field. Idempotent.
@@ -78,12 +117,21 @@ func (c *Credentials) Zero() {
 	c.TOTP.Zero()
 }
 
-// Session is the unlocked-state bundle returned by Login. The caller owns
-// the client and is responsible for calling Close when done; the keyrings
-// hold decrypted PGP material and should be cleared as soon as feasible.
+// Session is the unlocked-state bundle returned by Login or Resume.
+// The caller owns the client and is responsible for calling Close
+// when done; the keyrings hold decrypted PGP material and should be
+// cleared as soon as feasible.
 //
-// Close is idempotent (guarded by sync.Once), so it's safe to wire from
-// multiple defer / signal paths without risking double-revoke or panic.
+// Close is idempotent (guarded by sync.Once), so it's safe to wire
+// from multiple defer / signal paths without risking double-revoke or
+// panic.
+//
+// Email / UID / AccessToken / RefreshToken / SaltedKeyPass let callers
+// persist the session to the OS Keychain after Login and use Resume
+// on a later run. AccessToken / RefreshToken are rotated in place by
+// the SDK's AuthHandler when Proton hands back a fresh pair; callers
+// that persist these to disk subscribe via OnAuthUpdate to write the
+// rotated values back.
 type Session struct {
 	Client       *gpa.Client
 	User         gpa.User
@@ -93,7 +141,50 @@ type Session struct {
 	PasswordMode gpa.PasswordMode
 	TwoFA        gpa.TwoFAStatus
 
+	Email         string
+	UID           string
+	SaltedKeyPass secret.Secret
+
+	authMu       sync.Mutex
+	AccessToken  string
+	RefreshToken string
+
+	// OnAuthUpdate, if set, fires whenever the SDK hands us a rotated
+	// auth bundle. Session.AccessToken / RefreshToken have already been
+	// updated by the time this is called. Callers wire this to persist
+	// the rotated tokens so the next process can resume.
+	OnAuthUpdate func(uid, accessToken, refreshToken string)
+
 	closeOnce sync.Once
+}
+
+// Tokens returns the current (rotating) access + refresh tokens under
+// the auth mutex.
+func (s *Session) Tokens() (access, refresh string) {
+	s.authMu.Lock()
+	defer s.authMu.Unlock()
+	return s.AccessToken, s.RefreshToken
+}
+
+// installAuthHandler wires the SDK's AuthHandler into the session so
+// rotated tokens are captured and (optionally) forwarded to
+// OnAuthUpdate. Called by both Login and Resume after they construct
+// a Client.
+func (s *Session) installAuthHandler() {
+	if s.Client == nil {
+		return
+	}
+	s.Client.AddAuthHandler(func(auth gpa.Auth) {
+		s.authMu.Lock()
+		s.AccessToken = auth.AccessToken
+		s.RefreshToken = auth.RefreshToken
+		cb := s.OnAuthUpdate
+		uid := s.UID
+		s.authMu.Unlock()
+		if cb != nil {
+			cb(uid, auth.AccessToken, auth.RefreshToken)
+		}
+	})
 }
 
 // PrimaryAddress returns the user's primary (Order == 1) enabled address,
@@ -116,24 +207,33 @@ func (s *Session) PrimaryAddress() (gpa.Address, bool) {
 	return fallback, haveFallback
 }
 
-// Close revokes the session on the server and zeroes local keyring
-// state. Idempotent (guarded by sync.Once); subsequent calls are no-ops.
+// Close releases local crypto + HTTP state for the session. It does
+// NOT revoke the session on the Proton server — doing so would kill
+// the refresh token we just stored in the Keychain and force a fresh
+// SRP login on every subcommand. For explicit revoke (logout, or
+// abandoning a partial login), call CloseAndRevoke instead.
 //
-// Close builds its own short-timeout context for the server-side
-// AuthDelete call rather than taking one from the caller. This means
-// a Ctrl-C-cancelled parent context can't sneak through and skip the
-// revoke step — every Close attempt gets a fresh ~5s window. A hung
-// network can't block shutdown for longer than that.
+// Idempotent via sync.Once.
 func (s *Session) Close() {
 	s.closeOnce.Do(func() {
-		if s.UserKR != nil {
-			s.UserKR.ClearPrivateParams()
-			s.UserKR = nil
+		s.releaseLocal()
+		if s.Client != nil {
+			s.Client.Close()
+			s.Client = nil
 		}
-		for id, kr := range s.AddrKRs {
-			kr.ClearPrivateParams()
-			delete(s.AddrKRs, id)
-		}
+	})
+}
+
+// CloseAndRevoke is Close plus a server-side AuthDelete. Use from the
+// logout subcommand or error-recovery paths that explicitly want the
+// session destroyed on Proton's side. The AuthDelete runs against a
+// fresh 5-second context so a cancelled parent ctx (Ctrl-C) cannot
+// smuggle through and skip the revoke step.
+//
+// Idempotent via sync.Once.
+func (s *Session) CloseAndRevoke() {
+	s.closeOnce.Do(func() {
+		s.releaseLocal()
 		if s.Client != nil {
 			ctx, cancel := detachedShutdownCtx()
 			defer cancel()
@@ -144,22 +244,67 @@ func (s *Session) Close() {
 	})
 }
 
-// NewManager constructs a Manager pre-configured for production Proton
-// Mail. Tests can swap in a different host via the host arg (pass "" for
-// the default).
-func NewManager(host string) *gpa.Manager {
-	if host == "" {
-		host = HostURL
+// releaseLocal zeroes keyring material and the salted mailbox pass.
+// Not protected by closeOnce — callers (Close, CloseAndRevoke) own
+// the Once guard.
+func (s *Session) releaseLocal() {
+	if s.UserKR != nil {
+		s.UserKR.ClearPrivateParams()
+		s.UserKR = nil
 	}
-	return gpa.New(
-		gpa.WithHostURL(host),
+	for id, kr := range s.AddrKRs {
+		kr.ClearPrivateParams()
+		delete(s.AddrKRs, id)
+	}
+	s.SaltedKeyPass.Zero()
+}
+
+// NewManager constructs a Manager pre-configured for production Proton
+// Mail with the given cookie jar attached. Pass nil for a fresh
+// in-memory jar — but note that for any flow that needs to RESUME a
+// session in a future process (login → exit → whoami), the jar must
+// be preloaded with the cookies saved at login time. See NewCookieJar,
+// JarCookies, and PreloadJar in cookies.go.
+//
+// A pre-request hook is installed to set the User-Agent header on
+// every outgoing request. See the UserAgent doc comment for why this
+// matters.
+//
+// Set PROTONMCP_DEBUG=1 in the environment to capture every HTTP
+// request / response via a custom RoundTripper logged to stderr. The
+// dump includes full headers and bodies — DO NOT use this against
+// your real account except temporarily for debugging, and never paste
+// the output anywhere with secrets in it (refresh tokens, etc.).
+func NewManager(jar http.CookieJar) *gpa.Manager {
+	if jar == nil {
+		jar = NewCookieJar()
+	}
+	opts := []gpa.Option{
+		gpa.WithHostURL(HostURL),
 		gpa.WithAppVersion(AppVersion),
-	)
+		gpa.WithCookieJar(jar),
+	}
+	if os.Getenv("PROTONMCP_DEBUG") != "" {
+		fmt.Fprintln(os.Stderr,
+			"warning: PROTONMCP_DEBUG=1 — every HTTP request and response "+
+				"(including refresh tokens) is being dumped to stderr. "+
+				"Disable before sharing logs.")
+		opts = append(opts, gpa.WithTransport(&debugTransport{
+			next: http.DefaultTransport,
+			out:  os.Stderr,
+		}))
+	}
+	m := gpa.New(opts...)
+	m.AddPreRequestHook(func(_ *resty.Client, req *resty.Request) error {
+		req.SetHeader("User-Agent", UserAgent)
+		return nil
+	})
+	return m
 }
 
 func doTOTP(ctx context.Context, client *gpa.Client, creds *Credentials) error {
 	if creds.TOTP.Empty() && creds.AskTOTP != nil {
-		v, err := creds.AskTOTP()
+		v, err := creds.AskTOTP(ctx)
 		if err != nil {
 			return fmt.Errorf("prompt totp: %w", err)
 		}
@@ -194,6 +339,26 @@ func Login(ctx context.Context, mgr *gpa.Manager, creds *Credentials) (*Session,
 	if err != nil {
 		return nil, fmt.Errorf("srp login: %w", err)
 	}
+
+	// Build the Session shell + install the AuthHandler immediately,
+	// before any subsequent API call. Proton can rotate tokens
+	// transparently in response to Auth2FA / GetUser / GetAddresses /
+	// GetSalts (the SDK's auto-refresh-on-401 path calls AuthHandler
+	// with the new bundle). Without an early install, a silent
+	// mid-Login rotation would leave the Session holding the
+	// *original* tokens from NewClientWithLogin — the Keychain blob
+	// would then be saved with stale credentials and the next process
+	// would hit 400 / 422 on its own resume.
+	sess := &Session{
+		Client:       client,
+		Email:        creds.Email,
+		UID:          auth.UID,
+		AccessToken:  auth.AccessToken,
+		RefreshToken: auth.RefreshToken,
+		PasswordMode: auth.PasswordMode,
+		TwoFA:        auth.TwoFA.Enabled,
+	}
+	sess.installAuthHandler()
 
 	// Use a detached context for revoke. The caller's ctx may be cancelled
 	// (Ctrl-C mid-login), and AuthDelete on a cancelled context would
@@ -234,7 +399,7 @@ func Login(ctx context.Context, mgr *gpa.Manager, creds *Credentials) (*Session,
 			cleanup()
 			return nil, errors.New("proton: account uses two-password mode; mailbox password required")
 		}
-		v, err := creds.AskMailboxPassword()
+		v, err := creds.AskMailboxPassword(ctx)
 		if err != nil {
 			cleanup()
 			return nil, fmt.Errorf("prompt mailbox password: %w", err)
@@ -279,28 +444,29 @@ func Login(ctx context.Context, mgr *gpa.Manager, creds *Credentials) (*Session,
 		cleanup()
 		return nil, fmt.Errorf("salt for primary key: %w", err)
 	}
-	// Wrap and zero the raw buffer right away — saltedKeyPass is just
-	// as sensitive as the mailbox password (it derives the user PGP
-	// key) and we don't want it sitting on the heap after Unlock.
+	// Wrap and zero the raw buffer right away. saltedKeyPass is just as
+	// sensitive as the mailbox password (it derives the user PGP key);
+	// we keep it on the Session so callers can persist it to the
+	// Keychain for resume, but the raw buffer goes away.
 	saltedPass := secret.New(saltedRaw)
 	for i := range saltedRaw {
 		saltedRaw[i] = 0
 	}
-	defer saltedPass.Zero()
 
 	userKR, addrKRs, err := gpa.Unlock(user, addrs, saltedPass.Bytes(), nil)
 	if err != nil {
+		saltedPass.Zero()
 		cleanup()
 		return nil, fmt.Errorf("unlock keyring: %w (wrong mailbox password?)", err)
 	}
 
-	return &Session{
-		Client:       client,
-		User:         user,
-		Addresses:    addrs,
-		UserKR:       userKR,
-		AddrKRs:      addrKRs,
-		PasswordMode: auth.PasswordMode,
-		TwoFA:        auth.TwoFA.Enabled,
-	}, nil
+	sess.User = user
+	sess.Addresses = addrs
+	sess.UserKR = userKR
+	sess.AddrKRs = addrKRs
+	sess.SaltedKeyPass = saltedPass
+	// AccessToken / RefreshToken / UID were populated when sess was
+	// constructed above; if the SDK rotated them during the API calls
+	// the AuthHandler has already kept them current under the mutex.
+	return sess, nil
 }
