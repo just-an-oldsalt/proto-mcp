@@ -2,11 +2,41 @@ package mcptools
 
 import (
 	"encoding/json"
+	"regexp"
 	"testing"
 
 	"github.com/just-an-oldsalt/proto-mcp/internal/mcp"
 	"github.com/just-an-oldsalt/proto-mcp/internal/store"
 )
+
+// claudeDesktopNamePattern is the regex Claude Desktop validates tool
+// names against on its end. Keep this guard so a future tool with a
+// dot, space, or other reserved char gets caught by `go test` before
+// it gets caught by a confused user — which is how we found this in
+// the first place. Q1 of the Phase 3 planning leaned underscores;
+// I was talked into dots; live test surfaced the validation error
+// "FrontendRemoteMcpToolDefinition.name: String should match pattern
+// '^[a-zA-Z0-9_-]{1,64}$'".
+var claudeDesktopNamePattern = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
+
+// TestToolNamesAreClaudeDesktopCompatible enforces the
+// [a-zA-Z0-9_-]{1,64} constraint Claude Desktop's UI applies. The
+// MCP spec itself doesn't restrict tool names this tightly, but the
+// desktop client does, and failing this check means tools/list
+// responses get rejected wholesale.
+func TestToolNamesAreClaudeDesktopCompatible(t *testing.T) {
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	for _, tl := range All(Deps{Store: st}) {
+		if !claudeDesktopNamePattern.MatchString(tl.Name) {
+			t.Errorf("tool name %q does not match Claude Desktop's required pattern %q",
+				tl.Name, claudeDesktopNamePattern)
+		}
+	}
+}
 
 // TestAllToolsBuild verifies every tool's Tool literal constructs
 // cleanly: non-empty name, description, input schema, valid JSON in
@@ -29,15 +59,15 @@ func TestAllToolsBuild(t *testing.T) {
 	}
 
 	want := map[string]bool{
-		"account.whoami":        false,
-		"mail.list":             false,
-		"mail.search":           false,
-		"mail.read":             false,
-		"mail.read_thread":      false,
-		"mail.list_attachments": false,
-		"labels.list":           false,
-		"folders.list":          false,
-		"mail.sync":             false,
+		"account_whoami":        false,
+		"mail_list":             false,
+		"mail_search":           false,
+		"mail_read":             false,
+		"mail_read_thread":      false,
+		"mail_list_attachments": false,
+		"labels_list":           false,
+		"folders_list":          false,
+		"mail_sync":             false,
 	}
 	for _, tl := range tools {
 		if _, ok := want[tl.Name]; !ok {

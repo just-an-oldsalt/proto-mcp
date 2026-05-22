@@ -2,22 +2,22 @@
 // wires into the JSON-RPC server. Each tool is a thin handler over
 // the work the lower layers already do:
 //
-//	mail.list                store.ListMessages
-//	mail.search              store.Search
-//	mail.read                proton.FetchAndDecryptMessage + body cache
-//	mail.read_thread         store + body cache, oldest-first
-//	mail.list_attachments    messages.raw_json parse
-//	labels.list              store.labels (type=1)
-//	folders.list             store.labels (type=3)
-//	mail.sync                internal/sync.RunOnce
-//	account.whoami           proton.Session info
+//	mail_list                store.ListMessages
+//	mail_search              store.Search
+//	mail_read                proton.FetchAndDecryptMessage + body cache
+//	mail_read_thread         store + body cache, oldest-first
+//	mail_list_attachments    messages.raw_json parse
+//	labels_list              store.labels (type=1)
+//	folders_list             store.labels (type=3)
+//	mail_sync                internal/sync.RunOnce
+//	account_whoami           proton.Session info
 //
 // Decisions from Phase 3 planning sign-off:
 //
 //	Q1 dotted names           Q4 eager session at initialize
 //	Q2 structured + outputSchema  Q5 oldest-first threads
-//	Q3 opaque base64 cursors  Q6 both text + html in mail.read
-//	Q7 mail.sync as a tool, model decides when to call it
+//	Q3 opaque base64 cursors  Q6 both text + html in mail_read
+//	Q7 mail_sync as a tool, model decides when to call it
 package mcptools
 
 import (
@@ -31,9 +31,9 @@ import (
 // hold the references via closures in the Handler.
 type Deps struct {
 	// Session is the unlocked Proton session. Tools that need to
-	// hit the API (mail.read on cache miss, mail.sync) reach
-	// through this. Read-from-mirror tools (mail.list, mail.search,
-	// labels.list) don't touch it.
+	// hit the API (mail_read on cache miss, mail_sync) reach
+	// through this. Read-from-mirror tools (mail_list, mail_search,
+	// labels_list) don't touch it.
 	Session *protonclient.Session
 
 	// Store is the local SQLite mirror.
@@ -59,7 +59,7 @@ func All(deps Deps) []mcp.Tool {
 }
 
 // store.ListFilter (in internal/store) replaced an earlier
-// listFilter sketch here — mail.list and mail.read_thread both build
+// listFilter sketch here — mail_list and mail_read_thread both build
 // store.SearchOpts with the right filter and call store.Search with
 // an empty query string. No package-local filter type needed.
 

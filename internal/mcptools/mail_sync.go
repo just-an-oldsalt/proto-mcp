@@ -8,7 +8,7 @@ import (
 	syncpkg "github.com/just-an-oldsalt/proto-mcp/internal/sync"
 )
 
-// mail.sync is the model-driven freshness primitive from Phase-3
+// mail_sync is the model-driven freshness primitive from Phase-3
 // plan Q7. The description is the lever — clear contextual guidance
 // is what makes "call sync when recency matters, skip when it
 // doesn't" work without us hard-coding heuristics on the server side.
@@ -26,9 +26,9 @@ func mailSync(deps Deps) mcp.Tool {
 	}
 
 	return mcp.Tool{
-		Name: "mail.sync",
+		Name: "mail_sync",
 		Description: "Pull recent changes from Proton into the local mirror. " +
-			"Call this BEFORE mail.list or mail.search when the user's question implies " +
+			"Call this BEFORE mail_list or mail_search when the user's question implies " +
 			"they're looking for recent activity: \"just got\", \"today\", \"this morning\", " +
 			"\"latest from X\", anything time-anchored to now. " +
 			"Skip it for historical or open-ended queries: \"any emails about X\", \"from last year\", " +
@@ -65,7 +65,7 @@ func mailSync(deps Deps) mcp.Tool {
 							"Run `protonmcp backfill` from the command line to re-seed.",
 					), nil
 				}
-				return mcp.ErrorResult("mail.sync failed: %v", err), nil
+				return mcp.ErrorResult("mail_sync failed: %v", err), nil
 			}
 			return mcp.StructuredResult(result{
 				StartCursor:      res.StartCursor,

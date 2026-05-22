@@ -64,7 +64,7 @@ func mailListAttachments(deps Deps) mcp.Tool {
 	}
 
 	return mcp.Tool{
-		Name: "mail.list_attachments",
+		Name: "mail_list_attachments",
 		Description: "List attachment metadata for a message (id / filename / mime_type / size / inline). " +
 			"Does NOT download attachment bytes — that's a separate tool. " +
 			"Triggers a single API call to fetch the full message if it's not already cached locally.",
@@ -101,17 +101,17 @@ func mailListAttachments(deps Deps) mcp.Tool {
 		Handler: func(ctx mcp.Context, raw json.RawMessage) (*mcp.ToolResult, error) {
 			var in input
 			if err := json.Unmarshal(raw, &in); err != nil {
-				return nil, mcp.NewError(mcp.CodeInvalidParams, "mail.list_attachments: "+err.Error())
+				return nil, mcp.NewError(mcp.CodeInvalidParams, "mail_list_attachments: "+err.Error())
 			}
 			if in.MessageID == "" {
-				return nil, mcp.NewError(mcp.CodeInvalidParams, "mail.list_attachments: message_id is required")
+				return nil, mcp.NewError(mcp.CodeInvalidParams, "mail_list_attachments: message_id is required")
 			}
 
 			// The backfilled raw_json (B-9 truncated to 1 MiB) only
 			// carries NumAttachments, not the attachment array — the
 			// MessageMetadata API response doesn't include it. To get
 			// real attachment metadata we need the full message,
-			// which we cache anyway via mail.read. So: hit the
+			// which we cache anyway via mail_read. So: hit the
 			// local body cache first (FetchAndDecryptMessage
 			// populates attachments on the proton-side struct, but
 			// we don't currently persist the attachment list — Phase
@@ -125,7 +125,7 @@ func mailListAttachments(deps Deps) mcp.Tool {
 			// need decrypt for attachment metadata.
 			m, err := deps.Session.Client.GetMessage(ctx.Std, in.MessageID)
 			if err != nil {
-				return mcp.ErrorResult("mail.list_attachments: fetch failed: %v", err), nil
+				return mcp.ErrorResult("mail_list_attachments: fetch failed: %v", err), nil
 			}
 
 			out := result{MessageID: in.MessageID}

@@ -18,13 +18,13 @@ func mailSearch(deps Deps) mcp.Tool {
 	}
 
 	return mcp.Tool{
-		Name: "mail.search",
+		Name: "mail_search",
 		Description: "Full-text + structured search over the local mirror. Query DSL: " +
 			"from:alice  to:bob  subject:\"gear list\"  in:inbox  " +
 			"before:2026-01-01  after:2025-12-01  has:attachment  " +
 			"plus bare full-text terms (subject + body + sender). " +
 			"All criteria are AND-joined. Read-only — does NOT pull fresh data from Proton; " +
-			"call mail.sync first if the user implies they want recent activity.",
+			"call mail_sync first if the user implies they want recent activity.",
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
@@ -39,10 +39,10 @@ func mailSearch(deps Deps) mcp.Tool {
 		Handler: func(ctx mcp.Context, raw json.RawMessage) (*mcp.ToolResult, error) {
 			var in input
 			if err := json.Unmarshal(raw, &in); err != nil {
-				return nil, mcp.NewError(mcp.CodeInvalidParams, "mail.search: "+err.Error())
+				return nil, mcp.NewError(mcp.CodeInvalidParams, "mail_search: "+err.Error())
 			}
 			if in.Query == "" {
-				return nil, mcp.NewError(mcp.CodeInvalidParams, "mail.search: query is required")
+				return nil, mcp.NewError(mcp.CodeInvalidParams, "mail_search: query is required")
 			}
 
 			opts := store.SearchOpts{Limit: in.Limit}
@@ -51,7 +51,7 @@ func mailSearch(deps Deps) mcp.Tool {
 				off, ok := decodeCursor(in.Cursor, qhash)
 				if !ok {
 					return nil, mcp.NewError(mcp.CodeInvalidParams,
-						"mail.search: cursor is stale or belongs to a different query")
+						"mail_search: cursor is stale or belongs to a different query")
 				}
 				opts.Offset = off
 			}
@@ -73,7 +73,7 @@ func mailSearch(deps Deps) mcp.Tool {
 	}
 }
 
-// queryStringHash is the cursor-binding hash for mail.search. Same
+// queryStringHash is the cursor-binding hash for mail_search. Same
 // 8-byte truncated-SHA shape as filterHash; binds the cursor to the
 // query string so paging through stale results isn't possible.
 func queryStringHash(query string) string {
