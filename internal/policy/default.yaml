@@ -1,0 +1,123 @@
+# proto-mcp default policy.
+#
+# Embedded into the binary via //go:embed. Override by writing your
+# own policy.yaml at ~/Library/Application Support/protonmcp/.
+# Override blocks REPLACE the default block per tool — they do NOT
+# field-by-field merge. Forgetting to carry over `confirm: true` is
+# a footgun we deliberately surface.
+#
+# decision values: allow | prompt | deny
+#   allow:  handler runs immediately, no UI.
+#   prompt: Touch ID approval required first. If confirm: true,
+#           an NSAlert showing the literal operation details runs
+#           before Touch ID.
+#   deny:   handler never runs, audit row outcome=denied.
+#
+# ttl: how long an approval is cached before re-prompting. ttl: 0
+# means always re-prompt — appropriate for irreversible operations
+# like mail_send.
+#
+# allowed_recipients / description: forward-compat fields parsed in
+# Phase 4, enforced in Phase 5. Leave them in.
+
+defaults:
+  decision: deny  # SECURITY Foundational #4 — unknown tools always deny
+
+tools:
+  # Phase 3 read tools — all allow.
+  account_whoami:        { decision: allow }
+  mail_list:             { decision: allow }
+  mail_search:           { decision: allow }
+  mail_read:             { decision: allow }
+  mail_read_thread:      { decision: allow }
+  mail_list_attachments: { decision: allow }
+  labels_list:           { decision: allow }
+  folders_list:          { decision: allow }
+  mail_sync:             { decision: allow }
+
+  # Phase 5 write tools — stubbed today so Decide doesn't fall
+  # through to the default-deny fallback once those handlers register.
+  # Active enforcement of allowed_recipients / rate_limit lands in Phase 5.
+  mail_draft_create:
+    decision: allow
+    description: "Create a draft (no external effect)"
+  mail_draft_update:
+    decision: allow
+    description: "Update a draft"
+  mail_draft_delete:
+    decision: prompt
+    ttl: 5m
+    description: "Delete a draft"
+  mail_send:
+    decision: prompt
+    confirm: true
+    ttl: 0
+    allowed_recipients: []
+    description: "Send a message via Proton"
+  mail_reply:
+    decision: prompt
+    confirm: true
+    ttl: 0
+    allowed_recipients: []
+    description: "Reply to a message"
+  mail_reply_all:
+    decision: prompt
+    confirm: true
+    ttl: 0
+    allowed_recipients: []
+    description: "Reply-all to a message"
+  mail_forward:
+    decision: prompt
+    confirm: true
+    ttl: 0
+    allowed_recipients: []
+    description: "Forward a message"
+  mail_move:
+    decision: prompt
+    ttl: 5m
+    description: "Move a message to a folder"
+  mail_label:
+    decision: prompt
+    ttl: 5m
+    description: "Add or remove a label"
+  mail_mark_read:
+    decision: allow
+    description: "Mark messages as read (reversible)"
+  mail_mark_unread:
+    decision: allow
+    description: "Mark messages as unread (reversible)"
+  mail_trash:
+    decision: prompt
+    ttl: 5m
+    description: "Move a message to trash (reversible via mail_move)"
+  mail_delete_permanent:
+    decision: deny
+    description: "Permanently delete — opt-in only, override required"
+
+  # Label / folder CRUD.
+  labels_create:
+    decision: prompt
+    ttl: 5m
+    description: "Create a new label"
+  labels_update:
+    decision: prompt
+    ttl: 5m
+    description: "Rename or recolor a label"
+  labels_delete:
+    decision: prompt
+    confirm: true
+    ttl: 0
+    description: "Delete a label"
+  folders_create:
+    decision: prompt
+    ttl: 5m
+    description: "Create a new folder"
+  folders_update:
+    decision: prompt
+    ttl: 5m
+    description: "Rename or recolor a folder"
+  folders_delete:
+    decision: prompt
+    confirm: true
+    ttl: 0
+    description: "Delete a folder"

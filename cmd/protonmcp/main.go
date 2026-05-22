@@ -54,12 +54,13 @@ func main() {
 
 	cmd, args := os.Args[1], os.Args[2:]
 
-	// SIGHUP is registered now (SECURITY L-5) so it cancels ctx the same
-	// way Ctrl-C does. Phase 4 will additionally wire it to policy
-	// reload for the long-running daemon; for the current short-lived
-	// CLI subcommands, "treat as shutdown" is the right default.
+	// SIGTERM / SIGINT cancel ctx (clean shutdown). SIGHUP is NOT in
+	// this list (Phase 4 / SECURITY B-15): serve-stdio installs its
+	// own HUP handler for policy reload, and short-lived CLI
+	// subcommands fall back to the kernel default (process
+	// termination) — equivalent to today's behavior for those.
 	ctx, stop := signal.NotifyContext(context.Background(),
-		os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+		os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	var err error
@@ -98,6 +99,8 @@ func main() {
 		err = runInstall(ctx, args)
 	case "uninstall":
 		err = runUninstall(ctx, args)
+	case "policy":
+		err = runPolicy(ctx, args)
 	case "help", "-h", "--help":
 		usage()
 		return
@@ -150,6 +153,14 @@ Commands:
              desktop app launches it as an MCP server. Idempotent.
              Flags: --dry-run (print what would be written).
   uninstall  Remove protonmcp from Claude Desktop's config.
+  policy     Inspect or hot-reload the policy engine.
+             Subcommands:
+               reload                  Send SIGHUP to a running serve-stdio
+                                       (it reloads ~/Library/Application
+                                       Support/protonmcp/policy.yaml).
+               show                    Print the currently-effective policy.
+               validate <path>         Parse a candidate policy file without
+                                       touching the live daemon.
   help       Show this help.
 
 The session is persisted in the macOS Keychain (service
