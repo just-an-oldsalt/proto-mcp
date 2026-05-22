@@ -43,7 +43,12 @@ func main() {
 
 	cmd, args := os.Args[1], os.Args[2:]
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	// SIGHUP is registered now (SECURITY L-5) so it cancels ctx the same
+	// way Ctrl-C does. Phase 4 will additionally wire it to policy
+	// reload for the long-running daemon; for the current short-lived
+	// CLI subcommands, "treat as shutdown" is the right default.
+	ctx, stop := signal.NotifyContext(context.Background(),
+		os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	defer stop()
 
 	var err error
@@ -162,7 +167,7 @@ func runWhoami(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer sess.Close(context.Background())
+	defer sess.Close()
 
 	primary, _ := sess.PrimaryAddress()
 	fmt.Println("Authenticated:")

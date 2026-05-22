@@ -232,18 +232,25 @@ that already touches those files (cross-referenced below).</p>
     than swallow them when the line was non-empty.</li>
 </ul>
 
-<p><strong>1.5/B — <code>security/signal-cleanup</code></strong>. Builds on A; locks down
-shutdown so Ctrl-C / SIGTERM still revokes server sessions and zeroes
-credential material.</p>
+<p><strong>1.5/B — <code>security/signal-cleanup</code></strong> <span class="tag">done</span>. Builds on A;
+locks down shutdown so Ctrl-C / SIGTERM still revokes server sessions
+and zeroes credential material.</p>
 <ul>
-  <li><span class="check">[ ]</span> Detached short-timeout context inside
-    <code>cleanup()</code> in <code>proton.Login</code> and <code>Session.Close</code>, so login
-    Ctrl-C still hits <code>AuthDelete</code>. <em>(H-3)</em></li>
-  <li><span class="check">[ ]</span> <code>sync.Once</code>-driven shutdown wired through
-    <code>signal.NotifyContext</code> that explicitly zeroes <code>Secret</code> material
-    and calls <code>Session.Close</code> on SIGTERM. <em>(H-2)</em></li>
-  <li><span class="check">[ ]</span> Register <code>SIGHUP</code> in <code>signal.NotifyContext</code>
-    now (no-op until Phase 4 wires policy reload). <em>(L-5)</em></li>
+  <li><span class="check done">[x]</span> Detached short-timeout context inside
+    <code>cleanup()</code> in <code>proton.Login</code> and inside <code>Session.Close</code>,
+    so Ctrl-C-cancelled parent contexts can't sneak through and skip
+    <code>AuthDelete</code>. <em>(H-3)</em></li>
+  <li><span class="check done">[x]</span> <code>Session.Close</code> guarded by
+    <code>sync.Once</code> + internal 5s timeout; signature drops the <code>ctx</code>
+    parameter so callers can't pass a cancelled one. Idempotent for
+    future multi-defer / signal-handler use. <em>(H-2 partial)</em></li>
+  <li><span class="check done">[x]</span> <code>SIGHUP</code> registered in
+    <code>signal.NotifyContext</code>; treated as shutdown for now. Phase 4
+    will re-wire it to policy reload for the daemon. <em>(L-5)</em></li>
+  <li><strong>Deferred:</strong> the full "sync.Once-driven shutdown listener
+    goroutine" from the audit. It only matters once we have a long-
+    running daemon (Phase 6) where ctx-disrespecting I/O could block
+    indefinitely. Re-evaluate then.</li>
 </ul>
 
 <p><strong>1.5/C — <code>security/auth-persistence</code></strong>. <strong>Biggest user-visible

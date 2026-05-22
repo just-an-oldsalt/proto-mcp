@@ -70,7 +70,7 @@ func runBackfill(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	defer sess.Close(context.Background())
+	defer sess.Close()
 
 	cursor, err := sess.LatestEventID(ctx)
 	if err != nil {
