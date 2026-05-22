@@ -9,6 +9,11 @@ import (
 	"io"
 	"log/slog"
 	"sync"
+
+	"github.com/just-an-oldsalt/proto-mcp/internal/approval"
+	"github.com/just-an-oldsalt/proto-mcp/internal/audit"
+	"github.com/just-an-oldsalt/proto-mcp/internal/caller"
+	"github.com/just-an-oldsalt/proto-mcp/internal/policy"
 )
 
 // ServerName is what we report in the initialize handshake's
@@ -39,19 +44,77 @@ type Server struct {
 	// that point are rejected per spec.
 	initialized bool
 	initMu      sync.Mutex
+
+	// Phase 4 middleware. Each is optional; nil → that pipeline
+	// stage is a no-op (preserves Phase-3 behavior for tests that
+	// construct mcp.New without options).
+	middleware *Middleware
 }
 
-// New returns a Server with the given logger. nil logger uses
-// slog.Default() (the logging package already configured the
-// default to redact secrets and write to stderr).
-func New(logger *slog.Logger) *Server {
+// Option configures the Server during construction. Use the
+// With{Policy,Audit,Approval} constructors.
+type Option func(*Server)
+
+// WithPolicy installs a policy engine. nil engine → every tool
+// implicitly DecisionAllow.
+func WithPolicy(e *policy.Engine) Option {
+	return func(s *Server) {
+		if s.middleware == nil {
+			s.middleware = &Middleware{}
+		}
+		s.middleware.policy = e
+	}
+}
+
+// WithAudit installs an audit writer.
+func WithAudit(w *audit.Writer) Option {
+	return func(s *Server) {
+		if s.middleware == nil {
+			s.middleware = &Middleware{}
+		}
+		s.middleware.audit = w
+	}
+}
+
+// WithApproval installs an approval broker. If policy returns
+// DecisionPrompt and no broker is installed, the middleware safely
+// falls through to deny — we never silently allow a prompted call.
+func WithApproval(b *approval.Broker) Option {
+	return func(s *Server) {
+		if s.middleware == nil {
+			s.middleware = &Middleware{}
+		}
+		s.middleware.broker = b
+	}
+}
+
+// WithCallerResolver installs the caller identity resolver. nil
+// resolver → handlers see a zero-valued Caller.
+func WithCallerResolver(r *caller.Resolver) Option {
+	return func(s *Server) {
+		if s.middleware == nil {
+			s.middleware = &Middleware{}
+		}
+		s.middleware.resolver = r
+	}
+}
+
+// New returns a Server with the given logger and any number of
+// functional options. nil logger uses slog.Default(); no options →
+// the Phase-3 baseline (no audit, no policy, no approval — every
+// tool runs unconditionally).
+func New(logger *slog.Logger, opts ...Option) *Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Server{
+	s := &Server{
 		tools:  map[string]Tool{},
 		logger: logger,
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // Register adds a tool to the server. Re-registering the same name
@@ -258,6 +321,14 @@ func (s *Server) handleToolsCall(ctx context.Context, raw json.RawMessage) (*Too
 	s.mu.RUnlock()
 	if !ok {
 		return nil, NewError(CodeMethodNotFound, "unknown tool: "+p.Name)
+	}
+
+	// Phase 4: if middleware is configured, route through the
+	// wrapped pipeline (audit → policy → broker → handler →
+	// audit complete). Otherwise fall back to the Phase-3
+	// direct-call behavior so existing tests still pass.
+	if s.middleware != nil {
+		return s.middleware.runTool(ctx, t, p.Arguments, s.logger)
 	}
 
 	result, err := t.Handler(Context{Std: ctx}, p.Arguments)

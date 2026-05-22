@@ -163,6 +163,26 @@ WHERE id = ?`,
 	}
 }
 
+// SetDecision backfills the policy_decision column on a row Begin
+// created with empty decision. Used by the MCP middleware once the
+// policy engine returns — keeps the audit row reflective of the
+// decision even if a panic happens between Begin and Complete.
+//
+// No-op if id is 0 (Begin failed).
+func (w *Writer) SetDecision(ctx context.Context, id int64, decision string) error {
+	if id == 0 {
+		return nil
+	}
+	_, err := w.db.ExecContext(ctx,
+		`UPDATE audit_log SET policy_decision = ? WHERE id = ?`,
+		decision, id)
+	if err != nil {
+		w.logger.Warn("audit SetDecision failed", "id", id, "err", err.Error())
+		return err
+	}
+	return nil
+}
+
 // DefaultJSONLPath is the canonical location of the audit JSONL.
 // Phase 4 uses this; Phase 7's log rotation will reuse it.
 func DefaultJSONLPath() (string, error) {
