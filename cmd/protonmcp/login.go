@@ -64,6 +64,7 @@ func runLogout(ctx context.Context, _ []string) error {
 		sess, err := protonclient.Resume(ctx, mgr, protonclient.ResumeArgs{
 			Email:         stored.Email,
 			UID:           stored.UID,
+			AccessToken:   stored.AccessToken,
 			RefreshToken:  stored.RefreshToken,
 			SaltedKeyPass: stored.SaltedKeyPass,
 		})

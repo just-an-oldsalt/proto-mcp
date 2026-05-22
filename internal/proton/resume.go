@@ -23,26 +23,48 @@ var ErrSessionExpired = errors.New("proton: stored session expired or revoked")
 type ResumeArgs struct {
 	Email         string
 	UID           string
-	RefreshToken  string
+	AccessToken   string // current access token (may still be valid)
+	RefreshToken  string // refresh token (single-use on Proton's side)
 	SaltedKeyPass secret.Secret
 }
 
-// Resume rebuilds a Session from a previously-stored refresh token and
-// salted mailbox password. It calls NewClientWithRefresh (which rotates
-// the token), fetches user + addresses, and unlocks the keyring with
-// the supplied saltedPass.
+// Resume rebuilds a Session from a previously-stored access + refresh
+// token pair and salted mailbox password.
+//
+// Implementation note (this was hard to find):
+//
+// Proton's refresh tokens are SINGLE-USE — calling /auth/v4/refresh
+// rotates both the access and refresh tokens, and the old refresh
+// token becomes invalid immediately. proton-bridge gets away with
+// NewClientWithRefresh because they keep one Client alive for the
+// entire daemon lifetime and only rotate when an access token actually
+// expires.
+//
+// Our model is one process per CLI invocation. If every invocation
+// called NewClientWithRefresh, we'd burn a refresh token every time;
+// the first whoami would work (it consumed the login-issued refresh
+// token), and the second would 400 because the rotated token from
+// the first refresh is itself one-time-use that the first whoami
+// already burned implicitly... well, more accurately: there's a
+// race in our persistence that no amount of patching can solve as
+// long as we keep refreshing.
+//
+// Resume now builds a Client with mgr.NewClient(uid, acc, ref) — no
+// refresh call. The SDK's auto-refresh-on-401 path inside Client.do
+// only fires when the access token has actually expired. If our
+// stored access token is still valid (the common case for a tight
+// CLI loop), no refresh happens, no token rotation, nothing to
+// persist.
+//
+// On expiry the auto-refresh fires, the AuthHandler captures the
+// rotated bundle, and the keystore-sync OnAuthUpdate hook writes the
+// new pair back to disk so the next process can pick up where we
+// left off.
 //
 // Resume does NOT retry on network errors — a single attempt is the
-// right policy for two reasons. First, the caller (the CLI shell) is
-// the natural retry boundary; a failed resume should simply prompt
-// the user. Second, a buggy MCP client that loops on auth failure
-// could otherwise hammer Proton's anti-abuse — Phase 7 will add
-// proper rate limiting at the daemon level, but for now "one shot,
-// fail-clean" is the bounded behavior we want.
-//
-// On expiry (the SDK returns a 401-class error from authRefresh),
-// Resume returns ErrSessionExpired so the caller can distinguish "the
-// stored token is dead" from "the network is flaky".
+// right policy. The caller (CLI shell) is the natural retry
+// boundary; a buggy MCP client looping on auth failure should not
+// hammer Proton's anti-abuse.
 func Resume(ctx context.Context, mgr *gpa.Manager, args ResumeArgs) (*Session, error) {
 	if args.UID == "" || args.RefreshToken == "" {
 		return nil, errors.New("proton: resume requires UID + RefreshToken")
@@ -51,30 +73,21 @@ func Resume(ctx context.Context, mgr *gpa.Manager, args ResumeArgs) (*Session, e
 		return nil, errors.New("proton: resume requires saltedKeyPass — re-login required")
 	}
 
-	client, auth, err := mgr.NewClientWithRefresh(ctx, args.UID, args.RefreshToken)
-	if err != nil {
-		if isAuthExpired(err) {
-			return nil, fmt.Errorf("%w: %v", ErrSessionExpired, err)
-		}
-		return nil, fmt.Errorf("refresh token: %w", err)
-	}
+	client := mgr.NewClient(args.UID, args.AccessToken, args.RefreshToken)
 
 	// Build the Session and install the AuthHandler IMMEDIATELY, before
-	// any subsequent API call. Proton can rotate tokens transparently
-	// in response to GetUser / GetAddresses (the SDK's Client.do path
-	// auto-refreshes on 401 and fires AuthHandler with the new bundle).
-	// If we delayed installAuthHandler until after the API calls, a
-	// silent mid-Resume rotation would leave the Session — and the
-	// Keychain — holding the *original* refresh token from
-	// NewClientWithRefresh, which the server has already moved past.
-	// The next process would then hit 400 "Invalid refresh token" even
-	// though it just resumed cleanly seconds ago.
+	// any API call. If GetUser / GetAddresses below trigger the
+	// auto-refresh-on-401 path (because the stored access token has
+	// expired), the SDK fires AuthHandler with the rotated bundle —
+	// our handler keeps Session.AccessToken / RefreshToken current and
+	// the OnAuthUpdate hook (wired by the caller) writes the new pair
+	// back to the Keychain.
 	sess := &Session{
 		Client:        client,
 		Email:         args.Email,
 		UID:           args.UID,
-		AccessToken:   auth.AccessToken,
-		RefreshToken:  auth.RefreshToken,
+		AccessToken:   args.AccessToken,
+		RefreshToken:  args.RefreshToken,
 		SaltedKeyPass: args.SaltedKeyPass,
 	}
 	sess.installAuthHandler()
@@ -92,10 +105,20 @@ func Resume(ctx context.Context, mgr *gpa.Manager, args ResumeArgs) (*Session, e
 
 	user, err := client.GetUser(ctx)
 	if err != nil {
+		// If the access token had expired AND the auto-refresh failed
+		// (refresh token is dead), the SDK surfaces a 401 / 422 / 400
+		// here. Map those to ErrSessionExpired so the CLI clears the
+		// Keychain and re-prompts cleanly.
+		if isAuthExpired(err) {
+			return nil, closeAndWrap("%w: %v", ErrSessionExpired, err)
+		}
 		return nil, closeAndWrap("resume get user: %w", err)
 	}
 	addrs, err := client.GetAddresses(ctx)
 	if err != nil {
+		if isAuthExpired(err) {
+			return nil, closeAndWrap("%w: %v", ErrSessionExpired, err)
+		}
 		return nil, closeAndWrap("resume get addresses: %w", err)
 	}
 
