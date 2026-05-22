@@ -200,6 +200,62 @@ func (s *Store) GetSyncState(ctx context.Context, key string) (string, error) {
 	return v, nil
 }
 
+// Label is the in-Go representation of a row in the labels table.
+type Label struct {
+	ID    string
+	Name  string
+	Color string
+	Type  int // 1=label, 3=folder per Proton schema
+}
+
+// UpsertLabel inserts or overwrites a single label row. Used by the
+// event-loop sync goroutine on label.create / label.update events.
+func (s *Store) UpsertLabel(ctx context.Context, l Label) error {
+	_, err := s.DB.ExecContext(ctx, `
+INSERT INTO labels (id, name, color, type) VALUES (?, ?, ?, ?)
+ON CONFLICT(id) DO UPDATE SET name = excluded.name, color = excluded.color, type = excluded.type
+`, l.ID, l.Name, l.Color, l.Type)
+	if err != nil {
+		return fmt.Errorf("upsert label %s: %w", l.ID, err)
+	}
+	return nil
+}
+
+// DeleteLabel removes a label row. The message_labels rows referencing
+// it stay (no FK back from message_labels.label_id → labels.id) so
+// per-message label sets stay consistent with the server's view.
+func (s *Store) DeleteLabel(ctx context.Context, labelID string) error {
+	_, err := s.DB.ExecContext(ctx, `DELETE FROM labels WHERE id = ?`, labelID)
+	if err != nil {
+		return fmt.Errorf("delete label %s: %w", labelID, err)
+	}
+	return nil
+}
+
+// DeleteMessage removes a message row. message_labels rows cascade-
+// delete via the FK; messages_fts entries are removed by the trigger
+// set up in 0001_initial.sql.
+func (s *Store) DeleteMessage(ctx context.Context, messageID string) error {
+	_, err := s.DB.ExecContext(ctx, `DELETE FROM messages WHERE id = ?`, messageID)
+	if err != nil {
+		return fmt.Errorf("delete message %s: %w", messageID, err)
+	}
+	return nil
+}
+
+// InvalidateBodyCache zeroes body_cached_at on a single row so the
+// next GetCachedBody returns ErrNotFound and triggers a refetch.
+// body_text / body_html stay populated (search still works against
+// the stale text); only the freshness signal changes.
+func (s *Store) InvalidateBodyCache(ctx context.Context, messageID string) error {
+	_, err := s.DB.ExecContext(ctx,
+		`UPDATE messages SET body_cached_at = NULL WHERE id = ?`, messageID)
+	if err != nil {
+		return fmt.Errorf("invalidate body cache %s: %w", messageID, err)
+	}
+	return nil
+}
+
 // BodyTTL is how long a cached body counts as fresh. After this, the
 // row's body_* columns are treated as missing (GetCachedBody returns
 // ErrNotFound). Re-fetch will replace them. The sync loop's
