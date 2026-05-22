@@ -40,10 +40,9 @@ type Deps struct {
 	Store *store.Store
 }
 
-// All returns every read-tool registered, in the order the server
-// should advertise them. Order influences nothing functionally — it
-// only affects how tools/list reads if a human inspects the wire
-// transcript.
+// All returns every tool registered, in the order the server should
+// advertise them. Order influences nothing functionally — it only
+// affects how tools/list reads if a human inspects the wire transcript.
 func All(deps Deps) []mcp.Tool {
 	return []mcp.Tool{
 		accountWhoami(deps),
@@ -55,6 +54,12 @@ func All(deps Deps) []mcp.Tool {
 		labelsList(deps),
 		foldersList(deps),
 		mailSync(deps),
+		// Phase 5/A — state mutations.
+		mailMarkRead(deps),
+		mailMarkUnread(deps),
+		mailMove(deps),
+		mailLabel(deps),
+		mailTrash(deps),
 	}
 }
 
