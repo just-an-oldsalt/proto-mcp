@@ -392,30 +392,152 @@ Pulled forward from Phase 7.</p>
     release workflow.</li>
 </ul>
 
-<h2>Phase 2 — Sync loop + lazy decrypt + FTS</h2>
+<h2>Phase 2 — Sync loop + lazy decrypt + FTS <span class="tag">planning</span></h2>
+<p>Phase 1 left us with a populated <code>messages</code> table (envelopes only) and
+a stored <code>event_cursor</code>. Phase 2 closes the loop: keep the local
+mirror in sync with the server via event-id polling, decrypt + cache
+message bodies on demand, and turn the FTS5 schema we already built into
+an actual search API. Split into focused branches, same pattern as
+Phase 1.5.</p>
+
+<h3>Branches in this phase</h3>
+
+<p><strong>2/A — <code>phase-2/html-sanitize</code></strong>. Foundation; no other deps.</p>
 <ul>
-  <li><span class="check">[ ]</span> <code>internal/sync</code> goroutine. Calls <code>client.GetEvent(ctx, cursor)</code> every
-    <code>poll_interval</code> (30s active, 5m idle). Applies the diff: created,
-    updated, deleted messages; label changes; folder moves; etc. Use
-    <code>proton.Event</code> and <code>EventResponse</code> types.</li>
-  <li><span class="check">[ ]</span> On first <code>mail.read</code> for a given message_id, fetch the full message
-    (<code>client.GetFullMessage</code> or <code>GetMessage</code> — verify), decrypt body
-    using the appropriate address keyring (<code>Session.AddrKRs[addressID]</code>),
-    cache <code>body_text</code>/<code>body_html</code> in the row, set <code>body_cached_at = now</code>.</li>
-  <li><span class="check">[ ]</span> FTS5 index population: triggers on insert/update of <code>messages</code> mirror
-    relevant columns into <code>messages_fts</code>. Tokenizer <code>porter unicode61</code>.</li>
-  <li><span class="check">[ ]</span> Search implementation: translate a small query DSL
-    (<code>from:alice subject:gear</code>) into FTS5 <code>MATCH</code> syntax + WHERE clauses.</li>
+  <li><span class="check">[ ]</span> <code>internal/sanitize</code> package wrapping
+    <code>microcosm-cc/bluemonday</code>. One policy tuned for LLM consumption:
+    preserve readable structure (<code>&lt;p&gt;</code>, <code>&lt;br&gt;</code>, <code>&lt;b&gt;</code>, <code>&lt;i&gt;</code>,
+    <code>&lt;a&gt;</code> with stripped <code>href</code>, headings, lists, blockquotes), strip
+    everything else. Always remove <code>&lt;script&gt;</code> / <code>&lt;iframe&gt;</code> / remote
+    image <code>src</code> regardless of policy permissions.</li>
+  <li><span class="check">[ ]</span> Secondary helper that extracts plain text from
+    HTML for the snippet generator (collapses whitespace, strips
+    quoted-reply markers <code>&gt; </code>, caps at 200 chars).</li>
+  <li><span class="check">[ ]</span> Table-driven tests for each strip rule + a
+    fixture set of real-world Proton email HTML.</li>
+  <li><em>SECURITY: Foundational #7. Sanitization happens here so any
+    place that emits HTML to the MCP client can call into one
+    audited surface.</em></li>
 </ul>
-<h3>Gotchas</h3>
+
+<p><strong>2/B — <code>phase-2/body-fetch</code></strong>. Depends on 2/A.</p>
+<ul>
+  <li><span class="check">[ ]</span> <code>proton.Session.FetchAndDecryptMessage(ctx, msgID)</code>:
+    calls <code>client.GetFullMessage</code> (verify exact name in the SDK),
+    decrypts the body using <code>Session.AddrKRs[message.AddressID]</code>,
+    returns <code>{text, html, headers, attachments_meta}</code>. HTML goes
+    through <code>internal/sanitize</code> before return.</li>
+  <li><span class="check">[ ]</span> <code>store.UpdateBodyCache(ctx, msgID, text, html)</code>
+    plus <code>store.GetCachedBody(ctx, msgID)</code> with a TTL check —
+    24h per the design spec, as defense-in-depth on top of the event
+    loop's invalidation.</li>
+  <li><span class="check">[ ]</span> <code>protonmcp read &lt;msgID&gt;</code> CLI subcommand
+    that exercises the cache (first call decrypts + caches, second is
+    served from SQLite).</li>
+  <li><span class="check">[ ]</span> Reconstruct <code>thread_id</code> from RFC 2822
+    <code>In-Reply-To</code> / <code>References</code> headers (we capture them via
+    <code>GetFullMessage</code>). Apply only on read for now; a one-shot
+    backfill-thread migration can happen later.</li>
+</ul>
+
+<p><strong>2/C — <code>phase-2/sync-loop</code></strong>. Independent of A/B.</p>
+<ul>
+  <li><span class="check">[ ]</span> <code>internal/sync</code> package with
+    <code>RunOnce(ctx, sess, store)</code>: reads <code>event_cursor</code> from
+    <code>sync_state</code>, calls <code>client.GetEvent</code> in a loop until the
+    server says it's caught up, applies each diff to the store
+    (CRUD on messages, label-set updates, folder moves), advances
+    the cursor as it goes (so a crash mid-loop doesn't re-process
+    events).</li>
+  <li><span class="check">[ ]</span> Handle the <code>REFRESH</code> instruction (the
+    server returns this when our cursor is too old) by falling
+    through to a full <code>backfill</code> + fresh cursor capture.</li>
+  <li><span class="check">[ ]</span> Bounded retries with exponential backoff on
+    network errors. Stop and surface after N consecutive failures
+    — no infinite retry loops that could trip Proton anti-abuse.</li>
+  <li><span class="check">[ ]</span> <code>protonmcp sync</code> CLI subcommand that
+    invokes <code>RunOnce</code>. Useful for testing now; Phase 6's daemon
+    will call this on a 30s/5m active/idle cadence from a goroutine.</li>
+  <li><span class="check">[ ]</span> Token rotation via the existing AuthHandler
+    chain — sync is just one more API caller, so the cookies +
+    rotated tokens persistence work in 1.5/C already covers it.</li>
+</ul>
+
+<p><strong>2/D — <code>phase-2/search</code></strong>. Independent of A/B/C.</p>
+<ul>
+  <li><span class="check">[ ]</span> <code>internal/store.Search(ctx, query, limit, cursor)</code>
+    on top of the existing <code>messages_fts</code> table (no schema
+    change needed — Phase 1 already wired the triggers).</li>
+  <li><span class="check">[ ]</span> Small query-DSL parser supporting
+    <code>from:</code>, <code>to:</code>, <code>subject:</code>, <code>in:&lt;folder&gt;</code>,
+    <code>before:&lt;date&gt;</code>, <code>after:&lt;date&gt;</code>, <code>has:attachment</code>,
+    plus bare terms (full-text MATCH against subject + body).
+    Prefixes lower to structured-column predicates; bare terms go
+    into the <code>messages_fts MATCH</code> expression.</li>
+  <li><span class="check">[ ]</span> Local snippet generator (first ~200 chars of
+    cached body_text with whitespace collapse), shared with 2/A's
+    text extractor. Proton-side snippets can be empty so we don't
+    rely on them.</li>
+  <li><span class="check">[ ]</span> <code>protonmcp search "&lt;query&gt;"</code> CLI subcommand
+    for testing before the MCP server lands in Phase 3.</li>
+</ul>
+
+<h3>Order &amp; dependencies</h3>
+<ul>
+  <li>Land 2/A first — it's the dependency for 2/B and the eventual
+    Phase 3 MCP layer.</li>
+  <li>2/B, 2/C, 2/D can land in any order after A. Doing 2/B next
+    gives the most user-visible win (can actually <em>read</em> mail).</li>
+  <li>Recommended sequence: <strong>A → B → D → C</strong>. B + D both
+    cement single-process flows; C introduces the long-running
+    "apply diffs" concept that bleeds into Phase 6's daemon work.</li>
+</ul>
+
+<h3>Open questions for sign-off</h3>
+<ul>
+  <li><strong>Q1. HTML policy strictness.</strong> Two choices:
+    <ol>
+      <li><em>UGCPolicy-style</em>: keep most structural HTML, just strip
+        scripts / iframes / remote images. LLM sees rich formatting.</li>
+      <li><em>Strict policy</em>: strip down to text + basic formatting
+        (<code>p / br / b / i / a</code>). Smaller prompt budget, less surface
+        for prompt-injection embedded in cleverly-encoded HTML.</li>
+    </ol>
+    Leaning toward (2) — prompt-injection risk is the dominant
+    concern, and an LLM can read either format. Confirm or override.</li>
+  <li><strong>Q2. Threading algorithm.</strong> Simple <code>In-Reply-To</code>
+    chasing, or full RFC 5322 jwz threading with subject-normalization
+    fallback? Latter handles mailing-list threads where some replies
+    drop the header. ~3x the code but matches what mail clients do.
+    Leaning simple-for-now, document the limitation.</li>
+  <li><strong>Q3. Sync CLI vs daemon-only.</strong> Should <code>protonmcp sync</code>
+    exist as a one-shot subcommand, or only run inside the future
+    daemon? Leaning yes-CLI for testability + the rare case where
+    a user wants to manually nudge the mirror forward.</li>
+  <li><strong>Q4. Search DSL scope.</strong> The list above (from / to /
+    subject / in / before / after / has:attachment) is the maximal
+    v1 set. Minimum viable is <code>from:</code> + <code>subject:</code> + bare
+    terms. Anything else you want trimmed?</li>
+  <li><strong>Q5. <code>protonmcp read</code> output shape.</strong> JSON dump
+    (consistent with eventual MCP responses) or human-readable?
+    Leaning JSON now, add <code>--pretty</code> later.</li>
+</ul>
+
+<h3>Gotchas inherited from the original spec</h3>
 <ul>
   <li>HTML body must be sanitized before returning to the LLM. Use
-    <code>microcosm-cc/bluemonday</code> strict policy. Strip <code>&lt;script&gt;</code>, <code>&lt;iframe&gt;</code>,
-    remote image <code>src</code> (tracking pixels).</li>
-  <li>Snippets: Proton-side snippets can be empty. Generate locally from
-    decrypted body text — first 200 chars of the text body, collapse
-    whitespace, strip quoted-reply markers (<code>&gt; </code>).</li>
-  <li>Body cache TTL: 24h per design spec. Run a periodic prune.</li>
+    <code>microcosm-cc/bluemonday</code>. Strip <code>&lt;script&gt;</code>, <code>&lt;iframe&gt;</code>,
+    remote image <code>src</code> (tracking pixels). Implemented in 2/A.</li>
+  <li>Snippets: Proton-side snippets can be empty. Generate locally
+    from decrypted body text — first 200 chars, collapse whitespace,
+    strip quoted-reply markers (<code>&gt; </code>). Implemented in 2/A and
+    reused by 2/D.</li>
+  <li>Body cache TTL: 24h per design spec. The event loop's
+    invalidate-on-update is the primary mechanism; the TTL is the
+    safety net for cases where we miss an event.</li>
+  <li>The Proton SDK strips <code>ConversationID</code> from <code>MessageMetadata</code>
+    so <code>thread_id</code> can't come from the API. Reconstruction from
+    <code>In-Reply-To</code> / <code>References</code> headers is in 2/B.</li>
 </ul>
 
 <h2>Phase 3 — MCP server (read tools only)</h2>
