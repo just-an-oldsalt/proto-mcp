@@ -16,6 +16,7 @@ import (
 
 	gpa "github.com/ProtonMail/go-proton-api"
 	"github.com/ProtonMail/gopenpgp/v2/crypto"
+	"github.com/go-resty/resty/v2"
 
 	"github.com/just-an-oldsalt/proto-mcp/internal/secret"
 )
@@ -47,6 +48,17 @@ const HostURL = "https://mail-api.proton.me"
 // TODO(v1.1): apply for a Proton-issued client identifier so we can stop
 // pretending to be Bridge.
 const AppVersion = "macos-bridge@3.24.2"
+
+// UserAgent is the User-Agent header sent on every API request.
+//
+// Bridge installs an AddPreRequestHook to set this; without it, the Go
+// http.Client defaults to "Go-http-client/1.1". Empirically the default
+// is enough to trip Proton's anti-abuse: refresh tokens get marked as
+// single-use even after a clean rotation, which manifests as "first
+// resume works, every subsequent one 400s". Mimicking Bridge's User-
+// Agent (alongside the existing AppVersion / cookie jar mimicry) is
+// what keeps the session a session.
+const UserAgent = "ProtonMail-Bridge/3.24.2 (macOS)"
 
 // Credentials is everything needed to bring the daemon from cold start
 // to a fully-unlocked session. MailboxPassword only applies when the
@@ -227,15 +239,24 @@ func (s *Session) releaseLocal() {
 // session in a future process (login → exit → whoami), the jar must
 // be preloaded with the cookies saved at login time. See NewCookieJar,
 // JarCookies, and PreloadJar in cookies.go.
+//
+// A pre-request hook is installed to set the User-Agent header on
+// every outgoing request. See the UserAgent doc comment for why this
+// matters.
 func NewManager(jar http.CookieJar) *gpa.Manager {
 	if jar == nil {
 		jar = NewCookieJar()
 	}
-	return gpa.New(
+	m := gpa.New(
 		gpa.WithHostURL(HostURL),
 		gpa.WithAppVersion(AppVersion),
 		gpa.WithCookieJar(jar),
 	)
+	m.AddPreRequestHook(func(_ *resty.Client, req *resty.Request) error {
+		req.SetHeader("User-Agent", UserAgent)
+		return nil
+	})
+	return m
 }
 
 func doTOTP(ctx context.Context, client *gpa.Client, creds *Credentials) error {
