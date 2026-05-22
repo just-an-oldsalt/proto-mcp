@@ -23,6 +23,24 @@ type SearchHit struct {
 type SearchOpts struct {
 	Limit  int // 0 → default 50, max 200
 	Offset int // simple offset paging for now; opaque-cursor paging is a Phase 3 follow-up
+
+	// Optional extra filters layered on top of the query DSL. These
+	// are AND-joined with the parsed query, so calling Search with
+	// `query=""` and a populated Filter gives you a plain list of
+	// envelopes — Phase 3's mail.list tool exercises this path.
+	Filter ListFilter
+}
+
+// ListFilter is the structured-only subset of search criteria — no
+// DSL parsing. mail.list uses this; mail.search uses Search with the
+// raw query string and (usually) an empty filter.
+type ListFilter struct {
+	Folder     string
+	LabelID    string // matches if message has this label_id
+	UnreadOnly bool
+	ThreadID   string
+	SinceUnix  int64 // inclusive lower bound (0 → no bound)
+	UntilUnix  int64 // exclusive upper bound (0 → no bound)
 }
 
 // Search runs a query against the local mirror and returns matching
@@ -51,6 +69,13 @@ func (s *Store) Search(ctx context.Context, query string, opts SearchOpts) ([]Se
 	}
 	if opts.Limit > 200 {
 		opts.Limit = 200
+	}
+	// SECURITY C-8. Limit / Offset are user-controllable once the
+	// Phase 3 MCP layer passes them straight through from a tool
+	// call. Negative Offset produces a confusing SQLite error
+	// rather than the empty result the caller probably wants; clamp.
+	if opts.Offset < 0 {
+		opts.Offset = 0
 	}
 
 	var (
@@ -86,6 +111,33 @@ func (s *Store) Search(ctx context.Context, query string, opts SearchOpts) ([]Se
 		args = append(args, parsed.after.Unix())
 	}
 
+	// Extra structured filter, layered AND. mail.list uses this with
+	// an empty DSL query; mail.search usually leaves Filter zero.
+	if opts.Filter.Folder != "" {
+		conds = append(conds, "messages.folder = ?")
+		args = append(args, opts.Filter.Folder)
+	}
+	if opts.Filter.LabelID != "" {
+		conds = append(conds,
+			"messages.id IN (SELECT message_id FROM message_labels WHERE label_id = ?)")
+		args = append(args, opts.Filter.LabelID)
+	}
+	if opts.Filter.UnreadOnly {
+		conds = append(conds, "messages.unread = 1")
+	}
+	if opts.Filter.ThreadID != "" {
+		conds = append(conds, "messages.thread_id = ?")
+		args = append(args, opts.Filter.ThreadID)
+	}
+	if opts.Filter.SinceUnix > 0 {
+		conds = append(conds, "messages.date >= ?")
+		args = append(args, opts.Filter.SinceUnix)
+	}
+	if opts.Filter.UntilUnix > 0 {
+		conds = append(conds, "messages.date < ?")
+		args = append(args, opts.Filter.UntilUnix)
+	}
+
 	where := "1=1"
 	if len(conds) > 0 {
 		where = strings.Join(conds, " AND ")
@@ -98,13 +150,18 @@ func (s *Store) Search(ctx context.Context, query string, opts SearchOpts) ([]Se
 		orderBy = "(SELECT rank FROM messages_fts WHERE message_id = messages.id) ASC, messages.date DESC"
 	}
 
+	// SECURITY C-8. LIMIT / OFFSET bound as ? parameters rather than
+	// Sprintf'd in — same defense-in-depth as the WHERE clause args.
+	// orderBy is one of two hard-coded literals (the FTS-rank or the
+	// plain date-DESC variants above), NOT user input.
 	q := fmt.Sprintf(`
 SELECT id, thread_id, subject, from_address, from_name, date, folder, body_text
   FROM messages
  WHERE %s
  ORDER BY %s
- LIMIT %d OFFSET %d
-`, where, orderBy, opts.Limit, opts.Offset)
+ LIMIT ? OFFSET ?
+`, where, orderBy)
+	args = append(args, opts.Limit, opts.Offset)
 
 	rows, err := s.DB.QueryContext(ctx, q, args...)
 	if err != nil {
