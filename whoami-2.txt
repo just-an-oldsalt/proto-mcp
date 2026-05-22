@@ -1,4 +1,0 @@
-2026/05/21 22:07:28.623640 WARN RESTY 400 POST https://mail-api.proton.me/auth/v4/refresh: Invalid refresh token (Code=10013, Status=400), Attempt 1
-2026/05/21 22:07:28.624150 ERROR RESTY 400 POST https://mail-api.proton.me/auth/v4/refresh: Invalid refresh token (Code=10013, Status=400)
-stored session unusable (proton: stored session expired or revoked: 400 POST https://mail-api.proton.me/auth/v4/refresh: Invalid refresh token (Code=10013, Status=400)); re-authenticating ...
-error: email and password are required
