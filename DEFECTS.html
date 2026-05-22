@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>proto-mcp — Defects</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    :root {
+      color-scheme: light dark;
+      --fg: #1c1c1e;
+      --muted: #6e6e73;
+      --bg: #fbfbfd;
+      --panel: #f2f2f4;
+      --accent: #0a5fb4;
+      --border: #d8d8de;
+      --code-bg: #f0f0f4;
+      --open: #b4380a;
+      --investigating: #b48a0a;
+      --fixed: #0a8a3a;
+      --wontfix: #6e6e73;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --fg: #ececef;
+        --muted: #9a9aa1;
+        --bg: #15151a;
+        --panel: #1f1f25;
+        --accent: #6fb5ff;
+        --border: #2f2f37;
+        --code-bg: #1c1c22;
+        --open: #ff8a5c;
+        --investigating: #ffc94a;
+        --fixed: #5cd486;
+        --wontfix: #9a9aa1;
+      }
+    }
+    html { background: var(--bg); }
+    body {
+      color: var(--fg);
+      font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+      max-width: 820px;
+      margin: 2rem auto;
+      padding: 0 1.25rem 4rem;
+    }
+    h1, h2, h3 { font-weight: 600; line-height: 1.25; }
+    h1 { font-size: 1.9rem; margin: 0 0 .25rem; }
+    h2 { font-size: 1.25rem; margin: 2.2rem 0 .6rem; border-bottom: 1px solid var(--border); padding-bottom: .25rem; }
+    h3 { font-size: 1.05rem; margin: 1.5rem 0 .4rem; color: var(--muted); }
+    p, ul, ol, table { margin: .5rem 0 .9rem; }
+    ul, ol { padding-left: 1.4rem; }
+    li { margin: .15rem 0; }
+    li > p { margin: 0 0 .25rem; }
+    a { color: var(--accent); }
+    blockquote {
+      margin: .9rem 0;
+      padding: .6rem .9rem;
+      border-left: 3px solid var(--border);
+      background: var(--panel);
+      color: var(--muted);
+      border-radius: 0 4px 4px 0;
+    }
+    blockquote p { margin: .3rem 0; }
+    code {
+      background: var(--code-bg);
+      border-radius: 3px;
+      padding: 1px 5px;
+      font: 13px/1.4 "SF Mono", Menlo, Consolas, monospace;
+    }
+    pre {
+      background: var(--code-bg);
+      padding: .75rem 1rem;
+      border-radius: 6px;
+      overflow-x: auto;
+      border: 1px solid var(--border);
+    }
+    pre code { background: none; padding: 0; }
+    table { border-collapse: collapse; width: 100%; font-size: .92rem; }
+    th, td { border: 1px solid var(--border); padding: .45rem .65rem; text-align: left; vertical-align: top; }
+    th { background: var(--panel); font-weight: 600; width: 7.5rem; }
+    .meta {
+      color: var(--muted);
+      font-size: .92rem;
+      margin: .1rem 0 1.5rem;
+    }
+    .meta strong { color: var(--fg); font-weight: 600; }
+    .stats {
+      display: flex;
+      flex-wrap: wrap;
+      gap: .6rem;
+      margin: 1rem 0 1.5rem;
+    }
+    .stat {
+      flex: 1 1 9rem;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: .65rem .85rem;
+    }
+    .stat-num { font-size: 1.6rem; font-weight: 600; line-height: 1.1; }
+    .stat-label { color: var(--muted); font-size: .85rem; }
+    .tag {
+      display: inline-block;
+      padding: 1px 7px;
+      border-radius: 3px;
+      font-size: .78rem;
+      background: var(--panel);
+      color: var(--muted);
+      margin-left: .4rem;
+      vertical-align: 2px;
+      font-weight: 500;
+    }
+    .tag.open { color: var(--open); border: 1px solid var(--open); }
+    .tag.investigating { color: var(--investigating); border: 1px solid var(--investigating); }
+    .tag.fixed { color: var(--fixed); border: 1px solid var(--fixed); }
+    .tag.wontfix { color: var(--wontfix); border: 1px solid var(--wontfix); }
+    .id {
+      display: inline-block;
+      font-family: "SF Mono", Menlo, Consolas, monospace;
+      font-size: .82rem;
+      color: var(--muted);
+      background: var(--code-bg);
+      border-radius: 3px;
+      padding: 1px 6px;
+      margin-right: .5rem;
+      vertical-align: 2px;
+    }
+    hr { border: 0; border-top: 1px solid var(--border); margin: 2.5rem 0 1.5rem; }
+  </style>
+</head>
+<body>
+
+<h1>proto-mcp — Defects</h1>
+<p class="meta">
+  Tracking doc for bugs found in the protonmcp connector and surrounding tools.
+  Add new defects as <code>D{n}</code>, status <span class="tag open">open</span> →
+  <span class="tag investigating">investigating</span> →
+  <span class="tag fixed">fixed</span> (or <span class="tag wontfix">won't fix</span> with rationale).
+  Don't delete fixed defects — move them to the <em>Resolved</em> section so the
+  history stays browsable.
+</p>
+
+<blockquote>
+  <p>Companion to <code>TODO.html</code>. Forward-looking work lives there; this file
+  tracks regressions and behavioural bugs found in shipped surfaces. Reference
+  the relevant defect ID (<code>D1</code>, <code>D2</code>, …) in commits and PRs that fix them so
+  the link is preserved without manual upkeep.</p>
+  <p>When closing a defect, record the fix commit / PR and the root cause in
+  one sentence — enough that a future reader doesn't have to re-derive it.</p>
+</blockquote>
+
+<h2>Status at a glance</h2>
+<div class="stats">
+  <div class="stat"><div class="stat-num">0</div><div class="stat-label">Open defects</div></div>
+  <div class="stat"><div class="stat-num">0</div><div class="stat-label">Investigating</div></div>
+  <div class="stat"><div class="stat-num">3</div><div class="stat-label">Resolved</div></div>
+  <div class="stat"><div class="stat-num">2</div><div class="stat-label">Affected tools</div></div>
+  <div class="stat"><div class="stat-num">2</div><div class="stat-label">Suspected root causes</div></div>
+</div>
+
+<h2>Open</h2>
+<p class="meta"><em>None.</em></p>
+
+<h2>Investigating</h2>
+<p class="meta"><em>None.</em></p>
+
+<h2>Resolved</h2>
+
+<h3><span class="id">D1</span>mail_list — folder="all" sorts oldest-first <span class="tag fixed">fixed</span></h3>
+<p><strong>Reported:</strong> 2026-05-22 · <strong>Fixed:</strong> PR #37 · Surface: <code>mail_list</code></p>
+<p><strong>Root cause:</strong> <code>primaryFolder()</code> in <code>internal/proton/messages.go</code>
+returned the literal string <code>"all"</code> as a fallback for messages
+without any system folder label. So <code>messages.folder = 'all'</code> was
+a real bucket — the user's older messages without system labels.
+When the LLM passed <code>folder="all"</code> expecting "all folders", the
+SQL filtered to that bucket and returned a small set of older
+messages.</p>
+<p><strong>Fix:</strong> <code>primaryFolder</code> now returns <code>""</code> for the no-system-label
+case. <code>mail_list folder="all"</code> is recognised as a synonym for "no
+folder filter" (along with <code>any</code> / <code>all_mail</code> / <code>*</code>). The DSL
+also treats <code>in:all</code> the same way. Existing rows with the literal
+<code>"all"</code> value are migrated to <code>""</code> by migration <code>0002_folder_all_to_empty.sql</code>.</p>
+
+<h3><span class="id">D2</span>mail_list — <code>since</code> filter returns empty on folder="all" <span class="tag fixed">fixed</span></h3>
+<p><strong>Reported:</strong> 2026-05-22 · <strong>Fixed:</strong> PR #37 · Surface: <code>mail_list</code></p>
+<p><strong>Root cause:</strong> Same as D1 — once <code>folder="all"</code> filtered to
+the small "no system label" bucket, adding <code>since="2026-05-01"</code>
+intersected with a bucket whose messages were all older than May
+2026, yielding empty results.</p>
+<p><strong>Fix:</strong> Closed by D1's fix. <code>folder="all"</code> no longer narrows
+to the synthetic bucket, so <code>since</code> applies across the whole
+mailbox as expected.</p>
+
+<h3><span class="id">D3</span>mail_search — <code>since</code>/<code>until</code> silently ignored <span class="tag fixed">fixed</span></h3>
+<p><strong>Reported:</strong> 2026-05-22 · <strong>Fixed:</strong> PR #37 · Surface: <code>mail_search</code></p>
+<p><strong>Root cause:</strong> Two layers. The MCP input schema for
+<code>mail_search</code> only had <code>query</code> / <code>limit</code> / <code>cursor</code> — top-level
+<code>since</code> / <code>until</code> were silently stripped. When the LLM
+embedded date filters in the query string instead, our DSL only
+recognised <code>after:</code> / <code>before:</code>, so <code>since:</code> /
+<code>until:</code> tokens fell through to the unknown-prefix path
+(<code>internal/store/query.go:80</code>) and became bare FTS terms that
+matched nothing.</p>
+<p><strong>Fix:</strong> Added top-level <code>since</code> / <code>until</code> parameters to
+<code>mail_search</code>'s input schema (mirrors <code>mail_list</code>'s shape) and
+aliased <code>since:</code> → <code>after:</code> + <code>until:</code> → <code>before:</code> in the DSL
+parser so embedded date filters work too.</p>
+
+</body>
+</html>

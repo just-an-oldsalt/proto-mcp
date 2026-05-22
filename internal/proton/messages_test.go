@@ -89,8 +89,12 @@ func TestPrimaryFolder(t *testing.T) {
 		{"inbox wins over allmail", []string{gpa.AllMailLabel, gpa.InboxLabel}, "inbox"},
 		{"inbox wins over user labels", []string{"user-foo", gpa.InboxLabel}, "inbox"},
 		{"trash wins over user labels", []string{"user-foo", gpa.TrashLabel}, "trash"},
-		{"fallback to all", []string{"user-only"}, "all"},
-		{"fallback when empty", []string{}, "all"},
+		// D1/D2 fix: fallback is "" (no system folder), not "all".
+		// The literal "all" value created a shadow bucket the LLM
+		// kept selecting when it asked for "all folders" — see
+		// DEFECTS.html.
+		{"fallback to empty", []string{"user-only"}, ""},
+		{"fallback when empty", []string{}, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

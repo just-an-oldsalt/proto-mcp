@@ -15,6 +15,13 @@ func mailSearch(deps Deps) mcp.Tool {
 		Query  string `json:"query"`
 		Limit  int    `json:"limit,omitempty"`
 		Cursor string `json:"cursor,omitempty"`
+		// Defect D3: date range as top-level params, matching the
+		// shape of mail_list. The DSL's before:/after: still work
+		// (and since:/until: now alias to them in the parser), but
+		// the LLM defaults to top-level params; surfacing them at
+		// the schema level makes the contract obvious.
+		Since string `json:"since,omitempty"`
+		Until string `json:"until,omitempty"`
 	}
 
 	return mcp.Tool{
@@ -23,14 +30,18 @@ func mailSearch(deps Deps) mcp.Tool {
 			"from:alice  to:bob  subject:\"gear list\"  in:inbox  " +
 			"before:2026-01-01  after:2025-12-01  has:attachment  " +
 			"plus bare full-text terms (subject + body + sender). " +
-			"All criteria are AND-joined. Read-only — does NOT pull fresh data from Proton; " +
+			"All criteria are AND-joined. Date range can also be supplied as " +
+			"top-level since / until params (RFC3339 or YYYY-MM-DD). " +
+			"Read-only — does NOT pull fresh data from Proton; " +
 			"call mail_sync first if the user implies they want recent activity.",
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
 				"query":  {"type": "string", "description": "Search query in the DSL described in the tool description."},
 				"limit":  {"type": "integer", "minimum": 1, "maximum": 200, "default": 50},
-				"cursor": {"type": "string", "description": "Opaque pagination cursor from a previous response"}
+				"cursor": {"type": "string", "description": "Opaque pagination cursor from a previous response"},
+				"since":  {"type": "string", "description": "Lower bound on message date. RFC3339 or YYYY-MM-DD. Equivalent to after: in the query DSL."},
+				"until":  {"type": "string", "description": "Exclusive upper bound on message date. RFC3339 or YYYY-MM-DD. Equivalent to before: in the query DSL."}
 			},
 			"required": ["query"],
 			"additionalProperties": false
@@ -46,7 +57,26 @@ func mailSearch(deps Deps) mcp.Tool {
 			}
 
 			opts := store.SearchOpts{Limit: in.Limit}
-			qhash := queryStringHash(in.Query)
+			if in.Since != "" {
+				t, err := parseListDate(in.Since)
+				if err != nil {
+					return nil, mcp.NewError(mcp.CodeInvalidParams,
+						fmt.Sprintf("mail_search since: %v", err))
+				}
+				opts.Filter.SinceUnix = t.Unix()
+			}
+			if in.Until != "" {
+				t, err := parseListDate(in.Until)
+				if err != nil {
+					return nil, mcp.NewError(mcp.CodeInvalidParams,
+						fmt.Sprintf("mail_search until: %v", err))
+				}
+				opts.Filter.UntilUnix = t.Unix()
+			}
+
+			// Cursor hash binds to query + date range so a since/until
+			// change invalidates a stale cursor.
+			qhash := queryStringHash(in.Query + "|" + in.Since + "|" + in.Until)
 			if in.Cursor != "" {
 				off, ok := decodeCursor(in.Cursor, qhash)
 				if !ok {
