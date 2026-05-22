@@ -100,7 +100,7 @@
   <li><span class="check done">[x]</span> Phase 0 — repo skeleton, Go toolchain, pinned deps, auth smoke test</li>
   <li><span class="check done">[x]</span> Phase 1 — SQLite + full backfill of message metadata <em>(spot-checked 100 msgs in 781ms; full 64k drain in progress)</em></li>
   <li><span class="check done">[x]</span> Phase 1.5 — Security foundations (A/B/C/D/E/F all merged; see <code>SECURITY.md</code> for the audit they came from)</li>
-  <li><span class="check">[ ]</span> Phase 2 — event-loop sync, lazy body decrypt, FTS5 search</li>
+  <li><span class="check done">[x]</span> Phase 2 — sanitize / body-fetch / search / sync (A/B/C/D all merged; SECURITY re-audit follow-ups B-1/2/3/4/9/10/12 folded in)</li>
   <li><span class="check">[ ]</span> Phase 3 — MCP server (hand-rolled JSON-RPC over stdio for now)</li>
   <li><span class="check">[ ]</span> Phase 4 — policy engine + audit log + Touch ID approval broker</li>
   <li><span class="check">[ ]</span> Phase 5 — write tools (drafts, send, trash, label/folder CRUD)</li>
@@ -392,7 +392,11 @@ Pulled forward from Phase 7.</p>
     release workflow.</li>
 </ul>
 
-<h2>Phase 2 — Sync loop + lazy decrypt + FTS <span class="tag">planning</span></h2>
+<h2>Phase 2 — Sync loop + lazy decrypt + FTS <span class="tag">done</span></h2>
+<p><strong>Landed:</strong> #19 sanitize, #20 body-fetch + cache + <code>read</code> CLI
++ audit folds (B-1 / B-3 / B-4 / B-10 / B-2 / B-12), #21 search DSL
++ FTS + <code>search</code> CLI, #22 event-loop sync + <code>sync</code> CLI + B-9
+backfill bounds. Pre-Phase-2 hotfix #18 covered B-5 / B-7 / B-8 / B-11.</p>
 <p>Phase 1 left us with a populated <code>messages</code> table (envelopes only) and
 a stored <code>event_cursor</code>. Phase 2 closes the loop: keep the local
 mirror in sync with the server via event-id polling, decrypt + cache
