@@ -21,6 +21,7 @@ import (
 	gpa "github.com/ProtonMail/go-proton-api"
 
 	"github.com/just-an-oldsalt/proto-mcp/internal/cli"
+	"github.com/just-an-oldsalt/proto-mcp/internal/logging"
 	protonclient "github.com/just-an-oldsalt/proto-mcp/internal/proton"
 	"github.com/just-an-oldsalt/proto-mcp/internal/secret"
 )
@@ -36,6 +37,10 @@ var secretEnvNames = []string{
 }
 
 func main() {
+	// Install the redacting slog logger before anything else so any
+	// stderr log calls that follow are filtered. SECURITY Foundational #2.
+	logging.Setup(os.Stderr)
+
 	if len(os.Args) < 2 {
 		usage()
 		os.Exit(2)

@@ -294,12 +294,22 @@ Pulls the Phase 6 Keychain token-persistence story forward.</p>
     "<code>--require-touchid</code>" mode in Phase 6.</li>
 </ul>
 
-<p><strong>1.5/D — <code>security/structured-logging</code></strong>.</p>
+<p><strong>1.5/D — <code>security/structured-logging</code></strong> <span class="tag">done</span>.</p>
 <ul>
-  <li><span class="check">[ ]</span> <code>internal/logging</code>: <code>log/slog</code>-based logger
-    with a <code>ReplaceAttr</code> hook redacting <code>password</code>, <code>mailbox_password</code>,
-    <code>totp</code>, <code>auth_token</code>, <code>refresh_token</code>, <code>body</code>, <code>body_html</code>.
-    Set as default before any subcommand starts. <em>(Foundational #2)</em></li>
+  <li><span class="check done">[x]</span> <code>internal/logging</code>: <code>log/slog</code>
+    TextHandler with a <code>ReplaceAttr</code> hook that redacts the
+    sensitive-key set (password, mailbox_password, totp, access_token,
+    refresh_token, salted_key_pass, body, body_text, body_html, cookie,
+    authorization — case-insensitive). <em>(Foundational #2)</em></li>
+  <li><span class="check done">[x]</span> <code>logging.Setup</code> installed as <code>slog</code>
+    default at the top of <code>main()</code> so all later log calls go
+    through the filter — including from goroutines and library code
+    that calls <code>slog.Default()</code>.</li>
+  <li><span class="check done">[x]</span> Replaced the existing internal-state stderr
+    warnings in <code>session.go</code> / <code>login.go</code> with <code>slog.Warn</code> calls
+    as proof-of-concept. User-facing CLI output (prompts, success
+    messages, command errors) stays on <code>fmt</code> — slog format is
+    wrong for interactive UX.</li>
 </ul>
 
 <p><strong>1.5/E — <code>security/file-hardening</code></strong>. Small file-system + error

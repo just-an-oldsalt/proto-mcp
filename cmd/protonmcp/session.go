@@ -3,9 +3,8 @@ package main
 import (
 	"context"
 	"errors"
-	"fmt"
+	"log/slog"
 	"net/http"
-	"os"
 
 	gpa "github.com/ProtonMail/go-proton-api"
 
@@ -51,7 +50,7 @@ func acquireSession(ctx context.Context) (*sessionBundle, error) {
 	if b, err := tryResume(ctx); err == nil {
 		return b, nil
 	} else if !errors.Is(err, keystore.ErrNotFound) {
-		fmt.Fprintf(os.Stderr, "stored session unusable (%v); re-authenticating ...\n", err)
+		slog.Warn("stored session unusable; re-authenticating", "err", err.Error())
 	}
 
 	jar := protonclient.NewCookieJar()
@@ -72,7 +71,7 @@ func acquireSession(ctx context.Context) (*sessionBundle, error) {
 
 	bundle := &sessionBundle{Session: sess, Manager: mgr, Jar: jar}
 	if err := persistSession(bundle); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: failed to save session to Keychain (%v); subsequent runs will need to log in again.\n", err)
+		slog.Warn("failed to save session to Keychain; subsequent runs will need to log in again", "err", err.Error())
 	}
 	wireKeystoreSync(bundle)
 	return bundle, nil
@@ -115,7 +114,7 @@ func tryResume(ctx context.Context) (*sessionBundle, error) {
 	// explicit save here, the Keychain still holds the OLD refresh
 	// token and the next process hits 400 / 422 on its own resume.
 	if err := persistSession(bundle); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: failed to update Keychain with rotated tokens (%v)\n", err)
+		slog.Warn("failed to update Keychain with rotated tokens", "err", err.Error())
 	}
 
 	wireKeystoreSync(bundle)
@@ -154,7 +153,7 @@ func wireKeystoreSync(b *sessionBundle) {
 			Cookies:       protonclient.JarCookies(b.Jar),
 		})
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "warning: token rotation not persisted (%v)\n", err)
+			slog.Warn("token rotation not persisted", "err", err.Error())
 		}
 	}
 }
