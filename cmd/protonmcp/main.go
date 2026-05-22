@@ -57,6 +57,8 @@ func main() {
 		err = runLogin(ctx, args)
 	case "logout":
 		err = runLogout(ctx, args)
+	case "inspect":
+		err = runInspect(ctx, args)
 	case "whoami":
 		err = runWhoami(ctx)
 	case "backfill":
