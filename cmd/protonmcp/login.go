@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 
 	"github.com/just-an-oldsalt/proto-mcp/internal/keystore"
 	protonclient "github.com/just-an-oldsalt/proto-mcp/internal/proton"
@@ -46,6 +47,14 @@ func runLogin(ctx context.Context, _ []string) error {
 	primary, _ := sess.PrimaryAddress()
 	fmt.Printf("Logged in as %s (%s). Session stored in Keychain.\n",
 		sess.Email, coalesce(primary.Email, "no primary address"))
+	// SECURITY B-7. The Keychain item uses AccessibleWhenUnlocked, which
+	// only gates device state — not which process reads it. Until this
+	// binary is code-signed (Phase 7), any other process running as the
+	// same user can read the refresh token + salted mailbox pass. Make
+	// this loud at login time so it isn't a surprise.
+	fmt.Println("Warning: until protonmcp is code-signed, any process running as your user can read")
+	fmt.Println("the stored session (refresh token + salted mailbox pass). Code-signing is tracked")
+	fmt.Println("in Phase 7. Run `protonmcp logout` before installing untrusted software.")
 	return nil
 }
 
@@ -70,6 +79,18 @@ func runLogout(ctx context.Context, _ []string) error {
 		})
 		if err == nil {
 			sess.CloseAndRevoke() // explicit revoke: this is logout
+		} else {
+			// SECURITY B-8. Resume failed → AuthDelete never ran → the
+			// session is still alive on Proton's side. We're about to
+			// delete the local Keychain entry; tell the user how to
+			// finish the revocation manually rather than leaving them
+			// thinking they're fully logged out.
+			fmt.Fprintf(os.Stderr,
+				"warning: couldn't reach Proton to revoke the server-side session (%v).\n"+
+					"  The local Keychain entry will still be deleted, but the session\n"+
+					"  remains active on Proton until you visit\n"+
+					"    https://account.proton.me/u/0/mail/security\n"+
+					"  and revoke it under \"Active sessions\".\n", err)
 		}
 		mgr.Close()
 	}
