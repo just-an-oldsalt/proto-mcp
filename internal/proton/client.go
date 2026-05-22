@@ -285,6 +285,10 @@ func NewManager(jar http.CookieJar) *gpa.Manager {
 		gpa.WithCookieJar(jar),
 	}
 	if os.Getenv("PROTONMCP_DEBUG") != "" {
+		fmt.Fprintln(os.Stderr,
+			"warning: PROTONMCP_DEBUG=1 — every HTTP request and response "+
+				"(including refresh tokens) is being dumped to stderr. "+
+				"Disable before sharing logs.")
 		opts = append(opts, gpa.WithTransport(&debugTransport{
 			next: http.DefaultTransport,
 			out:  os.Stderr,

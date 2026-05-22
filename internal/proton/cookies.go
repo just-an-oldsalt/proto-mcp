@@ -40,13 +40,35 @@ func NewCookieJar() http.CookieJar {
 }
 
 // JarCookies returns the cookies the jar currently holds for the
-// Proton API host. Used to serialize a jar for the Keychain blob
-// after a successful login or token rotation.
+// Proton API host, deduplicated by Name. Used to serialize a jar for
+// the Keychain blob after a successful login or token rotation.
+//
+// Dedup is needed because Proton occasionally sets the same cookie
+// (e.g. Session-Id) on multiple paths, which the stdlib cookiejar
+// stores as separate entries. Without this, the blob grows by one
+// entry per invocation. We keep the LAST occurrence under the
+// assumption that the most recent server write is the canonical one.
 func JarCookies(jar http.CookieJar) []*http.Cookie {
 	if jar == nil {
 		return nil
 	}
-	return jar.Cookies(protonAPIURL)
+	raw := jar.Cookies(protonAPIURL)
+	if len(raw) <= 1 {
+		return raw
+	}
+	byName := make(map[string]*http.Cookie, len(raw))
+	order := make([]string, 0, len(raw))
+	for _, c := range raw {
+		if _, seen := byName[c.Name]; !seen {
+			order = append(order, c.Name)
+		}
+		byName[c.Name] = c // overwrite — last write wins
+	}
+	out := make([]*http.Cookie, 0, len(order))
+	for _, name := range order {
+		out = append(out, byName[name])
+	}
+	return out
 }
 
 // PreloadJar populates a fresh jar with cookies previously extracted
