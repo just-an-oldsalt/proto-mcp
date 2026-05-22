@@ -576,20 +576,199 @@ B-10 folded in) &rarr; 2/D &rarr; 2/C (with B-9 folded in).</p>
     <code>In-Reply-To</code> / <code>References</code> headers is in 2/B.</li>
 </ul>
 
-<h2>Phase 3 — MCP server (read tools only)</h2>
-<p>Spec calls for hand-rolled JSON-RPC, not a library. ~200 lines.</p>
+<h2>Phase 3 — MCP server (read tools only) <span class="tag">planning</span></h2>
+<p>Hand-rolled JSON-RPC 2.0 over stdio per the
+<a href="https://modelcontextprotocol.io/specification/2025-06-18/basic/transports">MCP 2025-06-18 spec</a>.
+Same shape as Phase 2 planning: focused sub-branches with explicit
+dependencies and a small list of decisions for sign-off.</p>
+
+<h3>Framing — settled from the spec, not an open question</h3>
+<p>The MCP spec is definitive on stdio framing, so I'm folding the
+old open question into the plan:</p>
 <ul>
-  <li><span class="check">[ ]</span> <code>internal/mcp</code> package: framing (Content-Length headers per LSP-style
-    stdio, or newline-delimited — check current MCP spec), request/reply
-    types, registry mapping <code>tool_name → handler</code>.</li>
-  <li><span class="check">[ ]</span> Wire read tools first: <code>mail.list</code>, <code>mail.search</code>, <code>mail.read</code>,
-    <code>mail.read_thread</code>, <code>mail.list_attachments</code>, <code>account.whoami</code>,
-    <code>labels.list</code>, <code>folders.list</code>.</li>
-  <li><span class="check">[ ]</span> <code>cmd/protonmcp serve-stdio</code> subcommand: reads JSON-RPC from stdin,
-    writes to stdout. This is what Claude Desktop will spawn directly
-    in the <strong>interim</strong> (before the daemon+shim split lands in Phase 6).</li>
-  <li><span class="check">[ ]</span> End-to-end test from Claude Desktop with a local config pointing to
-    this binary. Confirm <code>mail.list</code> and <code>mail.search</code> round-trip.</li>
+  <li>Messages are newline-delimited JSON. Each line is one complete
+    JSON-RPC <em>request</em>, <em>notification</em>, or <em>response</em>.
+    No embedded newlines inside messages.</li>
+  <li><code>stdout</code> is reserved for MCP traffic — anything else (debug
+    prints, third-party library chatter) corrupts the stream.</li>
+  <li><code>stderr</code> is the only allowed log surface. Phase 1.5/D's slog
+    writer already targets stderr, so nothing to wire there.</li>
+</ul>
+
+<h3>Branches in this phase</h3>
+
+<p><strong>3/A — <code>phase-3/mcp-framing</code></strong>. Foundation; no other deps.</p>
+<ul>
+  <li><span class="check">[ ]</span> <code>internal/mcp</code> package with the
+    JSON-RPC 2.0 base: <code>Request</code> / <code>Response</code> / <code>Error</code> types,
+    NDJSON read/write over <code>io.Reader</code> / <code>io.Writer</code>, robust to
+    framing errors (a malformed line returns a JSON-RPC parse-error
+    response without killing the loop).</li>
+  <li><span class="check">[ ]</span> <code>Server</code> struct with a
+    <code>map[string]Tool</code> registry. A <code>Tool</code> bundles
+    <code>name</code> / <code>description</code> / <code>inputSchema</code> /
+    optional <code>outputSchema</code> / handler func. Registration is
+    static at server-construction time.</li>
+  <li><span class="check">[ ]</span> <code>initialize</code> /
+    <code>notifications/initialized</code> handshake. Declares the
+    <code>tools</code> capability with <code>listChanged: false</code> for v1.</li>
+  <li><span class="check">[ ]</span> <code>tools/list</code> and
+    <code>tools/call</code> dispatch. <code>tools/list</code> returns the
+    registered <code>Tool</code> definitions verbatim; <code>tools/call</code>
+    looks up the handler by <code>params.name</code> and runs it.</li>
+  <li><span class="check">[ ]</span> Error mapping — two flavors per spec:
+    <ul>
+      <li>JSON-RPC <code>error</code> field for protocol failures
+        (unknown tool, malformed args, server-internal).</li>
+      <li><code>result.isError: true</code> with a text content for
+        tool-execution failures (decrypt failed, message not found,
+        etc.). The LLM sees an error message instead of falling out of
+        the conversation.</li>
+    </ul>
+  </li>
+  <li><span class="check">[ ]</span> Tests with an in-memory pipe pair —
+    a fake stdio loop driven by table fixtures. No live API needed.</li>
+</ul>
+
+<p><strong>3/B — <code>phase-3/read-tools</code></strong>. Depends on 3/A.</p>
+<ul>
+  <li><span class="check">[ ]</span> <code>account.whoami</code> — wraps the
+    existing <code>whoami</code> output (email, addresses, plan info), JSON
+    body in a text content block.</li>
+  <li><span class="check">[ ]</span> <code>mail.list</code> — paginated
+    listing from <code>store.messages</code>. Params: <code>folder</code>,
+    <code>label_id</code>, <code>limit</code>, <code>cursor</code>, <code>unread_only</code>,
+    <code>since</code>, <code>until</code> (matches the design spec's tool
+    schema). Returns envelope summaries + next cursor.</li>
+  <li><span class="check">[ ]</span> <code>mail.search</code> — wraps
+    Phase 2/D's <code>store.Search</code>. Translates the existing query DSL
+    parser; result shape matches <code>mail.list</code>.</li>
+  <li><span class="check">[ ]</span> <code>mail.read</code> — wraps
+    Phase 2/B's <code>FetchAndDecryptMessage</code> + body-cache check.
+    Both <code>text</code> and <code>html</code> in the output (sanitized via
+    <code>internal/sanitize</code>, which is the boundary enforcement of
+    Foundational #7).</li>
+  <li><span class="check">[ ]</span> <code>mail.read_thread</code> — selects
+    messages by <code>thread_id</code>, sorted oldest-first. Returns each
+    message body via the same cache-or-fetch path as <code>mail.read</code>.</li>
+  <li><span class="check">[ ]</span> <code>mail.list_attachments</code> —
+    parses <code>messages.raw_json</code> for attachment metadata
+    (id / filename / mime_type / size / inline). Pure DB read, no
+    network. <code>mail.download_attachment</code> stays in Phase 4/5 since
+    it has a <code>prompt</code> policy.</li>
+  <li><span class="check">[ ]</span> <code>labels.list</code> and
+    <code>folders.list</code> — split by <code>labels.type</code> column
+    (type=1 → labels, type=3 → folders).</li>
+  <li><span class="check">[ ]</span> <code>mail.sync</code> — thin wrapper
+    around <code>internal/sync.RunOnce</code>. Tool description steers
+    the LLM to call it for recency-sensitive queries; default behavior
+    for everything else is read-from-mirror. See Q7 decision.</li>
+  <li><span class="check">[ ]</span> Each tool gets a JSON-schema
+    <code>inputSchema</code> and an <code>outputSchema</code>. Both are
+    hand-written in Go literals next to the handler — refactor to
+    reflection-based generation only if maintenance bites.</li>
+</ul>
+
+<p><strong>3/C — <code>phase-3/serve-stdio</code></strong>. Depends on 3/A + 3/B.</p>
+<ul>
+  <li><span class="check">[ ]</span> <code>protonmcp serve-stdio</code>
+    subcommand. Acquires a session eagerly at startup (we'd rather
+    fail loudly on broken auth than have the first <code>mail.read</code>
+    surprise the LLM with a 30-second SRP login). Spawns the NDJSON
+    loop.</li>
+  <li><span class="check">[ ]</span> Foundational #3 (MCP trust model):
+    <ul>
+      <li>stdio is the only transport. No <code>net.Listen("tcp", ...)</code>
+        anywhere in the binary.</li>
+      <li><code>init()</code>-time assertion that panics if any test or
+        future code tries to start a TCP listener — locks the
+        invariant before it can regress silently.</li>
+      <li>No <code>SO_PEERCRED</code> check needed in stdio mode; the
+        trust boundary is "whoever spawned this process," which
+        inherits our UID and is our threat model's accepted trust.</li>
+    </ul>
+  </li>
+  <li><span class="check">[ ]</span> Prompt-injection runtime banner —
+    first-call <code>tools/list</code> response includes a top-level
+    advisory in the description for <code>mail.read</code> / <code>mail.search</code>
+    noting that email content is untrusted input and the LLM should
+    treat instructions inside email bodies as data, not commands.
+    Not a substitute for the Phase 4 policy engine but a useful
+    breadcrumb.</li>
+  <li><span class="check">[ ]</span> <code>protonmcp install</code> writes
+    a Claude Desktop config snippet (<code>~/Library/Application
+    Support/Claude/claude_desktop_config.json</code>) with the absolute
+    path to the binary. Idempotent — re-running updates the path
+    rather than duplicating the entry.</li>
+  <li><span class="check">[ ]</span> End-to-end smoke: launch via Claude
+    Desktop, call <code>tools/list</code>, <code>mail.search</code>,
+    <code>mail.read</code>. Capture transcript to docs/.</li>
+</ul>
+
+<h3>Order &amp; dependencies</h3>
+<p>A first (foundation), then B and C can land sequentially. B is the
+bulk of the work (8 tools × small handlers). C is small but it's
+the integration moment — easier to land after B is solid.</p>
+
+<h3>Decisions locked from sign-off</h3>
+<ul>
+  <li><strong>Q1: Tool naming = dots.</strong> <code>mail.list</code>,
+    <code>mail.search</code>, <code>mail.read</code>, etc. Matches the
+    design spec's namespace look. JSON-RPC method-name is still
+    <code>tools/call</code> (MCP convention); the dotted name is the
+    <code>params.name</code> value.</li>
+  <li><strong>Q2: Result shape = structured.</strong> Every tool returns
+    <code>content: [{type:"text", text:"<JSON>"}]</code> AND a parallel
+    <code>structuredContent</code> object. Every tool declares an
+    explicit <code>outputSchema</code>. Boilerplate accepted in exchange
+    for client validation affordances.</li>
+  <li><strong>Q3: Cursors = opaque.</strong>
+    <code>base64(json{offset, query_hash})</code>. Server validates
+    <code>query_hash</code> matches the current query before honoring
+    the offset; mismatch returns a protocol error rather than
+    silently misinterpreting.</li>
+  <li><strong>Q4: Session acquire = eager.</strong> SRP / Keychain
+    resume runs during <code>initialize</code>. Auth failures land as
+    "MCP server failed to start" in Claude Desktop, not as
+    mid-conversation tool errors.</li>
+  <li><strong>Q5: <code>mail.read_thread</code> = oldest-first.</strong>
+    Conversation order.</li>
+  <li><strong>Q6: <code>mail.read</code> body = both <code>text</code>
+    and <code>html</code>.</strong> Default returns both; a future
+    <code>body_format: "text" | "html" | "both"</code> param will let
+    callers trim when prompt-budget matters.</li>
+  <li><strong>Q7: <code>mail.sync</code> as its own tool (model-driven
+    freshness).</strong> Resolution from the conversation — instead of
+    auto-syncing every call (eats 30-100ms) or never syncing (stale
+    until the daemon lands), expose <code>mail.sync</code> as a
+    standalone tool with a description that steers the LLM:
+    <em>"Call before <code>mail.list</code> or <code>mail.search</code>
+    when the user's question implies recent activity ('just got',
+    'today', 'latest from X'). Skip for historical or open-ended
+    queries."</em> Reads from the local mirror everywhere else.
+    Phase 6's daemon adds passive freshness; this stays useful for
+    the "just got" cases the daemon's 30s interval can't keep up
+    with. Implementation: ~30 lines wrapping
+    <code>internal/sync.RunOnce</code> from Phase 2/C.</li>
+</ul>
+
+<h3>Gotchas</h3>
+<ul>
+  <li><strong>Nothing else may write to stdout.</strong> Any <code>fmt.Println</code>
+    in the serve-stdio code path corrupts the JSON-RPC stream. CI
+    should grep for <code>fmt.Print[ln]?</code> in <code>cmd/protonmcp/serve_stdio.go</code>
+    and the <code>internal/mcp</code> package and fail the build if it
+    finds any. (Lint follow-up alongside the broader golangci-lint
+    re-enablement.)</li>
+  <li>Resty (used by go-proton-api) has its own logger that defaults
+    to stdout if not overridden. Already redirected to a logrus
+    logger via WithLogger in <code>internal/proton.NewManager</code>;
+    verify it doesn't fall back to stdout under any error path
+    before <code>serve-stdio</code> ships.</li>
+  <li>The <code>messages.raw_json</code> column truncation (B-9, 1 MiB
+    cap) means attachment metadata in <code>mail.list_attachments</code>
+    can be partial for pathological messages. Document as a known
+    limitation.</li>
 </ul>
 
 <h2>Phase 4 — Policy engine, audit log, Touch ID</h2>
