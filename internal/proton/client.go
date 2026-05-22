@@ -10,12 +10,29 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
+	"time"
 
 	gpa "github.com/ProtonMail/go-proton-api"
 	"github.com/ProtonMail/gopenpgp/v2/crypto"
 
 	"github.com/just-an-oldsalt/proto-mcp/internal/secret"
 )
+
+// shutdownTimeout caps how long the session-revoke + close path is
+// willing to wait. Five seconds is generous for a single HTTPS round-
+// trip; anything longer than that and we'd rather walk away than block
+// the caller's shutdown indefinitely.
+const shutdownTimeout = 5 * time.Second
+
+// detachedShutdownCtx returns a fresh context with shutdownTimeout. Use
+// this for revoke paths that must run *even when the caller's context
+// is already cancelled* (Ctrl-C during login, SIGTERM during a long
+// backfill). Using the caller's cancelled context would silently skip
+// the server-side AuthDelete and leave the session alive on Proton.
+func detachedShutdownCtx() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), shutdownTimeout)
+}
 
 // HostURL is the production Proton Mail API endpoint, matching what
 // proton-bridge ships with.
@@ -64,6 +81,9 @@ func (c *Credentials) Zero() {
 // Session is the unlocked-state bundle returned by Login. The caller owns
 // the client and is responsible for calling Close when done; the keyrings
 // hold decrypted PGP material and should be cleared as soon as feasible.
+//
+// Close is idempotent (guarded by sync.Once), so it's safe to wire from
+// multiple defer / signal paths without risking double-revoke or panic.
 type Session struct {
 	Client       *gpa.Client
 	User         gpa.User
@@ -72,6 +92,8 @@ type Session struct {
 	AddrKRs      map[string]*crypto.KeyRing
 	PasswordMode gpa.PasswordMode
 	TwoFA        gpa.TwoFAStatus
+
+	closeOnce sync.Once
 }
 
 // PrimaryAddress returns the user's primary (Order == 1) enabled address,
@@ -94,22 +116,32 @@ func (s *Session) PrimaryAddress() (gpa.Address, bool) {
 	return fallback, haveFallback
 }
 
-// Close revokes the session on the server and zeroes local keyring state.
-// Safe to call multiple times.
-func (s *Session) Close(ctx context.Context) {
-	if s.UserKR != nil {
-		s.UserKR.ClearPrivateParams()
-		s.UserKR = nil
-	}
-	for id, kr := range s.AddrKRs {
-		kr.ClearPrivateParams()
-		delete(s.AddrKRs, id)
-	}
-	if s.Client != nil {
-		_ = s.Client.AuthDelete(ctx)
-		s.Client.Close()
-		s.Client = nil
-	}
+// Close revokes the session on the server and zeroes local keyring
+// state. Idempotent (guarded by sync.Once); subsequent calls are no-ops.
+//
+// Close builds its own short-timeout context for the server-side
+// AuthDelete call rather than taking one from the caller. This means
+// a Ctrl-C-cancelled parent context can't sneak through and skip the
+// revoke step — every Close attempt gets a fresh ~5s window. A hung
+// network can't block shutdown for longer than that.
+func (s *Session) Close() {
+	s.closeOnce.Do(func() {
+		if s.UserKR != nil {
+			s.UserKR.ClearPrivateParams()
+			s.UserKR = nil
+		}
+		for id, kr := range s.AddrKRs {
+			kr.ClearPrivateParams()
+			delete(s.AddrKRs, id)
+		}
+		if s.Client != nil {
+			ctx, cancel := detachedShutdownCtx()
+			defer cancel()
+			_ = s.Client.AuthDelete(ctx)
+			s.Client.Close()
+			s.Client = nil
+		}
+	})
 }
 
 // NewManager constructs a Manager pre-configured for production Proton
@@ -163,8 +195,14 @@ func Login(ctx context.Context, mgr *gpa.Manager, creds *Credentials) (*Session,
 		return nil, fmt.Errorf("srp login: %w", err)
 	}
 
+	// Use a detached context for revoke. The caller's ctx may be cancelled
+	// (Ctrl-C mid-login), and AuthDelete on a cancelled context would
+	// silently fail, leaving an authenticated session alive on Proton.
+	// SECURITY H-3.
 	cleanup := func() {
-		_ = client.AuthDelete(ctx)
+		revokeCtx, cancel := detachedShutdownCtx()
+		defer cancel()
+		_ = client.AuthDelete(revokeCtx)
 		client.Close()
 	}
 
