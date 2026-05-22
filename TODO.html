@@ -771,31 +771,169 @@ the integration moment — easier to land after B is solid.</p>
     limitation.</li>
 </ul>
 
-<h2>Phase 4 — Policy engine, audit log, Touch ID</h2>
+<h2>Phase 4 — Policy engine, audit log, Touch ID <span class="tag">planning</span></h2>
+<p>Lays the gating infrastructure for Phase 5's write tools — does not
+add write tools itself. Decomposed into four branches (A/B/C
+independent, D integrates).</p>
+
+<h3>Branches in this phase</h3>
+
+<p><strong>4/A — <code>phase-4/policy-engine</code></strong>. No deps.</p>
 <ul>
-  <li><span class="check">[ ]</span> <code>internal/policy</code>: YAML loader for <code>policy.default.yaml</code> (embedded
-    with <code>//go:embed</code>) and <code>~/Library/Application Support/protonmcp/policy.yaml</code>
-    (user override, shallow-merged on tool keys). Default policy verbatim
-    from spec.</li>
-  <li><span class="check">[ ]</span> Hot reload on <code>SIGHUP</code> and <code>protonmcp policy reload</code>. Invalid YAML
-    keeps the previous policy in place.</li>
-  <li><span class="check">[ ]</span> Middleware that wraps every tool handler:
-    <code>decide(tool, args, caller) → allow|prompt|deny</code>. Decisions written
-    to <code>audit_log</code> before action attempt; outcome filled in after.</li>
-  <li><span class="check">[ ]</span> Audit log writer: SQLite row + JSONL mirror at
-    <code>~/Library/Application Support/protonmcp/audit.log</code> for tailing.
-    Redact per spec rules (body sha256+bytes, never literal body or
-    passwords; recipient addresses logged in full).</li>
-  <li><span class="check">[ ]</span> Swift Touch ID helper at <code>helpers/touchid/main.swift</code> (~50 LOC).
-    Build with <code>swiftc -O -o helpers/touchid/protonmcp-touchid main.swift</code>.
-    Reads structured JSON payload from stdin (title, body, caller),
-    shows <code>LAContext.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics)</code>,
-    exits 0 on approve / 1 on deny / 2 on cancel.</li>
-  <li><span class="check">[ ]</span> <code>internal/approval</code>: broker that execs the Swift helper, parses the
-    result, caches approvals per-tool for the configured <code>ttl</code>. For
-    <code>confirm: true</code> tools, also drive a native <code>NSAlert</code> for the
-    second-step confirmation showing literal operation details (see
-    spec "Approval prompt content" section).</li>
+  <li><span class="check">[ ]</span> <code>internal/mcperrors</code> — sentinel
+    set: <code>ErrUserCanceled</code>, <code>ErrAuthFailed</code>,
+    <code>ErrNetwork</code>, <code>ErrUnlockFailed</code>,
+    <code>ErrPolicyDenied</code>. Closes M-4 / M-5 from audits.</li>
+  <li><span class="check">[ ]</span> <code>internal/caller</code> — resolves
+    <code>(PID, UID, binary)</code> via <code>os.Getppid</code> +
+    <code>proc_pidpath</code>. Cached per serve-stdio session.</li>
+  <li><span class="check">[ ]</span> <code>internal/policy</code> —
+    <code>Engine</code>, <code>Decide(tool, args, caller)
+    (Decision, *ToolPolicy)</code>, <code>Reload() error</code>.
+    YAML shallow-merge of <code>default.yaml</code> (embedded) +
+    user override at <code>~/Library/Application Support/protonmcp/policy.yaml</code>.
+    Default-deny for unknown tools (Foundational #4).
+    Invalid override keeps previous policy.</li>
+  <li><span class="check">[ ]</span> <code>internal/policy/pidfile.go</code>
+    — <code>~/Library/Application Support/protonmcp/serve-stdio.pid</code>
+    with advisory <code>flock</code>; stale-PID via <code>kill(pid, 0)</code>.</li>
+  <li><span class="check">[ ]</span> <code>cmd/protonmcp/policy.go</code>
+    — <code>policy {reload | show | validate &lt;path&gt;}</code>
+    subcommands. <code>reload</code> reads the PID file and sends SIGHUP.</li>
+  <li><span class="check">[ ]</span> SIGHUP rewire (closes B-15): main
+    <code>signal.NotifyContext</code> stops listening to HUP; serve-stdio
+    installs its own handler that calls <code>engine.Reload()</code>.
+    Other subcommands fall back to kernel-default HUP semantics
+    (process termination — equivalent to today).</li>
+</ul>
+
+<p><strong>4/B — <code>phase-4/audit-log</code></strong>. Depends on 4/A
+(uses <code>policy.Caller</code>, <code>mcperrors</code>).</p>
+<ul>
+  <li><span class="check">[ ]</span> <code>internal/redact</code> —
+    extracted from <code>internal/logging</code>. Three exports:
+    <code>Attr(slog.Attr) slog.Attr</code> (used by logging),
+    <code>JSON(json.RawMessage) json.RawMessage</code> (used by audit),
+    <code>Body(string) (sha256hex, bytes)</code> (Phase-5 draft bodies).
+    Closes B-4 — the value-heuristic backstop lives in one place
+    that both consumers call.</li>
+  <li><span class="check">[ ]</span> <code>internal/logging</code> becomes
+    a thin shim over <code>redact.Attr</code>.</li>
+  <li><span class="check">[ ]</span> <code>internal/audit</code> —
+    <code>Writer.Begin(ctx, *Entry) (id, err)</code> writes a pre-action
+    row with NULL outcome; <code>Complete(ctx, id, outcome, errMsg,
+    dur)</code> updates the row and appends one JSONL line. Uses the
+    existing <code>audit_log</code> table from Phase 1.</li>
+  <li><span class="check">[ ]</span> JSONL mirror at
+    <code>~/Library/Application Support/protonmcp/audit.log</code>
+    (mode 0600). One line per completed call. JSONL failure logs
+    Warn, doesn't fail the call.</li>
+  <li><span class="check">[ ]</span> Redaction rules locked in:
+    sensitive keys (password, totp, *_token, etc.) → <code>"[REDACTED]"</code>;
+    body / text / html → <code>{sha256, bytes}</code>;
+    recipient addresses (<code>to</code> / <code>cc</code> / <code>bcc</code>)
+    stay literal. Test asserts the recipient invariant.</li>
+</ul>
+
+<p><strong>4/C — <code>phase-4/touchid-broker</code></strong>. Depends on
+4/A (uses <code>policy.ToolPolicy</code>, <code>mcperrors</code>).</p>
+<ul>
+  <li><span class="check">[ ]</span> <code>helpers/touchid/main.swift</code>
+    (~60 LOC). Reads JSON
+    <code>{title, body, caller, confirm}</code> from stdin. If
+    <code>confirm: true</code>, shows NSAlert with the literal title/body
+    first (Cancel / Send buttons), then runs
+    <code>LAContext.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics)</code>
+    only if the user clicks Send. Exits 0 approve / 1 deny+cancel+authfail
+    / 2 malformed input. <code>NSApp.activate(ignoringOtherApps: true)</code>
+    to bring the alert to front.</li>
+  <li><span class="check">[ ]</span> Root <code>Makefile</code> with
+    <code>helpers/touchid/protonmcp-touchid</code> target via
+    <code>swiftc -O</code>. CI builds it on the macos-14 runner.</li>
+  <li><span class="check">[ ]</span> <code>internal/approval</code> —
+    <code>Broker.Request(ctx, r) (source, err)</code>. Helper path
+    resolved relative to the binary, fallback to the Phase-7 .app
+    path. Per-call context timeout of 30s (well under Claude Desktop's
+    ~60s tool timeout).</li>
+  <li><span class="check">[ ]</span> TTL cache keyed by
+    <code>sha256(tool || pid || args_json)</code>. <code>ttl:0</code>
+    bypasses the cache (always reprompt). Exit 1 →
+    <code>ErrUserCanceled</code>; exit 2 or other → <code>ErrAuthFailed</code>.</li>
+</ul>
+
+<p><strong>4/D — <code>phase-4/mcp-middleware</code></strong>. Depends
+on 4/A + 4/B + 4/C.</p>
+<ul>
+  <li><span class="check">[ ]</span> Wrap <code>handleToolsCall</code>
+    in <code>internal/mcp/server.go</code>: caller resolve → audit.Begin
+    → policy.Decide → broker.Request (if prompt) → handler → defer
+    audit.Complete. <code>recover()</code> in the defer converts handler
+    panics to <code>ErrorResult</code> + outcome="error".</li>
+  <li><span class="check">[ ]</span> <code>mcp.New</code> gets functional
+    options <code>WithPolicy</code> / <code>WithAudit</code> /
+    <code>WithApproval</code> so Phase-3 tests keep passing unmodified
+    (middleware no-ops when any injection is nil).</li>
+  <li><span class="check">[ ]</span> <code>Context</code> extended with
+    <code>Caller policy.Caller</code> so future tool handlers (Phase 5)
+    can read who's calling without re-resolving.</li>
+  <li><span class="check">[ ]</span> <code>serve-stdio.go</code>
+    constructs all three (policy, audit, broker) and injects.</li>
+</ul>
+
+<h3>Decisions locked from planning sign-off</h3>
+<ul>
+  <li><strong>Daemon discovery = PID file at startup.</strong> serve-stdio
+    writes <code>serve-stdio.pid</code> with advisory flock;
+    <code>policy reload</code> CLI reads it and signals.</li>
+  <li><strong>YAML schema bakes in forward-compat fields.</strong>
+    <code>allowed_recipients</code> and <code>description</code> parsed
+    today, enforced in Phase 5. Avoids a schema churn cycle on user
+    override files.</li>
+  <li><strong>Sentinel errors live in <code>internal/mcperrors</code></strong>
+    (not <code>internal/errors</code>, to avoid stdlib shadow).</li>
+  <li><strong>SIGHUP = strictly policy reload</strong>, no other
+    side-effects. Unix convention.</li>
+  <li><strong>Cache key for approval broker = (tool, pid,
+    args_hash)</strong>. Args-hashing means changing the recipient
+    list invalidates a cached approval — the safe answer for write tools.</li>
+</ul>
+
+<h3>Phase-5 stubs in default.yaml</h3>
+<p>Forward-compat: tool names that don't exist yet but will in Phase 5
+get policy entries today so <code>Decide</code> doesn't fall through
+to deny-by-fallback when those handlers register:</p>
+<pre><code>mail_send:    { decision: prompt, confirm: true,  ttl: 0,  allowed_recipients: [] }
+mail_reply:   { decision: prompt, confirm: true,  ttl: 0,  allowed_recipients: [] }
+mail_move:    { decision: prompt, ttl: 5m }
+mail_label:   { decision: prompt, ttl: 5m }
+mail_delete:  { decision: prompt, confirm: true,  ttl: 0 }
+</code></pre>
+
+<h3>Audits closed by this phase</h3>
+<ul>
+  <li><strong>Foundational #4</strong> (default-deny tool policy) → 4/A
+    default YAML.</li>
+  <li><strong>B-15</strong> (SIGHUP overloaded with shutdown) → 4/A
+    signal rewire.</li>
+  <li><strong>M-4 / M-5</strong> (sentinel error set) →
+    <code>internal/mcperrors</code> landed first commit on 4/A.</li>
+  <li><strong>B-4</strong> (value-heuristic redactor shared across log
+    and audit) → <code>internal/redact</code> extracted in 4/B.</li>
+</ul>
+
+<h3>Risks</h3>
+<ul>
+  <li>4/D wraps every tool call — risk of Phase 3 regression. Defensive
+    <code>recover()</code> + nil-injection no-op preserves the existing
+    test fleet and falls back to deny if the middleware itself panics.</li>
+  <li>Touch ID + Claude Desktop tool timeout — Claude times out at
+    ~60s, broker enforces its own 30s ceiling so we get a clean
+    <code>ErrUserCanceled</code> rather than a NULL-outcome audit row.</li>
+  <li>First-run LAContext entitlement attribution — when Claude Desktop
+    spawns us, macOS may attribute the prompt to Claude. The right fix
+    is <code>NSFaceIDUsageDescription</code> in a packaged .app
+    Info.plist; Phase 7 packaging owns that.</li>
+  <li>Audit log growth is unbounded — Phase 6/7 polish adds rotation.</li>
 </ul>
 
 <h2>Phase 5 — Write tools</h2>
