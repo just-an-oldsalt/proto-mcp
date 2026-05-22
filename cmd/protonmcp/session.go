@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 
 	gpa "github.com/ProtonMail/go-proton-api"
@@ -12,61 +13,84 @@ import (
 	protonclient "github.com/just-an-oldsalt/proto-mcp/internal/proton"
 )
 
-// acquireSession is the unified login-or-resume helper every read /
-// write subcommand uses. The flow:
+// sessionBundle is everything a subcommand needs to talk to Proton
+// and clean up afterward. The cookie jar lives in the bundle because
+// every save-back to the Keychain (initial, on rotation, on logout)
+// needs to extract the current cookies from it — without persisting
+// cookies, a future process's refresh request hits 422.
+type sessionBundle struct {
+	Session *protonclient.Session
+	Manager *gpa.Manager
+	Jar     http.CookieJar
+}
+
+// Close releases the Manager. Use bundle.Session.Close() (no server
+// revoke) for normal exit; call bundle.Session.CloseAndRevoke() before
+// this only when explicitly logging out.
+func (b *sessionBundle) Close() {
+	if b.Manager != nil {
+		b.Manager.Close()
+	}
+}
+
+// acquireSession is the unified login-or-resume helper. Flow:
 //
-//  1. Look in the Keychain. If a session blob is present, try Resume.
-//     Success returns immediately; Resume installs the AuthHandler that
-//     keeps the Keychain blob in sync with rotated tokens.
+//  1. If the Keychain holds a session, preload its cookies into a
+//     fresh jar, build the Manager around that jar, and call Resume.
 //
-//  2. If the stored session is expired (refresh token revoked), wipe
-//     the Keychain entry and fall through to the full interactive
-//     login. Tell the user out loud that we're re-authing — surprises
-//     about extra prompts are worse than the prompt itself.
+//  2. On Resume success, wire OnAuthUpdate so rotated tokens AND
+//     refreshed cookies get written back to the Keychain. Returns.
 //
-//  3. If the Keychain has nothing (first run on this machine), do the
-//     full SRP+TOTP+unlock login, then save to Keychain so the next
-//     invocation doesn't ask again.
+//  3. On ErrSessionExpired: wipe the Keychain entry (so we don't loop
+//     on the dead token), print a loud message that we're falling
+//     through, then continue to step 4.
 //
-// The returned Session has OnAuthUpdate wired to write rotated tokens
-// back to the Keychain, so long-running operations like backfill
-// survive token rotation cleanly.
-func acquireSession(ctx context.Context, mgr *gpa.Manager) (*protonclient.Session, error) {
-	if sess, err := tryResume(ctx, mgr); err == nil {
-		return sess, nil
+//  4. First-run / no-stored / re-auth path: empty jar, full
+//     interactive SRP + TOTP, save session + cookies on success.
+func acquireSession(ctx context.Context) (*sessionBundle, error) {
+	if b, err := tryResume(ctx); err == nil {
+		return b, nil
 	} else if !errors.Is(err, keystore.ErrNotFound) {
-		// Surface the reason we fell through so the user knows we're
-		// about to prompt them.
 		fmt.Fprintf(os.Stderr, "stored session unusable (%v); re-authenticating ...\n", err)
 	}
 
-	creds, err := collectCredentials()
+	jar := protonclient.NewCookieJar()
+	mgr := protonclient.NewManager(jar)
+
+	creds, err := collectCredentials(ctx)
 	if err != nil {
+		mgr.Close()
 		return nil, err
 	}
 	defer creds.Zero()
 
 	sess, err := protonclient.Login(ctx, mgr, creds)
 	if err != nil {
+		mgr.Close()
 		return nil, err
 	}
 
-	if err := persistSession(sess); err != nil {
+	bundle := &sessionBundle{Session: sess, Manager: mgr, Jar: jar}
+	if err := persistSession(bundle); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: failed to save session to Keychain (%v); subsequent runs will need to log in again.\n", err)
 	}
-	wireKeystoreSync(sess)
-
-	return sess, nil
+	wireKeystoreSync(bundle)
+	return bundle, nil
 }
 
-// tryResume reads the Keychain blob and attempts Resume. Returns
-// keystore.ErrNotFound when there's nothing to resume so the caller
-// can distinguish "first run" from "stored session is dead".
-func tryResume(ctx context.Context, mgr *gpa.Manager) (*protonclient.Session, error) {
+// tryResume opens an existing Keychain entry, rebuilds the jar +
+// Manager, and calls Resume. Returns keystore.ErrNotFound when there's
+// nothing to resume so the caller can fall through to interactive
+// login.
+func tryResume(ctx context.Context) (*sessionBundle, error) {
 	stored, err := keystore.Load()
 	if err != nil {
 		return nil, err
 	}
+
+	jar := protonclient.NewCookieJar()
+	protonclient.PreloadJar(jar, stored.Cookies)
+	mgr := protonclient.NewManager(jar)
 
 	sess, err := protonclient.Resume(ctx, mgr, protonclient.ResumeArgs{
 		Email:         stored.Email,
@@ -75,43 +99,47 @@ func tryResume(ctx context.Context, mgr *gpa.Manager) (*protonclient.Session, er
 		SaltedKeyPass: stored.SaltedKeyPass,
 	})
 	if err != nil {
-		// Stored token is dead — wipe the Keychain entry so we don't
-		// hammer Proton on the next run. Best-effort; if the delete
-		// fails the next run will just retry the same dead token,
-		// which is wasteful but not unsafe.
+		mgr.Close()
 		if errors.Is(err, protonclient.ErrSessionExpired) {
 			_ = keystore.Delete()
 		}
 		return nil, err
 	}
-	wireKeystoreSync(sess)
-	return sess, nil
+
+	bundle := &sessionBundle{Session: sess, Manager: mgr, Jar: jar}
+	wireKeystoreSync(bundle)
+	return bundle, nil
 }
 
-// persistSession writes the session's resumable fields to the Keychain.
-func persistSession(sess *protonclient.Session) error {
-	access, refresh := sess.Tokens()
+// persistSession writes the session's resumable fields (tokens, salted
+// pass, cookies) to the Keychain. Called once at first-login time;
+// subsequent rotations go through wireKeystoreSync's hook.
+func persistSession(b *sessionBundle) error {
+	access, refresh := b.Session.Tokens()
 	return keystore.Save(keystore.Live{
-		Email:         sess.Email,
-		UID:           sess.UID,
+		Email:         b.Session.Email,
+		UID:           b.Session.UID,
 		AccessToken:   access,
 		RefreshToken:  refresh,
-		SaltedKeyPass: sess.SaltedKeyPass,
+		SaltedKeyPass: b.Session.SaltedKeyPass,
+		Cookies:       protonclient.JarCookies(b.Jar),
 	})
 }
 
-// wireKeystoreSync installs an OnAuthUpdate hook that re-saves the
-// session to Keychain whenever the SDK rotates tokens. Without this,
-// a long-running operation that triggers a refresh mid-flight would
-// leave the Keychain holding a now-invalid refresh token.
-func wireKeystoreSync(sess *protonclient.Session) {
-	sess.OnAuthUpdate = func(uid, accessToken, refreshToken string) {
+// wireKeystoreSync installs OnAuthUpdate so any SDK-driven token
+// rotation also re-saves the Keychain blob (including refreshed
+// cookies). Without this, a long-running backfill that triggers a
+// refresh would leave the Keychain holding a now-invalidated refresh
+// token.
+func wireKeystoreSync(b *sessionBundle) {
+	b.Session.OnAuthUpdate = func(uid, accessToken, refreshToken string) {
 		err := keystore.Save(keystore.Live{
-			Email:         sess.Email,
+			Email:         b.Session.Email,
 			UID:           uid,
 			AccessToken:   accessToken,
 			RefreshToken:  refreshToken,
-			SaltedKeyPass: sess.SaltedKeyPass,
+			SaltedKeyPass: b.Session.SaltedKeyPass,
+			Cookies:       protonclient.JarCookies(b.Jar),
 		})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "warning: token rotation not persisted (%v)\n", err)

@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"sync"
 	"time"
 
@@ -67,8 +68,8 @@ type Credentials struct {
 	MailboxPassword secret.Secret // empty falls back to Password
 	TOTP            secret.Secret // required if account has TOTP 2FA
 
-	AskTOTP            func() (secret.Secret, error)
-	AskMailboxPassword func() (secret.Secret, error)
+	AskTOTP            func(context.Context) (secret.Secret, error)
+	AskMailboxPassword func(context.Context) (secret.Secret, error)
 }
 
 // Zero wipes every secret field. Idempotent.
@@ -221,21 +222,25 @@ func (s *Session) releaseLocal() {
 }
 
 // NewManager constructs a Manager pre-configured for production Proton
-// Mail. Tests can swap in a different host via the host arg (pass "" for
-// the default).
-func NewManager(host string) *gpa.Manager {
-	if host == "" {
-		host = HostURL
+// Mail with the given cookie jar attached. Pass nil for a fresh
+// in-memory jar — but note that for any flow that needs to RESUME a
+// session in a future process (login → exit → whoami), the jar must
+// be preloaded with the cookies saved at login time. See NewCookieJar,
+// JarCookies, and PreloadJar in cookies.go.
+func NewManager(jar http.CookieJar) *gpa.Manager {
+	if jar == nil {
+		jar = NewCookieJar()
 	}
 	return gpa.New(
-		gpa.WithHostURL(host),
+		gpa.WithHostURL(HostURL),
 		gpa.WithAppVersion(AppVersion),
+		gpa.WithCookieJar(jar),
 	)
 }
 
 func doTOTP(ctx context.Context, client *gpa.Client, creds *Credentials) error {
 	if creds.TOTP.Empty() && creds.AskTOTP != nil {
-		v, err := creds.AskTOTP()
+		v, err := creds.AskTOTP(ctx)
 		if err != nil {
 			return fmt.Errorf("prompt totp: %w", err)
 		}
@@ -310,7 +315,7 @@ func Login(ctx context.Context, mgr *gpa.Manager, creds *Credentials) (*Session,
 			cleanup()
 			return nil, errors.New("proton: account uses two-password mode; mailbox password required")
 		}
-		v, err := creds.AskMailboxPassword()
+		v, err := creds.AskMailboxPassword(ctx)
 		if err != nil {
 			cleanup()
 			return nil, fmt.Errorf("prompt mailbox password: %w", err)

@@ -11,10 +11,10 @@ import (
 )
 
 // runLogin does the full SRP + TOTP + key-unlock flow interactively
-// and saves the resulting session to the Keychain. Unlike whoami,
-// `login` does not try to resume from an existing Keychain entry —
-// the explicit subcommand is for "I want to re-auth from scratch",
-// so any existing entry is replaced.
+// and saves the resulting session (tokens + cookies) to the Keychain.
+// Unlike whoami, `login` does not try to resume from an existing
+// entry — the explicit subcommand is for "I want to re-auth from
+// scratch", so any existing entry is replaced.
 func runLogin(ctx context.Context, _ []string) error {
 	// Drop any existing entry up front so a failed re-login leaves
 	// a clean slate rather than the old + potentially-stale tokens.
@@ -22,14 +22,15 @@ func runLogin(ctx context.Context, _ []string) error {
 		return fmt.Errorf("clear existing session: %w", err)
 	}
 
-	creds, err := collectCredentials()
+	jar := protonclient.NewCookieJar()
+	mgr := protonclient.NewManager(jar)
+	defer mgr.Close()
+
+	creds, err := collectCredentials(ctx)
 	if err != nil {
 		return err
 	}
 	defer creds.Zero()
-
-	mgr := protonclient.NewManager("")
-	defer mgr.Close()
 
 	sess, err := protonclient.Login(ctx, mgr, creds)
 	if err != nil {
@@ -37,7 +38,8 @@ func runLogin(ctx context.Context, _ []string) error {
 	}
 	defer sess.Close()
 
-	if err := persistSession(sess); err != nil {
+	bundle := &sessionBundle{Session: sess, Manager: mgr, Jar: jar}
+	if err := persistSession(bundle); err != nil {
 		return fmt.Errorf("save session to Keychain: %w", err)
 	}
 
@@ -52,13 +54,13 @@ func runLogin(ctx context.Context, _ []string) error {
 func runLogout(ctx context.Context, _ []string) error {
 	stored, loadErr := keystore.Load()
 	if loadErr != nil && !errors.Is(loadErr, keystore.ErrNotFound) {
-		// Surface but don't bail — we still want to attempt the
-		// Keychain delete below.
 		fmt.Fprintf(os.Stderr, "warning: couldn't load stored session for server-side revoke (%v)\n", loadErr)
 	}
 
 	if loadErr == nil {
-		mgr := protonclient.NewManager("")
+		jar := protonclient.NewCookieJar()
+		protonclient.PreloadJar(jar, stored.Cookies)
+		mgr := protonclient.NewManager(jar)
 		sess, err := protonclient.Resume(ctx, mgr, protonclient.ResumeArgs{
 			Email:         stored.Email,
 			UID:           stored.UID,

@@ -107,23 +107,26 @@ process environment:
 }
 
 // collectCredentials assembles a Credentials value from environment
-// variables, prompting interactively for anything still empty. Secret-
-// bearing env entries are unset immediately after copying into a Secret
-// so they don't linger in the process environment. AskTOTP and
+// variables, prompting interactively for anything still empty. The
+// prompts respect ctx — Ctrl-C / SIGTERM closes /dev/tty and returns
+// ctx.Err() instead of hanging in a kernel read.
+//
+// Secret-bearing env entries are unset immediately after copying into a
+// Secret so they don't linger in the process environment. AskTOTP and
 // AskMailboxPassword are wired so that login can request those mid-flow
 // only when the server actually needs them.
-func collectCredentials() (*protonclient.Credentials, error) {
+func collectCredentials(ctx context.Context) (*protonclient.Credentials, error) {
 	creds := &protonclient.Credentials{
 		Email: os.Getenv("PROTONMCP_EMAIL"),
-		AskTOTP: func() (secret.Secret, error) {
-			v, err := cli.PromptLine("TOTP code: ")
+		AskTOTP: func(ctx context.Context) (secret.Secret, error) {
+			v, err := cli.PromptLine(ctx, "TOTP code: ")
 			if err != nil {
 				return secret.Secret{}, err
 			}
 			return secret.FromString(v), nil
 		},
-		AskMailboxPassword: func() (secret.Secret, error) {
-			return cli.PromptSecret("Mailbox password (two-password mode): ")
+		AskMailboxPassword: func(ctx context.Context) (secret.Secret, error) {
+			return cli.PromptSecret(ctx, "Mailbox password (two-password mode): ")
 		},
 	}
 
@@ -141,14 +144,14 @@ func collectCredentials() (*protonclient.Credentials, error) {
 	}
 
 	if creds.Email == "" {
-		v, err := cli.PromptLine("Proton email: ")
+		v, err := cli.PromptLine(ctx, "Proton email: ")
 		if err != nil {
 			return nil, fmt.Errorf("read email: %w", err)
 		}
 		creds.Email = v
 	}
 	if creds.Password.Empty() {
-		s, err := cli.PromptSecret("Password: ")
+		s, err := cli.PromptSecret(ctx, "Password: ")
 		if err != nil {
 			return nil, fmt.Errorf("read password: %w", err)
 		}
@@ -161,19 +164,18 @@ func collectCredentials() (*protonclient.Credentials, error) {
 }
 
 func runWhoami(ctx context.Context) error {
-	mgr := protonclient.NewManager("")
-	defer mgr.Close()
-
-	acquireCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	acquireCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 
 	start := time.Now()
-	sess, err := acquireSession(acquireCtx, mgr)
+	bundle, err := acquireSession(acquireCtx)
 	if err != nil {
 		return err
 	}
-	defer sess.Close()
+	defer bundle.Close()
+	defer bundle.Session.Close()
 
+	sess := bundle.Session
 	primary, _ := sess.PrimaryAddress()
 	fmt.Println("Authenticated:")
 	fmt.Printf("  User ID:        %s\n", sess.User.ID)

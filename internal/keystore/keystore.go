@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 
 	keychain "github.com/keybase/go-keychain"
 
@@ -44,12 +45,20 @@ var ErrNotFound = errors.New("keystore: no stored session")
 // Live is the in-memory shape of a stored session. SaltedKeyPass is a
 // secret.Secret because it's the binary used to re-unlock the user's
 // PGP keyring — just as sensitive as the mailbox password.
+//
+// Cookies carries the http.Cookie values set by /auth/v4 during the
+// initial SRP login. Proton's refresh endpoint is cookie-bound: a
+// cold-process resume with the right UID + refresh token still hits
+// 422 "Invalid refresh token" unless the same session cookies are
+// sent. We persist them alongside the tokens so a fresh process can
+// rebuild the jar exactly as the SDK left it.
 type Live struct {
 	Email         string
 	UID           string
 	AccessToken   string
 	RefreshToken  string
 	SaltedKeyPass secret.Secret
+	Cookies       []*http.Cookie
 }
 
 // Zero wipes secret material on the Live value.
@@ -63,18 +72,28 @@ func (l *Live) Zero() {
 
 // savedBlob is the on-disk shape (in the Keychain blob). Kept private
 // so callers can't accidentally hand a json.Marshal-able struct around
-// the codebase. All fields are strings because Keychain stores bytes
-// and we want a stable schema independent of secret.Secret internals.
+// the codebase. All fields are strings / JSON-safe types because
+// Keychain stores bytes and we want a stable schema independent of
+// secret.Secret internals.
 type savedBlob struct {
-	Email            string `json:"email"`
-	UID              string `json:"uid"`
-	AccessToken      string `json:"access_token"`
-	RefreshToken     string `json:"refresh_token"`
-	SaltedKeyPassB64 string `json:"salted_key_pass_b64"`
-	Version          int    `json:"v"` // schema version, for future migrations
+	Email            string         `json:"email"`
+	UID              string         `json:"uid"`
+	AccessToken      string         `json:"access_token"`
+	RefreshToken     string         `json:"refresh_token"`
+	SaltedKeyPassB64 string         `json:"salted_key_pass_b64"`
+	Cookies          []*http.Cookie `json:"cookies,omitempty"`
+	Version          int            `json:"v"` // schema version, for future migrations
 }
 
-const blobVersion = 1
+// blobVersion gets bumped when the JSON shape changes incompatibly.
+// Old blobs from a previous version are rejected (forcing the user to
+// re-login) rather than silently misinterpreted.
+//
+// History:
+//
+//	v1: original {email, uid, access_token, refresh_token, salted_key_pass_b64}
+//	v2: added cookies (required for cold-start refresh — see Live doc)
+const blobVersion = 2
 
 // Save writes (or overwrites) the single session slot.
 func Save(l Live) error {
@@ -87,6 +106,7 @@ func Save(l Live) error {
 		AccessToken:      l.AccessToken,
 		RefreshToken:     l.RefreshToken,
 		SaltedKeyPassB64: base64.StdEncoding.EncodeToString(l.SaltedKeyPass.Bytes()),
+		Cookies:          l.Cookies,
 		Version:          blobVersion,
 	}
 	data, err := json.Marshal(blob)
@@ -152,6 +172,7 @@ func Load() (Live, error) {
 		AccessToken:   blob.AccessToken,
 		RefreshToken:  blob.RefreshToken,
 		SaltedKeyPass: secret.New(saltedRaw),
+		Cookies:       blob.Cookies,
 	}
 	zero(saltedRaw)
 	return live, nil
