@@ -333,3 +333,264 @@ Genuinely done: H-1, H-3, L-1/2/3/5/6, M-2, M-3, Foundational #1 and #8.
 Structurally done, deferred path: H-2 (signal-driven shutdown).
 Still open: M-1, M-4, M-5, Foundational #2 (partial), #3, #4, #5 (partial), #6, #7.
 Biggest *new* risks introduced by Phase 1.5: B-1 (Secret round-trip via strings), B-4 (denylist redactor), B-5 (Ubuntu vulncheck), B-7 (unscoped Keychain ACL).
+
+---
+
+# Re-audit #2 — through commit `f7dc0d8` (Phase 2 complete)
+
+Read-only review covering `b6a8897` (pre-Phase-2 hotfix) through `f7dc0d8`
+(event-loop sync + B-9 backfill bounds). Three new packages
+(`internal/sanitize`, `internal/sync`) and significant new attack surface in
+`internal/proton/body.go`, `internal/store/{search,query,messages}.go`,
+`cmd/protonmcp/{read,search,sync,login}.go`.
+
+## Verification matrix
+
+| ID | Status | Evidence |
+|---|---|---|
+| **B-5** govulncheck on macOS + CODEOWNERS | **PARTIAL** | `.github/workflows/govulncheck-weekly.yml:26` now `macos-14`. No `CODEOWNERS` file exists — second half never landed. |
+| **B-7** loud Keychain risk + `SetAccessControl` | **PARTIAL** | Warning added at `cmd/protonmcp/login.go:50-57` and in SECURITY.md. `SetAccessControl` still **not** wired in `internal/keystore/keystore.go:128-131` — comment defers it. Doc-only fix, as the original finding allowed. |
+| **B-8** logout warn-on-revoke-fail | **FIXED** | `cmd/protonmcp/login.go:82-94` prints the explicit recovery URL. Caveat: `CloseAndRevoke` discards its internal `AuthDelete` error — see C-3. |
+| **B-9** max-pages + per-row size guard | **PARTIAL** | `internal/proton/messages.go:31,57-59` adds `MaxBackfillPages=10000`; `MaxRawJSONBytes=1MiB` enforced at `messages.go:108-110`. Missing: no cap on `Subject`/`FromAddress`/`FromName`; no `slog.Warn` on truncation; truncation produces invalid JSON (`raw[:1MiB]+"...[truncated]"`) that crashes any later `json.Unmarshal`. |
+| **B-11** `inspect` debug gating | **FIXED** | `cmd/protonmcp/inspect.go:25-29` errors unless `PROTONMCP_DEBUG=1`. Bonus: `defer stored.Zero()` at line 44 partially addresses B-3 for this site. |
+| **B-1** Secret base64 round-trip | **FIXED** | `internal/keystore/keystore.go:81-100` — blob v3, `SaltedKeyPass` is `[]byte`, `zero(data)` + `zero(blob.SaltedKeyPass)` fire on Save+Load. |
+| **B-2** TOTP debug leak | **FIXED** | `internal/proton/client.go:60-91` adds `redactDump` over headers + JSON body; `redact_test.go` covers TwoFactorCode, ClientProof, Authorization, Set-Cookie. The TOTP-string-on-heap (`client.go:363`) remains acknowledged as a 30 s leak. |
+| **B-3** Secret/Live pass-by-value | **PARTIAL** | `inspect.go:44` zeroes. The two hot paths — `session.go:84` and `login.go:64` — still don't. `SaltedKeyPass` stays on the heap for every `whoami`/`backfill`/`sync`/`read`/`search`/`logout`. |
+| **B-4** denylist redactor | **FIXED** | `internal/logging/logging.go:75-113` adds `looksLikeToken` value-heuristic; tests at `logging_test.go:73-117`. Acknowledged limitation: embedded-in-prose tokens still pass. |
+| **B-6** DSN pragma injection | **NOT FIXED** | `internal/store/store.go:116,129` still `path + "?" + v.Encode()`. `--db` now exposed by `backfill`, `read`, `search`, `sync`. |
+| **B-10** `secure_delete` | **FIXED** | `internal/store/store.go:115,128` adds `_pragma=secure_delete(on)` to both DSN paths. |
+| **B-12** `debugTransport` redaction | **FIXED** | Covered by B-2. |
+| **B-13** Proton-fork Dependabot exclusion | **UNCHANGED** | Pragmatic; manual review TODO. |
+| **B-14** Save guards | **NOT FIXED** | `keystore.go:104` still guards only `Email`/`UID`/`RefreshToken`. |
+| **M-1** AppVersion warning surface | **UNCHANGED** | Still only printed in `whoami`. |
+| **M-4** error wrapping with `%w` | **NOT FIXED** | `client.go:504` + new `body.go:55` still chain gopenpgp errors. |
+| **M-5** error classification | **NOT FIXED** | `main.go:104` still prints raw chain. |
+| **Foundational #7** HTML sanitization at MCP boundary | **IN PROGRESS but inverted** | Sanitization landed at **storage** boundary, not the MCP boundary — see C-1. |
+| **Foundational #3 / #4 / #6** MCP trust model, default-deny, login rate-limit | **NOT YET** | Phase 2 hasn't touched these. |
+
+## New findings — Critical
+
+### C-1. Decrypted plaintext bodies persisted to SQLite without a documented threat model
+
+`internal/proton/body.go:38-88`, `internal/store/messages.go:283-305`,
+`cmd/protonmcp/read.go:107-114`, `migrations/0001_initial.sql:53-71`.
+
+Phase 2/B caches **decrypted plaintext** message bodies in `body_text` /
+`body_html`, indexed verbatim into `messages_fts.body_text`. The Keychain
+protects the PGP keys but not the on-disk SQLite file — file perms are 0600
+(M-2/M-3, good) but Time Machine backups, Spotlight indexing, cloud-synced
+Documents folders, and forensic disposal images all bypass perms entirely.
+
+The original Foundational #7 said: *keep raw HTML in SQLite (bodies may
+need to be re-sanitized later under a stricter policy); sanitize on the way
+out to the MCP client.* Phase 2 **inverted** this — `body.go:73-74` stores
+`sanitize.HTML(body)` and `sanitize.Text(body)`, dropping the original.
+That forecloses re-sanitization under a stricter future policy **and**
+persists plaintext on disk — the worst of both options.
+
+No SECURITY.md entry, no TODO open question, no README warning reflects
+this material posture shift (Phase 1: only credentials at rest → Phase 2:
+credentials + plaintext mail at rest).
+
+`BodyTTL = 24*time.Hour` (`messages.go:264`) is illusion — `GetCachedBody`
+treats stale entries as "missing" but **does not delete** them. Rows
+persist past TTL; only a follow-on `SetCachedBody` overwrites. No eviction
+job, no `protonmcp purge`, no startup sweeper.
+
+Recommendation: (a) document the threat model loudly (SECURITY.md +
+`read` first-run banner); (b) ship `protonmcp purge` and a startup sweep
+that hard-deletes `body_text`/`body_html` past TTL (relies on
+`secure_delete=on` from B-10, now in place); (c) seriously consider
+SQLCipher or an envelope-encryption layer keyed off the same Keychain blob.
+
+### C-2. Plaintext bodies emitted to stdout without ANSI/control-char sanitization — terminal-escape injection from attacker-controlled mail
+
+`cmd/protonmcp/read.go:130-133`, `cmd/protonmcp/search.go:85-87`,
+`internal/sanitize/sanitize.go:112-128`.
+
+`sanitize.Text` strips HTML/quotes/whitespace but does **not** strip ESC
+(`0x1b`), other C0/C1 control chars, OSC, or DCS. A malicious sender can
+embed `\x1b]0;hacked\x07` (window-title rewrite), `\x1b[6n` (cursor query
+that injects into next shell command), or — most concerning —
+`\x1b]52;c;<base64>\x07` (xterm OSC 52 clipboard write, default-on in
+iTerm2 and several modern terminals).
+
+`encoding/json` escapes control chars (``), so the current JSON
+output paths are safe **as long as output stays JSON**. But:
+
+- `internal/store/search.go:128` writes `h.Snippet = snippet(*bodyText, 200)`
+  on a path that flows to MCP responses in Phase 3.
+- The future `mail.read` tool delivers plaintext to an LLM where ANSI
+  sequences become prompt-injection vectors against the transcript renderer.
+
+Recommendation: in `sanitize.Text`, strip all bytes `< 0x20` except `\n`/`\t`
+and strip the C1 range (`0x80-0x9f`). Five-line change, zero downside.
+
+## New findings — High
+
+### C-3. `CloseAndRevoke` discards `AuthDelete` error → logout claims success even when server-side revoke fails on the success path
+
+`internal/proton/client.go:278-289`, `cmd/protonmcp/login.go:80-94`.
+
+B-8's fix correctly handles `Resume` failure. But on `Resume` success,
+`CloseAndRevoke` does `_ = s.Client.AuthDelete(ctx)`. If Proton returns 500
+or the network drops between Resume and AuthDelete, the user sees
+"Logged out." while their session lives on — the **exact** failure mode
+B-8 was meant to close, just on a different branch.
+
+Recommendation: change to `CloseAndRevoke() error`, surface the error
+through login's existing warn-and-recovery path.
+
+### C-4. `Session.releaseLocal` zeroes `SaltedKeyPass` on Close — racy with `OnAuthUpdate` keystore re-Save during long sync runs
+
+`internal/proton/client.go:294-304`, `cmd/protonmcp/session.go:146-158`,
+`internal/sync/sync.go`.
+
+`releaseLocal` calls `s.SaltedKeyPass.Zero()`. The keystore-sync
+`OnAuthUpdate` hook reads `b.Session.SaltedKeyPass` to re-Save on token
+rotation. With `Secret`'s shared-backing-array semantics, a late-arriving
+OnAuthUpdate sees an empty `SaltedKeyPass`. Since `keystore.Save` doesn't
+refuse empty `SaltedKeyPass` (B-14, still open), a corrupted blob is
+written. Next `Resume` fails at `resume.go:72` ("re-login required"),
+forcing an unexpected re-login.
+
+Race-only today, but the new sync loop drains `GetEvent` calls serially —
+exactly when token rotation is most likely.
+
+Recommendation: don't zero `SaltedKeyPass` in `releaseLocal`, OR guard
+`OnAuthUpdate` against `SaltedKeyPass.Empty()` and skip the Save, OR close
+the auth handler before zeroing in a strict order. Pick one.
+
+### C-5. Event-sync loop has no backoff and an off-by-one paging break
+
+`internal/sync/sync.go:88-119`.
+
+- `GetEvent` errors return immediately. No exponential backoff for
+  transient 5xx/network; no auth-failure detection. Fine for CLI one-shot;
+  bad for the Phase 6 daemon (per the package doc, 30 s cadence). A brief
+  Proton outage will spam re-Resume attempts. Foundational #6 (login rate
+  limit) is now overdue — sync makes the threat bigger.
+- `if len(events) < 2 { break }` (line 116). Comment says "GetEvent
+  chunked up to its internal limit (50)" — true, but the check breaks on
+  `< 2`, not `< 50`. A legitimate single-event page exits the loop,
+  leaving a one-event gap; cursor advanced inside the inner loop hides it
+  on next `RunOnce`. Phase 4 audit deletion entries would be lost.
+
+Recommendation: compare against the actual page size (50 with a TODO),
+add 30 s+jitter backoff on consecutive `GetEvent` errors, and detect auth
+expiry via `isAuthExpired` (`resume.go:152`) so sync can surface
+"needs re-login" cleanly.
+
+## New findings — Medium
+
+### C-6. HTML sanitizer drops `<a href>` entirely — phishing destination disguise
+
+`internal/sanitize/sanitize.go:46-67`.
+
+Documented choice: LLM sees "click here" with no URL. Mitigates one
+threat (prompt injection via href) and enables another: a phishing email
+with "log in at [Proton Support](https://attacker.example/)" becomes "log
+in at Proton Support" with no destination visible. An LLM downstream
+suggesting "click X" has lost the signal that the URL was suspicious.
+
+Recommendation: emit href as plaintext adjacent to link text —
+`"<text> [<href>]"` — via a bluemonday element rewriter. Both the LLM and
+any human looking at `read` output can see destination mismatches.
+
+### C-7. `sanitize` policy lacks test coverage for SVG, MathML, `<noscript>`, entity-encoded `javascript:`
+
+`internal/sanitize/sanitize.go:38-44`, `sanitize_test.go`.
+
+bluemonday's `NewPolicy()` is empty-allowlist, so SVG/MathML/`<noscript>`
+*should* drop today. But no tests prove it; future allowlist additions
+could silently widen surface. Specifically untested:
+
+- `<svg><script>` (foreign content)
+- `<math>`
+- `<noscript><script>...</script></noscript>`
+- `<a href="javascript&#58;alert(1)">` — bluemonday normalizes entities in
+  attribute values; combined with C-6 (href drops to plain text), the
+  decoded `javascript:` URL surfaces into LLM context.
+
+Recommendation: add these as explicit test cases; decide whether stripped
+elements' text content survives.
+
+### C-8. `search.Search` builds `ORDER BY`/`LIMIT`/`OFFSET` via `fmt.Sprintf`
+
+`internal/store/search.go:101-107`.
+
+`Limit` is clamped `[0, 200]` (safe). `Offset` is **not** clamped —
+negative values produce confusing SQLite errors. `orderBy` is one of two
+hard-coded literals (safe today). `where` uses bound `?` (safe). No SQL
+injection today.
+
+Real risk when (a) Phase 3 MCP passes `offset` straight from an LLM call,
+or (b) someone adds `--sort-by` without remembering this path is `Sprintf`.
+
+Recommendation: bind `Limit`/`Offset` as `?` parameters now; clamp
+`Offset` to `0..N`; add a doc-comment on `orderBy` warning that new values
+MUST be literals.
+
+### C-9. FTS5 MATCH passes user input through verbatim — DoS via `NEAR`, syntax errors surface raw
+
+`internal/store/search.go:65-66`, `internal/store/query.go:73-77, 96-98`.
+
+User input is `?`-bound (not SQL-injectable), but FTS5 has its own query
+language with `*`, `^`, `:`, `"`, `NEAR/N`, operators, parentheses. A
+crafted `"NEAR/0 \"a\" \"b\""` against a large corpus hits FTS5's worst
+case. Unterminated quotes in `tokenizeQuery` are silently dropped, which
+masks the bug class rather than fixing it.
+
+Recommendation: escape FTS5 metacharacters in bare terms, or wrap bare
+terms in `"…"` (phrase form, non-greedy w.r.t. operators). Add a 5 s
+per-context statement cancel.
+
+### C-10. `protonmcp read` shell-redirect inherits process umask, not SQLite secure-delete semantics
+
+`cmd/protonmcp/read.go:116-127`. Documentation-only: redirecting `read`
+output to a file produces `0600` (umask 0o077 from M-3 — good) but the
+file has no secure-delete behavior if later moved/deleted/backed up. Add a
+docstring warning.
+
+## Updated foundational recommendations
+
+1. **Document the on-disk plaintext posture before any external user
+   touches this binary.** C-1 is the single biggest residual risk. The
+   project's threat model has materially changed and no public-facing
+   document reflects the shift.
+2. **Strip control characters in `sanitize.Text`.** Five-line change that
+   closes C-2 and the bytes-LLMs-don't-like class. Independent of Phase 3.
+3. **Land the sentinel error set.** Still open. Now larger surface —
+   `body.go` and `sync.go` both wrap library errors with `%w`. M-4 keeps
+   reopening on every new code path.
+4. **`CODEOWNERS` is overdue.** Half of B-5 wasn't done. Without it any
+   maintainer (including Dependabot auto-merge) can land changes to
+   `internal/keystore`, `internal/proton`, `internal/sanitize`
+   unreviewed.
+5. **Auth-failure detection + real backoff in `sync.RunOnce`.** Before
+   Phase 6 daemon ships, not after.
+
+## Net assessment
+
+**Genuinely improved this cycle:** B-1 (Secret round-trip), B-2/B-12
+(debug-dump redaction), B-4 (value-heuristic redaction), B-8 (logout warn),
+B-10 (`secure_delete=on`), B-11 (inspect gating). Several long-standing
+foundational items crossed off cleanly.
+
+**Still open, now in heavier code:** M-4 / M-5 (error wrapping &
+classification), B-3 (`Secret.Zero` not called in hot paths), B-6 (DSN
+pragma injection — `--db` now in four subcommands), B-14 (Save guards),
+M-1 (AppVersion warning surface).
+
+**New attack surface introduced by Phase 2/B-C-D:** cached plaintext
+bodies (C-1) are the most consequential single change in the project's
+history. Sanitization is sound for the threats it considered
+(script/iframe/href-prompt-inject) and miscalibrated for the threats it
+didn't (terminal-escape, link-destination loss, on-disk-at-rest). The
+sync loop (C-5) is a future operational hazard, not a today-attacker one.
+
+**Single biggest residual risk:** **C-1**. Every other finding has a
+contained blast radius; the plaintext-mail-at-rest decision changes who
+the threat model is for. If the laptop is lost, stolen, iCloud-backed-up,
+or imaged for support, every message ever opened in `protonmcp` is
+recoverable in cleartext without the Keychain.
