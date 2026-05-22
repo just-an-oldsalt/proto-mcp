@@ -344,24 +344,32 @@ Small file-system + error hygiene fixes.</p>
 Pulled forward from Phase 7.</p>
 <ul>
   <li><span class="check done">[x]</span> <code>.github/workflows/ci.yml</code>:
-    <code>go vet</code>, <code>go build</code>, <code>go test -race</code>, and
-    <code>golangci-lint</code> on every PR + push to <code>main</code>. Runs on
-    <code>macos-14</code> for build/test (cgo-via-keychain + modernc.org/sqlite
-    both work on macOS runners) and <code>ubuntu-latest</code> for govulncheck
-    (faster, dep-only scan doesn't need cgo).</li>
+    <code>go vet</code>, <code>go build</code>, <code>go test -race</code> + <code>govulncheck</code>
+    on every PR + push to <code>main</code>. Both jobs run on <code>macos-14</code>
+    because <code>internal/keystore</code> pulls in <code>keybase/go-keychain</code> via
+    cgo against Security.framework — Linux can't link the symbols, so
+    even the dep-loading step of govulncheck fails before the scan
+    starts.</li>
   <li><span class="check done">[x]</span>
-    <code>.github/workflows/govulncheck-weekly.yml</code>: separate cron-driven
-    workflow at Mondays 14:00 UTC, also runnable on demand. The CI
-    workflow catches new CVEs introduced by PR changes; the weekly run
-    catches CVEs reported against deps we already had. <em>(Foundational #8)</em></li>
+    <code>.github/workflows/govulncheck-weekly.yml</code>: cron-driven
+    backstop at Mondays 14:00 UTC, also <code>workflow_dispatch</code>.
+    Catches CVEs reported against deps we already had since the last
+    PR. <em>(Foundational #8)</em></li>
   <li><span class="check done">[x]</span> <code>.github/dependabot.yml</code>: weekly
     grouped PRs for Go modules + GitHub Actions. <strong>Excluded from
     auto-update</strong>: <code>github.com/ProtonMail/*</code> and the resty fork
     (<code>go-resty/resty/v2</code>) — both have to track <em>proton-bridge</em>
     releases. <em>(Foundational #8)</em></li>
-  <li><span class="check done">[x]</span> <code>.golangci.yml</code>: conservative
-    linter set (errcheck, govet, ineffassign, staticcheck, unused,
-    misspell, gofmt, goimports). Tests are exempted from errcheck.</li>
+  <li><span class="check done">[x]</span> <code>.golangci.yml</code> committed but
+    <strong>the lint job is deferred</strong>. <code>golangci-lint v1.64.8</code>
+    (latest v1, what the action's "latest" channel picks) was built
+    with Go 1.24 and refuses to load configs targeting Go 1.26
+    (<em>"the Go language version used to build golangci-lint is
+    lower than the targeted Go version"</em>). v2.x is a major rewrite
+    with breaking config-schema changes. Cleanest path forward:
+    wait for a v1.65+ rebuilt against 1.26, OR migrate to v2 and
+    rewrite <code>.golangci.yml</code>. Tracked as the next Phase-1.5
+    follow-up.</li>
 </ul>
 
 <h3>Folded into later phases (cross-references)</h3>
