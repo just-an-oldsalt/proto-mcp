@@ -200,3 +200,136 @@ before output.
   non-author user sees the daemon.
 - When in doubt: ask whether the change would survive an audit by
   someone who assumes the MCP peer is hostile.
+
+---
+
+# Re-audit — through commit `8d9a71b` (Phase 1.5 complete)
+
+Read-only re-audit covering everything from `0344f76` (SQLite store) through
+`8d9a71b` (CI). Verifies the original findings and audits the new attack
+surface (`internal/secret`, `internal/keystore`, `internal/logging`,
+`internal/store`, `cmd/protonmcp/backfill`).
+
+## Verification matrix vs. original findings
+
+| ID | Status | Evidence |
+|---|---|---|
+| Foundational #1 (`Secret`) | **FIXED** — see B-1, B-3 caveats | `internal/secret/secret.go:34-114` |
+| Foundational #2 (redacting logger) | **PARTIAL** — denylist with blind spots | `internal/logging/logging.go:26-43`; see B-4 |
+| Foundational #3 (MCP trust model) | **NOT YET** — no JSON-RPC server, no TCP-bind guard |
+| Foundational #4 (default-deny policy) | **NOT YET** — no policy engine yet |
+| Foundational #5 (token persistence story) | **PARTIAL** — code shipped; doc thin; see B-7 |
+| Foundational #6 (login rate-limit) | **NOT YET** |
+| Foundational #7 (HTML sanitization) | **NOT YET** — no bodies stored yet |
+| Foundational #8 (govulncheck + Dependabot) | **FIXED** with caveats — see B-5 |
+| H-1 (creds in `string`, never zeroed) | **FIXED** — `main.go:167-169`, `prompt.go:130-132` |
+| H-2 (shutdown wipe + timeout) | **PARTIAL** — `sync.Once` + 5 s timeout in (`client.go:158, 217-245, 54-63, 259`); signal-driven path still deferred |
+| H-3 (detached revoke on Ctrl-C) | **FIXED** — `client.go:367-372`, `resume.go:95-104` |
+| M-1 (AppVersion warning) | **PARTIAL** — only printed in `whoami` (`main.go:217-218`); `backfill`/`login` silent |
+| M-2 (DB file perms) | **FIXED** — `store.go:84-91` chmods `.db`/`-wal`/`-shm` to 0600 (silent on chmod failure — minor) |
+| M-3 (umask 0o077) | **FIXED** — `main.go:44`, first runtime call |
+| M-4 (error wrapping leaks crypto chain) | **NOT FIXED** — `client.go:460` still `%w`s gopenpgp errors; no sentinel |
+| M-5 (error classification) | **NOT FIXED** — `main.go:98` still prints raw chain |
+| L-1 (prompt error swallow) | **FIXED** — `prompt.go:87` |
+| L-2 (zero `pw []byte`) | **FIXED** — `prompt.go:131` |
+| L-3 (`_ = args`) | **FIXED** — `requireNoArgs` (`main.go:227-232`) |
+| L-4 (DSN URI injection) | **PARTIAL** — `buildDSN` uses `net/url` (`store.go:108-124`) but `path` is still raw-concat before `?` — see B-6 |
+| L-5 (SIGHUP) | **FIXED** — `main.go:62` |
+| L-6 (parallel x/crypto) | **FIXED** — pinned to v0.50.0 only |
+| L-7 / L-8 | N/A (no converter, no release pipeline) |
+
+## New findings — Critical
+
+### B-1. `SaltedKeyPass` round-trips through ungarbageable strings on every Save/Load
+
+`internal/keystore/keystore.go:108, 116` — `base64.StdEncoding.EncodeToString(l.SaltedKeyPass.Bytes())` produces an immutable string assigned to `savedBlob.SaltedKeyPassB64`, then `json.Marshal` produces a `data []byte` (which *is* zeroed). On `Load`, `blob.SaltedKeyPassB64` is a GC-owned string the `Secret` cannot reach.
+
+Result: the salted PGP key material has at least one ungarbageable string copy per Save/Load round-trip — defeats the point of `Secret`.
+
+Recommendation: encode directly into a pre-sized `[]byte` (`base64.StdEncoding.Encode`), use `json.Encoder` over a `bytes.Buffer`, zero everything.
+
+### B-2. TOTP code upcast to `string` and survives in GC heap; also visible in `debugTransport`
+
+`internal/proton/client.go:319` — `gpa.Auth2FAReq{TwoFactorCode: string(creds.TOTP.Bytes())}`. Comment acknowledges "30s validity" leak. But: with `PROTONMCP_DEBUG=1`, the TOTP lands verbatim in `httputil.DumpRequestOut` to stderr (`client.go:36-39`), bypassing the slog redactor entirely.
+
+Recommendation: either fork the SDK to accept `[]byte`, or strip headers/body from `httputil.Dump*` before printing.
+
+## New findings — High
+
+### B-3. `Secret`'s value-semantics + `Live` value-passing = `SaltedKeyPass.Zero()` is never called in the CLI flow
+
+`internal/secret/secret.go:84-89`. `Zero()` mutates the receiver's backing array — but `keystore.Live` is passed *by value* throughout (`session.go:130-138, 147-153`, `login.go:64-70`). Grep for `Live{}.Zero|stored.Zero` returns zero hits.
+
+Result: salted pass stays live on heap for every `whoami` / `backfill` / `logout` run.
+
+Recommendation: pointer-pass `Live`, or `defer stored.Zero()` at every `keystore.Load` call site.
+
+### B-4. Logging redactor is a tiny denylist with concrete misses
+
+`internal/logging/logging.go:26-43`. Specific holes:
+
+- `slog.Warn("…", "err", err.Error())` (`session.go:53, 74, 117, 156`, `login.go:57`) — if the wrapped error contains `"refreshToken":"…"`, the redactor never sees it (key is `err`).
+- Camel-case fields (`Token`) under arbitrary keys pass through.
+- Proton-specific headers (`X-Pm-Uid`, `X-Pm-Human-Verification-Token`, `Proxy-Authorization`) not listed.
+
+Recommendation: add a value-side heuristic backstop — base64/JWT-shaped strings over ~32 chars get redacted regardless of key. Denylists are always incomplete.
+
+### B-5. Weekly `govulncheck` runs on Ubuntu where keystore CGO can't link → silent failures
+
+`.github/workflows/govulncheck-weekly.yml:21` is `ubuntu-latest`. The main CI file itself comments that Ubuntu can't link `keybase/go-keychain` (`ci.yml:36-40`). The weekly job will fail at the loading-packages step and CVE alerts will never reach the maintainer.
+
+Also: no `CODEOWNERS`, no visible branch protection — Dependabot PRs can be merged with one click.
+
+Recommendation: move weekly to `macos-14`; add `CODEOWNERS` requiring explicit approval for security-impacting paths.
+
+## New findings — Medium
+
+### B-6. DSN `path` raw-concatenated before query → pragma injection via `--db` flag
+
+`internal/store/store.go:115, 123` — `return path + "?" + v.Encode(), nil`. `--db` flag (`backfill.go:35`) accepts arbitrary user input. `--db '/tmp/x.db?_pragma=key(...)'` would inject. Fix: `url.PathEscape(path)` or `url.URL{Scheme:"file", Opaque:path, RawQuery:v.Encode()}.String()`.
+
+### B-7. Keychain ACL is process-agnostic — any user-process can read the blob
+
+`internal/keystore/keystore.go:124-127` — `AccessibleWhenUnlocked` only gates *device* state, not *which process* reads. No `SetAccessControl`. Any unsigned binary running as the user (malicious Homebrew, curl-piped installer) can `SecItemCopyMatching` service=`zone.dort.protonmcp` and exfiltrate refresh token + base64'd `SaltedKeyPass` → full account takeover, no re-prompt.
+
+TODO.html flags this as deferred-until-codesigning. That's defensible — but it must be **loud** in this doc and in `login`'s success output ("readable by any process running as you until codesigning lands").
+
+Adjacent: `keybase/go-keychain v0.0.1` is effectively unmaintained (last upstream release 2018). Track migration to `99designs/keyring` or a maintained fork.
+
+### B-8. `logout` server-revoke is silent best-effort; failure leaves a live server session
+
+`cmd/protonmcp/login.go:60-75`. If `Resume` fails (network down, expired refresh), code falls through, `keystore.Delete` succeeds, user sees "Logged out" — but Proton still has an authenticated session. No warning. Print an explicit "couldn't revoke server-side; visit account.proton.me to manually revoke" on the error path.
+
+### B-9. Backfill writes unbounded attacker-controlled bytes into SQLite
+
+`cmd/protonmcp/backfill.go:94-110`, `internal/proton/messages.go:24-51`. Full API response goes into `raw_json` verbatim. Page count is unbounded; a compromised midbox or malicious server returning 150 novel IDs forever is an unbounded memory/disk DoS. No size cap on `subject` / `from_address` / `raw_json`.
+
+Fix: max-pages stop, per-row size guard on `RawJSON` (truncate at ~1 MiB with a `slog.Warn`).
+
+### B-10. SQLite missing `secure_delete=ON` — once Phase 2 caches bodies, deleted plaintext lingers in free pages
+
+`internal/store/store.go:118-123`. Schema is set up to FTS-index `body_text` (`migrations/0001_initial.sql:53-71`). Add `v.Add("_pragma", "secure_delete(on)")` before bodies start landing.
+
+## New findings — Low
+
+- **B-11.** `inspect.go:31-32` truncates tokens to 16 chars but writes to stdout — easy to accidentally pipe. Gate behind `PROTONMCP_DEBUG=1`.
+- **B-12.** `debugTransport` (`client.go:30-48`) bypasses the slog redactor — any stderr-to-log wiring leaks raw bodies.
+- **B-13.** `go-proton-api` and `gopenpgp/v2-proton` excluded from Dependabot (`dependabot.yml:21`). Pragmatic, but adds a manual quarterly review TODO.
+- **B-14.** `keystore.Save` requires non-empty `RefreshToken` but not non-empty `SaltedKeyPass`. Guard at save time, not just at `Resume`.
+- **B-15.** SIGHUP semantics will change in Phase 4 (shutdown → policy reload). Already in code; flag at the call site so the reassignment doesn't surprise.
+
+## Updated foundational recommendations
+
+1. **Replace the redaction denylist with a value-heuristic backstop.** Audit-log `args_json` (Phase 4) will hold arbitrary tool args — a tool named `secret_input` will not match the denylist. Add length + base64-class detection.
+2. **Pointer-pass `Secret`-bearing structs.** `Credentials` is `*Credentials`; `Live` is value-passed → `SaltedKeyPass.Zero()` is never invoked in the CLI flow.
+3. **Land the sentinel error set now.** Without `ErrUserCanceled` / `ErrAuthFailed` / `ErrNetwork` / `ErrUnlockFailed`, M-4 and M-5 reopen on every new wrapped error.
+4. **Document the Keychain threat model explicitly.** "Pre-codesigned binary → any user-process read" is currently buried in a TODO; needs to be loud in SECURITY.md and in the `login` success message.
+5. **Audit-log column needs its own redaction pass** before the first INSERT — shared helper with the slog redactor, not the slog redactor itself.
+6. **Pre-Phase-3 invariant: refuse to start in daemon mode with `PROTONMCP_DEBUG=1`.** Today `debugTransport` is harmless (no daemon). Once a launchd plist exists, that env will leak refresh tokens to whatever captures stderr.
+
+## Net assessment
+
+Genuinely done: H-1, H-3, L-1/2/3/5/6, M-2, M-3, Foundational #1 and #8.
+Structurally done, deferred path: H-2 (signal-driven shutdown).
+Still open: M-1, M-4, M-5, Foundational #2 (partial), #3, #4, #5 (partial), #6, #7.
+Biggest *new* risks introduced by Phase 1.5: B-1 (Secret round-trip via strings), B-4 (denylist redactor), B-5 (Ubuntu vulncheck), B-7 (unscoped Keychain ACL).
