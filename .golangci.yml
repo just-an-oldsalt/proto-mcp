@@ -1,0 +1,26 @@
+# golangci-lint config. Keep the linter set conservative for now —
+# noisy linters tend to fight with the codebase's existing style.
+# Tightening is easier than relaxing later.
+
+run:
+  timeout: 5m
+
+linters:
+  disable-all: true
+  enable:
+    - errcheck     # unchecked errors
+    - govet        # vet's own checks
+    - ineffassign  # ineffective assignments
+    - staticcheck  # broad static analysis pack
+    - unused       # dead code
+    - misspell     # common typos
+    - gofmt        # formatting
+    - goimports    # import ordering
+
+issues:
+  # Don't fail on issues in the test files for noisy categories
+  # like errcheck — test code intentionally ignores a lot of errors.
+  exclude-rules:
+    - path: _test\.go
+      linters:
+        - errcheck

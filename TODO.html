@@ -99,7 +99,7 @@
 <ul>
   <li><span class="check done">[x]</span> Phase 0 — repo skeleton, Go toolchain, pinned deps, auth smoke test</li>
   <li><span class="check done">[x]</span> Phase 1 — SQLite + full backfill of message metadata <em>(spot-checked 100 msgs in 781ms; full 64k drain in progress)</em></li>
-  <li><span class="check">[ ]</span> <strong>Phase 1.5 — Security foundations <em>(blocks Phase 2 — see <code>SECURITY.md</code>)</em></strong></li>
+  <li><span class="check done">[x]</span> Phase 1.5 — Security foundations (A/B/C/D/E/F all merged; see <code>SECURITY.md</code> for the audit they came from)</li>
   <li><span class="check">[ ]</span> Phase 2 — event-loop sync, lazy body decrypt, FTS5 search</li>
   <li><span class="check">[ ]</span> Phase 3 — MCP server (hand-rolled JSON-RPC over stdio for now)</li>
   <li><span class="check">[ ]</span> Phase 4 — policy engine + audit log + Touch ID approval broker</li>
@@ -340,14 +340,28 @@ Small file-system + error hygiene fixes.</p>
     of process umask).</li>
 </ul>
 
-<p><strong>1.5/F — <code>ci/initial-workflows</code></strong>. Pulled forward from Phase 7.</p>
+<p><strong>1.5/F — <code>ci/initial-workflows</code></strong> <span class="tag">done</span>.
+Pulled forward from Phase 7.</p>
 <ul>
-  <li><span class="check">[ ]</span> GitHub Actions: <code>go build</code>, <code>go test</code>,
-    <code>go vet</code>, <code>golangci-lint</code> on every PR + push to <code>main</code>.</li>
-  <li><span class="check">[ ]</span> <code>govulncheck</code> in CI (weekly cron + on PR
-    touching <code>go.{mod,sum}</code>). <em>(Foundational #8)</em></li>
-  <li><span class="check">[ ]</span> Dependabot config for Go modules + GitHub
-    Actions, grouped weekly. <em>(Foundational #8)</em></li>
+  <li><span class="check done">[x]</span> <code>.github/workflows/ci.yml</code>:
+    <code>go vet</code>, <code>go build</code>, <code>go test -race</code>, and
+    <code>golangci-lint</code> on every PR + push to <code>main</code>. Runs on
+    <code>macos-14</code> for build/test (cgo-via-keychain + modernc.org/sqlite
+    both work on macOS runners) and <code>ubuntu-latest</code> for govulncheck
+    (faster, dep-only scan doesn't need cgo).</li>
+  <li><span class="check done">[x]</span>
+    <code>.github/workflows/govulncheck-weekly.yml</code>: separate cron-driven
+    workflow at Mondays 14:00 UTC, also runnable on demand. The CI
+    workflow catches new CVEs introduced by PR changes; the weekly run
+    catches CVEs reported against deps we already had. <em>(Foundational #8)</em></li>
+  <li><span class="check done">[x]</span> <code>.github/dependabot.yml</code>: weekly
+    grouped PRs for Go modules + GitHub Actions. <strong>Excluded from
+    auto-update</strong>: <code>github.com/ProtonMail/*</code> and the resty fork
+    (<code>go-resty/resty/v2</code>) — both have to track <em>proton-bridge</em>
+    releases. <em>(Foundational #8)</em></li>
+  <li><span class="check done">[x]</span> <code>.golangci.yml</code>: conservative
+    linter set (errcheck, govet, ineffassign, staticcheck, unused,
+    misspell, gofmt, goimports). Tests are exempted from errcheck.</li>
 </ul>
 
 <h3>Folded into later phases (cross-references)</h3>
