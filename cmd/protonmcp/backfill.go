@@ -91,7 +91,12 @@ func runBackfill(ctx context.Context, args []string) error {
 	lastReport := time.Now()
 	reportEvery := 2 * time.Second
 
-	walkErr := sess.ForEachMessageMetadataPage(ctx, gpa.MessageFilter{}, func(batch []gpa.MessageMetadata) error {
+	// Pull newest-first so recent mail lands in the local mirror in
+	// the first few pages. A user running `protonmcp backfill` against
+	// a multi-year mailbox can start using MCP after ~30 seconds even
+	// if the long historical tail keeps grinding in the background.
+	// (Proton's default sort is by Time; Desc=true reverses it.)
+	walkErr := sess.ForEachMessageMetadataPage(ctx, gpa.MessageFilter{Desc: gpa.Bool(true)}, func(batch []gpa.MessageMetadata) error {
 		for _, m := range batch {
 			row, err := protonclient.ToStoreMessage(m)
 			if err != nil {
