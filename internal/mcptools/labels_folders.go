@@ -17,8 +17,8 @@ type label struct {
 	Color string `json:"color,omitempty"`
 }
 
-// labelType is the column-value/MCP-tool split: type=1 → labels.list,
-// type=3 → folders.list. Defined as constants here so the SQL stays
+// labelType is the column-value/MCP-tool split: type=1 → labels_list,
+// type=3 → folders_list. Defined as constants here so the SQL stays
 // in one place.
 const (
 	labelTypeUserLabel  = 1
@@ -27,7 +27,7 @@ const (
 
 func labelsList(deps Deps) mcp.Tool {
 	return mcp.Tool{
-		Name:        "labels.list",
+		Name:        "labels_list",
 		Description: "List user-defined labels (color-coded tags). Returns id / name / color for each.",
 		InputSchema: json.RawMessage(`{
 			"type": "object",
@@ -38,7 +38,7 @@ func labelsList(deps Deps) mcp.Tool {
 		Handler: func(ctx mcp.Context, _ json.RawMessage) (*mcp.ToolResult, error) {
 			labels, err := queryLabels(ctx.Std, deps, labelTypeUserLabel)
 			if err != nil {
-				return nil, fmt.Errorf("labels.list: %w", err)
+				return nil, fmt.Errorf("labels_list: %w", err)
 			}
 			return mcp.StructuredResult(map[string]any{"labels": labels})
 		},
@@ -47,7 +47,7 @@ func labelsList(deps Deps) mcp.Tool {
 
 func foldersList(deps Deps) mcp.Tool {
 	return mcp.Tool{
-		Name:        "folders.list",
+		Name:        "folders_list",
 		Description: "List user-defined folders (mutually-exclusive locations a message can live in). Returns id / name / color for each. System folders (inbox, sent, drafts, archive, trash, spam) are not listed here — those live in messages.folder.",
 		InputSchema: json.RawMessage(`{
 			"type": "object",
@@ -58,7 +58,7 @@ func foldersList(deps Deps) mcp.Tool {
 		Handler: func(ctx mcp.Context, _ json.RawMessage) (*mcp.ToolResult, error) {
 			folders, err := queryLabels(ctx.Std, deps, labelTypeUserFolder)
 			if err != nil {
-				return nil, fmt.Errorf("folders.list: %w", err)
+				return nil, fmt.Errorf("folders_list: %w", err)
 			}
 			return mcp.StructuredResult(map[string]any{"folders": folders})
 		},

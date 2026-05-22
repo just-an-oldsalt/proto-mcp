@@ -17,7 +17,7 @@ func accountWhoami(deps Deps) mcp.Tool {
 	}
 
 	return mcp.Tool{
-		Name:        "account.whoami",
+		Name:        "account_whoami",
 		Description: "Identify the Proton account this MCP server is signed into. Returns email, display name, user ID, list of address aliases, and (when available) plan info. Read-only, no network call — the data is the session that was established at server initialize time.",
 		InputSchema: json.RawMessage(`{
 			"type": "object",

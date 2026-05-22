@@ -10,8 +10,8 @@ import (
 	"github.com/just-an-oldsalt/proto-mcp/internal/store"
 )
 
-// listInput is the shared input shape for mail.list and (with extra
-// fields) mail.search. The cursor field is opaque per Q3 — clients
+// listInput is the shared input shape for mail_list and (with extra
+// fields) mail_search. The cursor field is opaque per Q3 — clients
 // pass back the next_cursor value they received from a prior call;
 // we encode {offset, query_hash} into it so we can invalidate stale
 // cursors when the underlying query changes.
@@ -45,10 +45,10 @@ type listResult struct {
 
 func mailList(deps Deps) mcp.Tool {
 	return mcp.Tool{
-		Name: "mail.list",
+		Name: "mail_list",
 		Description: "List message envelopes from the local mirror, filtered by folder / label / unread / date range. " +
 			"Read-only — does NOT pull fresh data from Proton. " +
-			"Call mail.sync first if the user implies they're looking for recent activity (\"just got\", \"today\", \"latest\"); " +
+			"Call mail_sync first if the user implies they're looking for recent activity (\"just got\", \"today\", \"latest\"); " +
 			"skip the sync for historical or open-ended queries.",
 		InputSchema: json.RawMessage(`{
 			"type": "object",
@@ -68,7 +68,7 @@ func mailList(deps Deps) mcp.Tool {
 			var in listInput
 			if len(raw) > 0 {
 				if err := json.Unmarshal(raw, &in); err != nil {
-					return nil, mcp.NewError(mcp.CodeInvalidParams, "mail.list: "+err.Error())
+					return nil, mcp.NewError(mcp.CodeInvalidParams, "mail_list: "+err.Error())
 				}
 			}
 			opts := store.SearchOpts{
@@ -83,7 +83,7 @@ func mailList(deps Deps) mcp.Tool {
 				t, err := parseListDate(in.Since)
 				if err != nil {
 					return nil, mcp.NewError(mcp.CodeInvalidParams,
-						fmt.Sprintf("mail.list since: %v", err))
+						fmt.Sprintf("mail_list since: %v", err))
 				}
 				opts.Filter.SinceUnix = t.Unix()
 			}
@@ -91,7 +91,7 @@ func mailList(deps Deps) mcp.Tool {
 				t, err := parseListDate(in.Until)
 				if err != nil {
 					return nil, mcp.NewError(mcp.CodeInvalidParams,
-						fmt.Sprintf("mail.list until: %v", err))
+						fmt.Sprintf("mail_list until: %v", err))
 				}
 				opts.Filter.UntilUnix = t.Unix()
 			}
@@ -105,7 +105,7 @@ func mailList(deps Deps) mcp.Tool {
 				off, ok := decodeCursor(in.Cursor, qhash)
 				if !ok {
 					return nil, mcp.NewError(mcp.CodeInvalidParams,
-						"mail.list: cursor is stale or belongs to a different query")
+						"mail_list: cursor is stale or belongs to a different query")
 				}
 				opts.Offset = off
 			}
