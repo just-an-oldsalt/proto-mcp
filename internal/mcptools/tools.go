@@ -60,6 +60,13 @@ func All(deps Deps) []mcp.Tool {
 		mailMove(deps),
 		mailLabel(deps),
 		mailTrash(deps),
+		// Phase 5/B — labels and folders CRUD.
+		labelsCreate(deps),
+		labelsUpdate(deps),
+		labelsDelete(deps),
+		foldersCreate(deps),
+		foldersUpdate(deps),
+		foldersDelete(deps),
 	}
 }
 

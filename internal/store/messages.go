@@ -221,6 +221,28 @@ ON CONFLICT(id) DO UPDATE SET name = excluded.name, color = excluded.color, type
 	return nil
 }
 
+// GetLabel returns a single label by ID. ErrNotFound when absent —
+// the caller (Phase-5 labels_update / folders_update handlers) treats
+// that as "the local mirror hasn't synced yet" and proceeds with
+// caller-supplied fields only.
+func (s *Store) GetLabel(ctx context.Context, labelID string) (Label, error) {
+	var l Label
+	var color sql.NullString
+	err := s.DB.QueryRowContext(ctx,
+		`SELECT id, name, color, type FROM labels WHERE id = ?`, labelID).
+		Scan(&l.ID, &l.Name, &color, &l.Type)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Label{}, ErrNotFound
+	}
+	if err != nil {
+		return Label{}, fmt.Errorf("get label %s: %w", labelID, err)
+	}
+	if color.Valid {
+		l.Color = color.String
+	}
+	return l, nil
+}
+
 // DeleteLabel removes a label row. The message_labels rows referencing
 // it stay (no FK back from message_labels.label_id → labels.id) so
 // per-message label sets stay consistent with the server's view.
