@@ -88,6 +88,8 @@ func main() {
 		err = runBackfill(ctx, args)
 	case "read":
 		err = runRead(ctx, args)
+	case "search":
+		err = runSearch(ctx, args)
 	case "help", "-h", "--help":
 		usage()
 		return
@@ -120,6 +122,11 @@ Commands:
   read       Print a single decrypted message (text + sanitized HTML)
              as JSON. Served from local cache when possible.
              Flags: --db <path>, --refresh (ignore cache).
+  search     Run a query against the local mirror. DSL:
+             from:alice  to:bob  subject:"gear list"  in:inbox
+             before:2026-01-01  after:2025-12-01  has:attachment
+             plus bare full-text terms.
+             Flags: --db <path>, --limit n, --offset n.
   help       Show this help.
 
 The session is persisted in the macOS Keychain (service
