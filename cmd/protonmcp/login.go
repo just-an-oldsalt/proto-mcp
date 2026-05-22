@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
+	"log/slog"
 
 	"github.com/just-an-oldsalt/proto-mcp/internal/keystore"
 	protonclient "github.com/just-an-oldsalt/proto-mcp/internal/proton"
@@ -54,7 +54,7 @@ func runLogin(ctx context.Context, _ []string) error {
 func runLogout(ctx context.Context, _ []string) error {
 	stored, loadErr := keystore.Load()
 	if loadErr != nil && !errors.Is(loadErr, keystore.ErrNotFound) {
-		fmt.Fprintf(os.Stderr, "warning: couldn't load stored session for server-side revoke (%v)\n", loadErr)
+		slog.Warn("couldn't load stored session for server-side revoke", "err", loadErr.Error())
 	}
 
 	if loadErr == nil {
