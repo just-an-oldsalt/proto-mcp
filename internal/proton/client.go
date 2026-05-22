@@ -276,6 +276,26 @@ func Login(ctx context.Context, mgr *gpa.Manager, creds *Credentials) (*Session,
 		return nil, fmt.Errorf("srp login: %w", err)
 	}
 
+	// Build the Session shell + install the AuthHandler immediately,
+	// before any subsequent API call. Proton can rotate tokens
+	// transparently in response to Auth2FA / GetUser / GetAddresses /
+	// GetSalts (the SDK's auto-refresh-on-401 path calls AuthHandler
+	// with the new bundle). Without an early install, a silent
+	// mid-Login rotation would leave the Session holding the
+	// *original* tokens from NewClientWithLogin — the Keychain blob
+	// would then be saved with stale credentials and the next process
+	// would hit 400 / 422 on its own resume.
+	sess := &Session{
+		Client:       client,
+		Email:        creds.Email,
+		UID:          auth.UID,
+		AccessToken:  auth.AccessToken,
+		RefreshToken: auth.RefreshToken,
+		PasswordMode: auth.PasswordMode,
+		TwoFA:        auth.TwoFA.Enabled,
+	}
+	sess.installAuthHandler()
+
 	// Use a detached context for revoke. The caller's ctx may be cancelled
 	// (Ctrl-C mid-login), and AuthDelete on a cancelled context would
 	// silently fail, leaving an authenticated session alive on Proton.
@@ -376,20 +396,13 @@ func Login(ctx context.Context, mgr *gpa.Manager, creds *Credentials) (*Session,
 		return nil, fmt.Errorf("unlock keyring: %w (wrong mailbox password?)", err)
 	}
 
-	sess := &Session{
-		Client:        client,
-		User:          user,
-		Addresses:     addrs,
-		UserKR:        userKR,
-		AddrKRs:       addrKRs,
-		PasswordMode:  auth.PasswordMode,
-		TwoFA:         auth.TwoFA.Enabled,
-		Email:         creds.Email,
-		UID:           auth.UID,
-		AccessToken:   auth.AccessToken,
-		RefreshToken:  auth.RefreshToken,
-		SaltedKeyPass: saltedPass,
-	}
-	sess.installAuthHandler()
+	sess.User = user
+	sess.Addresses = addrs
+	sess.UserKR = userKR
+	sess.AddrKRs = addrKRs
+	sess.SaltedKeyPass = saltedPass
+	// AccessToken / RefreshToken / UID were populated when sess was
+	// constructed above; if the SDK rotated them during the API calls
+	// the AuthHandler has already kept them current under the mutex.
 	return sess, nil
 }

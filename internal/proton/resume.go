@@ -59,6 +59,26 @@ func Resume(ctx context.Context, mgr *gpa.Manager, args ResumeArgs) (*Session, e
 		return nil, fmt.Errorf("refresh token: %w", err)
 	}
 
+	// Build the Session and install the AuthHandler IMMEDIATELY, before
+	// any subsequent API call. Proton can rotate tokens transparently
+	// in response to GetUser / GetAddresses (the SDK's Client.do path
+	// auto-refreshes on 401 and fires AuthHandler with the new bundle).
+	// If we delayed installAuthHandler until after the API calls, a
+	// silent mid-Resume rotation would leave the Session — and the
+	// Keychain — holding the *original* refresh token from
+	// NewClientWithRefresh, which the server has already moved past.
+	// The next process would then hit 400 "Invalid refresh token" even
+	// though it just resumed cleanly seconds ago.
+	sess := &Session{
+		Client:        client,
+		Email:         args.Email,
+		UID:           args.UID,
+		AccessToken:   auth.AccessToken,
+		RefreshToken:  auth.RefreshToken,
+		SaltedKeyPass: args.SaltedKeyPass,
+	}
+	sess.installAuthHandler()
+
 	closeAndWrap := func(format string, vals ...any) error {
 		// Best-effort revoke. If the refresh succeeded but a follow-up
 		// call failed, the access token we just got is still good and
@@ -84,23 +104,10 @@ func Resume(ctx context.Context, mgr *gpa.Manager, args ResumeArgs) (*Session, e
 		return nil, closeAndWrap("resume unlock: %w — keystore blob may be stale, run `protonmcp login` again", err)
 	}
 
-	// SDK didn't expose PasswordMode / 2FA on refresh; we don't need
-	// those fields for downstream Session users (they're informational
-	// in whoami). Leave them at zero values — whoami's labels handle
-	// unknown(0) gracefully.
-	sess := &Session{
-		Client:        client,
-		User:          user,
-		Addresses:     addrs,
-		UserKR:        userKR,
-		AddrKRs:       addrKRs,
-		Email:         args.Email,
-		UID:           args.UID,
-		AccessToken:   auth.AccessToken,
-		RefreshToken:  auth.RefreshToken,
-		SaltedKeyPass: args.SaltedKeyPass,
-	}
-	sess.installAuthHandler()
+	sess.User = user
+	sess.Addresses = addrs
+	sess.UserKR = userKR
+	sess.AddrKRs = addrKRs
 	return sess, nil
 }
 
