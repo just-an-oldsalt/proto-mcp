@@ -11,6 +11,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httputil"
+	"os"
 	"sync"
 	"time"
 
@@ -20,6 +22,30 @@ import (
 
 	"github.com/just-an-oldsalt/proto-mcp/internal/secret"
 )
+
+// debugTransport wraps an http.RoundTripper to dump every request and
+// response (headers + body) to out. Wired in via PROTONMCP_DEBUG=1.
+// Bodies are dumped in full — only enable while reproducing a bug,
+// and remember the output contains refresh tokens.
+type debugTransport struct {
+	next http.RoundTripper
+	out  *os.File
+}
+
+func (d *debugTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	reqDump, err := httputil.DumpRequestOut(req, true)
+	if err == nil {
+		fmt.Fprintf(d.out, "\n=== REQUEST ===\n%s\n", reqDump)
+	}
+	resp, rtErr := d.next.RoundTrip(req)
+	if resp != nil {
+		respDump, err := httputil.DumpResponse(resp, true)
+		if err == nil {
+			fmt.Fprintf(d.out, "\n=== RESPONSE ===\n%s\n", respDump)
+		}
+	}
+	return resp, rtErr
+}
 
 // shutdownTimeout caps how long the session-revoke + close path is
 // willing to wait. Five seconds is generous for a single HTTPS round-
@@ -243,15 +269,28 @@ func (s *Session) releaseLocal() {
 // A pre-request hook is installed to set the User-Agent header on
 // every outgoing request. See the UserAgent doc comment for why this
 // matters.
+//
+// Set PROTONMCP_DEBUG=1 in the environment to capture every HTTP
+// request / response via a custom RoundTripper logged to stderr. The
+// dump includes full headers and bodies — DO NOT use this against
+// your real account except temporarily for debugging, and never paste
+// the output anywhere with secrets in it (refresh tokens, etc.).
 func NewManager(jar http.CookieJar) *gpa.Manager {
 	if jar == nil {
 		jar = NewCookieJar()
 	}
-	m := gpa.New(
+	opts := []gpa.Option{
 		gpa.WithHostURL(HostURL),
 		gpa.WithAppVersion(AppVersion),
 		gpa.WithCookieJar(jar),
-	)
+	}
+	if os.Getenv("PROTONMCP_DEBUG") != "" {
+		opts = append(opts, gpa.WithTransport(&debugTransport{
+			next: http.DefaultTransport,
+			out:  os.Stderr,
+		}))
+	}
+	m := gpa.New(opts...)
 	m.AddPreRequestHook(func(_ *resty.Client, req *resty.Request) error {
 		req.SetHeader("User-Agent", UserAgent)
 		return nil
