@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 
 	"github.com/just-an-oldsalt/proto-mcp/internal/keystore"
 )
@@ -15,7 +16,17 @@ import (
 // Diagnostic only — not a stable interface. Will likely change shape
 // or be folded into `status` once the auth-persistence loop is
 // debugged.
+//
+// SECURITY B-11. Even truncated, the prefixes of refresh tokens are
+// non-public material that shouldn't land on stdout where a redirect
+// might capture them into a log file. Gated behind PROTONMCP_DEBUG=1
+// to keep the diagnostic available but not foot-gunny.
 func runInspect(_ context.Context, _ []string) error {
+	if os.Getenv("PROTONMCP_DEBUG") == "" {
+		return fmt.Errorf(
+			"inspect prints session prefixes that could leak via stdout " +
+				"redirection — set PROTONMCP_DEBUG=1 to acknowledge and re-run")
+	}
 	stored, err := keystore.Load()
 	if err != nil {
 		if errors.Is(err, keystore.ErrNotFound) {

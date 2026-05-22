@@ -18,7 +18,12 @@ permissions:
 
 jobs:
   scan:
-    runs-on: ubuntu-latest
+    # macos-14 because internal/keystore depends on keybase/go-keychain
+    # which is a cgo wrapper over Security.framework — the Linux
+    # govulncheck can't link the symbols and would silently fail at the
+    # loading-packages step, meaning CVE alerts never reach anyone.
+    # SECURITY B-5.
+    runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
