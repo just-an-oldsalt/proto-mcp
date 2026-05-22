@@ -253,29 +253,45 @@ and zeroes credential material.</p>
     indefinitely. Re-evaluate then.</li>
 </ul>
 
-<p><strong>1.5/C — <code>security/auth-persistence</code></strong>. <strong>Biggest user-visible
-win.</strong> Stop re-prompting on every subcommand. Pulls the Phase 6 Keychain
-token-persistence story forward.</p>
+<p><strong>1.5/C — <code>security/auth-persistence</code></strong> <span class="tag">done</span>.
+<strong>Biggest user-visible win.</strong> Stop re-prompting on every subcommand.
+Pulls the Phase 6 Keychain token-persistence story forward.</p>
 <ul>
-  <li><span class="check">[ ]</span> macOS Keychain integration: store
-    <code>{UID, AccessToken, RefreshToken, SaltedKeyPass, Email}</code> after a
-    successful login. Use <code>keybase/go-keychain</code> or shell out to
-    <code>security</code>. Owner-only ACL.</li>
-  <li><span class="check">[ ]</span> New subcommand <code>protonmcp login</code>: does
-    full SRP + TOTP + unlock, stores session.</li>
-  <li><span class="check">[ ]</span> New subcommand <code>protonmcp logout</code>: deletes
-    Keychain entries, calls <code>AuthRevoke</code>.</li>
-  <li><span class="check">[ ]</span> Refactor <code>whoami</code> / <code>backfill</code>: load session
-    from Keychain, call <code>NewClientWithRefresh</code> for a fresh access
-    token, use stored <code>SaltedKeyPass</code> to re-unlock keyring. Fall through
-    to "no session — run <code>protonmcp login</code>" error if absent.</li>
-  <li><span class="check">[ ]</span> Token-refresh failure (401) wipes the Keychain
-    entry and tells the user to re-login. Maps to <strong>Login rate limit</strong>
-    (Foundational #6) at the same time — bounded retries on refresh
-    failure so a bad token doesn't loop into Proton anti-abuse.</li>
-  <li><span class="check">[ ]</span> Document the persistence model: which fields
-    live in Keychain, under what ACL, what <code>logout</code> zeroes, what
-    happens when the OS Keychain is locked. <em>(Foundational #5)</em></li>
+  <li><span class="check done">[x]</span> macOS Keychain integration via
+    <code>keybase/go-keychain</code> (cgo, macOS-only). Service
+    <code>zone.dort.protonmcp</code>, single-slot account <code>session</code>,
+    accessibility <code>AccessibleWhenUnlocked</code>. Schema-versioned JSON blob
+    holding <code>{Email, UID, AccessToken, RefreshToken, SaltedKeyPassB64}</code>.</li>
+  <li><span class="check done">[x]</span> <code>protonmcp login</code>: deletes any
+    existing entry, runs full SRP + TOTP + unlock, saves new session.</li>
+  <li><span class="check done">[x]</span> <code>protonmcp logout</code>: best-effort
+    server-side revoke via Resume + Close, then unconditionally deletes
+    the Keychain entry. Idempotent if nothing is stored.</li>
+  <li><span class="check done">[x]</span> <code>proton.Resume</code> rebuilds a Session
+    from <code>{UID, RefreshToken, SaltedKeyPass}</code> via <code>NewClientWithRefresh</code>
+    + <code>GetUser</code> / <code>GetAddresses</code> + <code>gpa.Unlock</code>. <code>acquireSession</code>
+    helper (used by <code>whoami</code> and <code>backfill</code>): tries Resume first,
+    falls through to interactive Login on first run, deletes Keychain
+    entry + re-prompts on expired token.</li>
+  <li><span class="check done">[x]</span> Token rotation: Session installs an
+    <code>AuthHandler</code> that captures rotated <code>AccessToken</code> / <code>RefreshToken</code>
+    under a mutex. <code>OnAuthUpdate</code> callback re-saves the Keychain blob
+    on every rotation so a long-running backfill that triggers a refresh
+    can be resumed cleanly afterward.</li>
+  <li><span class="check done">[x]</span> Token-refresh 401 → <code>ErrSessionExpired</code>
+    → Keychain wiped + clear "re-authenticating ..." message + fall
+    through to interactive login (single attempt; no auto-retry loop,
+    so a bad token can't hammer Proton anti-abuse). Bounded behavior
+    satisfies Foundational #6 for the CLI-shell model.</li>
+  <li><span class="check done">[x]</span> Documented persistence model in
+    <code>SECURITY.md</code> not yet — TODO for the file-hardening branch (1.5/E).
+    For now the rationale lives in <code>internal/keystore/keystore.go</code>
+    package doc.</li>
+  <li><strong>Future Touch ID gating</strong> (opt-in): possible by re-creating
+    the Keychain item with <code>AccessControl(.userPresence)</code>. Skipped here
+    because requiring Touch ID on every <code>whoami</code> defeats the silent-
+    resume win we just built; leave it as a "<code>protonmcp lock</code>" /
+    "<code>--require-touchid</code>" mode in Phase 6.</li>
 </ul>
 
 <p><strong>1.5/D — <code>security/structured-logging</code></strong>.</p>

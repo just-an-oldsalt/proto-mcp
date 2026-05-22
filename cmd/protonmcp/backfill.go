@@ -55,18 +55,12 @@ func runBackfill(ctx context.Context, args []string) error {
 	}
 	defer st.Close()
 
-	creds, err := collectCredentials()
-	if err != nil {
-		return err
-	}
-	defer creds.Zero()
-
 	mgr := protonclient.NewManager("")
 	defer mgr.Close()
 
-	loginCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	acquireCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
-	sess, err := protonclient.Login(loginCtx, mgr, creds)
+	sess, err := acquireSession(acquireCtx, mgr)
 	if err != nil {
 		return err
 	}

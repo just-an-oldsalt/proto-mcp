@@ -78,12 +78,21 @@ func (c *Credentials) Zero() {
 	c.TOTP.Zero()
 }
 
-// Session is the unlocked-state bundle returned by Login. The caller owns
-// the client and is responsible for calling Close when done; the keyrings
-// hold decrypted PGP material and should be cleared as soon as feasible.
+// Session is the unlocked-state bundle returned by Login or Resume.
+// The caller owns the client and is responsible for calling Close
+// when done; the keyrings hold decrypted PGP material and should be
+// cleared as soon as feasible.
 //
-// Close is idempotent (guarded by sync.Once), so it's safe to wire from
-// multiple defer / signal paths without risking double-revoke or panic.
+// Close is idempotent (guarded by sync.Once), so it's safe to wire
+// from multiple defer / signal paths without risking double-revoke or
+// panic.
+//
+// Email / UID / AccessToken / RefreshToken / SaltedKeyPass let callers
+// persist the session to the OS Keychain after Login and use Resume
+// on a later run. AccessToken / RefreshToken are rotated in place by
+// the SDK's AuthHandler when Proton hands back a fresh pair; callers
+// that persist these to disk subscribe via OnAuthUpdate to write the
+// rotated values back.
 type Session struct {
 	Client       *gpa.Client
 	User         gpa.User
@@ -93,7 +102,50 @@ type Session struct {
 	PasswordMode gpa.PasswordMode
 	TwoFA        gpa.TwoFAStatus
 
+	Email         string
+	UID           string
+	SaltedKeyPass secret.Secret
+
+	authMu       sync.Mutex
+	AccessToken  string
+	RefreshToken string
+
+	// OnAuthUpdate, if set, fires whenever the SDK hands us a rotated
+	// auth bundle. Session.AccessToken / RefreshToken have already been
+	// updated by the time this is called. Callers wire this to persist
+	// the rotated tokens so the next process can resume.
+	OnAuthUpdate func(uid, accessToken, refreshToken string)
+
 	closeOnce sync.Once
+}
+
+// Tokens returns the current (rotating) access + refresh tokens under
+// the auth mutex.
+func (s *Session) Tokens() (access, refresh string) {
+	s.authMu.Lock()
+	defer s.authMu.Unlock()
+	return s.AccessToken, s.RefreshToken
+}
+
+// installAuthHandler wires the SDK's AuthHandler into the session so
+// rotated tokens are captured and (optionally) forwarded to
+// OnAuthUpdate. Called by both Login and Resume after they construct
+// a Client.
+func (s *Session) installAuthHandler() {
+	if s.Client == nil {
+		return
+	}
+	s.Client.AddAuthHandler(func(auth gpa.Auth) {
+		s.authMu.Lock()
+		s.AccessToken = auth.AccessToken
+		s.RefreshToken = auth.RefreshToken
+		cb := s.OnAuthUpdate
+		uid := s.UID
+		s.authMu.Unlock()
+		if cb != nil {
+			cb(uid, auth.AccessToken, auth.RefreshToken)
+		}
+	})
 }
 
 // PrimaryAddress returns the user's primary (Order == 1) enabled address,
@@ -134,10 +186,35 @@ func (s *Session) Close() {
 			kr.ClearPrivateParams()
 			delete(s.AddrKRs, id)
 		}
+		s.SaltedKeyPass.Zero()
 		if s.Client != nil {
 			ctx, cancel := detachedShutdownCtx()
 			defer cancel()
 			_ = s.Client.AuthDelete(ctx)
+			s.Client.Close()
+			s.Client = nil
+		}
+	})
+}
+
+// CloseLocalOnly clears local crypto material without calling
+// AuthDelete on the server. Used by logout flows that want the server
+// session revoked AFTER unlock teardown (so the AuthRevoke call
+// happens against the still-authenticated client), or by background
+// shutdowns where the server is unreachable and we just want to wipe
+// memory.
+func (s *Session) CloseLocalOnly() {
+	s.closeOnce.Do(func() {
+		if s.UserKR != nil {
+			s.UserKR.ClearPrivateParams()
+			s.UserKR = nil
+		}
+		for id, kr := range s.AddrKRs {
+			kr.ClearPrivateParams()
+			delete(s.AddrKRs, id)
+		}
+		s.SaltedKeyPass.Zero()
+		if s.Client != nil {
 			s.Client.Close()
 			s.Client = nil
 		}
@@ -279,28 +356,36 @@ func Login(ctx context.Context, mgr *gpa.Manager, creds *Credentials) (*Session,
 		cleanup()
 		return nil, fmt.Errorf("salt for primary key: %w", err)
 	}
-	// Wrap and zero the raw buffer right away — saltedKeyPass is just
-	// as sensitive as the mailbox password (it derives the user PGP
-	// key) and we don't want it sitting on the heap after Unlock.
+	// Wrap and zero the raw buffer right away. saltedKeyPass is just as
+	// sensitive as the mailbox password (it derives the user PGP key);
+	// we keep it on the Session so callers can persist it to the
+	// Keychain for resume, but the raw buffer goes away.
 	saltedPass := secret.New(saltedRaw)
 	for i := range saltedRaw {
 		saltedRaw[i] = 0
 	}
-	defer saltedPass.Zero()
 
 	userKR, addrKRs, err := gpa.Unlock(user, addrs, saltedPass.Bytes(), nil)
 	if err != nil {
+		saltedPass.Zero()
 		cleanup()
 		return nil, fmt.Errorf("unlock keyring: %w (wrong mailbox password?)", err)
 	}
 
-	return &Session{
-		Client:       client,
-		User:         user,
-		Addresses:    addrs,
-		UserKR:       userKR,
-		AddrKRs:      addrKRs,
-		PasswordMode: auth.PasswordMode,
-		TwoFA:        auth.TwoFA.Enabled,
-	}, nil
+	sess := &Session{
+		Client:        client,
+		User:          user,
+		Addresses:     addrs,
+		UserKR:        userKR,
+		AddrKRs:       addrKRs,
+		PasswordMode:  auth.PasswordMode,
+		TwoFA:         auth.TwoFA.Enabled,
+		Email:         creds.Email,
+		UID:           auth.UID,
+		AccessToken:   auth.AccessToken,
+		RefreshToken:  auth.RefreshToken,
+		SaltedKeyPass: saltedPass,
+	}
+	sess.installAuthHandler()
+	return sess, nil
 }

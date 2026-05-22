@@ -53,6 +53,10 @@ func main() {
 
 	var err error
 	switch cmd {
+	case "login":
+		err = runLogin(ctx, args)
+	case "logout":
+		err = runLogout(ctx, args)
 	case "whoami":
 		err = runWhoami(ctx)
 	case "backfill":
@@ -78,12 +82,19 @@ Usage:
   protonmcp <command> [options]
 
 Commands:
-  whoami     Log in and print account summary.
-  backfill   Drain message metadata into the local SQLite mirror.
+  login      Run the full Proton login flow and save the session to the
+             macOS Keychain so other subcommands can resume silently.
+  logout     Revoke the server-side session and delete the Keychain entry.
+  whoami     Print an account summary. Resumes the saved session if one
+             exists; otherwise falls back to the full login flow once.
+  backfill   Drain message metadata into the local SQLite mirror. Same
+             session-resume behavior as whoami.
              Flags: --db <path>, --yes (skip confirm), --limit <n>.
   help       Show this help.
 
-All commands prompt interactively for missing credentials; passwords use
+The session is persisted in the macOS Keychain (service
+"zone.dort.protonmcp") so credential prompts only happen on first
+run or after logout / token expiry. Passwords are entered on
 echo-off /dev/tty.
 
 Environment (override prompts; useful for scripting). Secret-bearing
@@ -150,20 +161,14 @@ func collectCredentials() (*protonclient.Credentials, error) {
 }
 
 func runWhoami(ctx context.Context) error {
-	creds, err := collectCredentials()
-	if err != nil {
-		return err
-	}
-	defer creds.Zero()
-
 	mgr := protonclient.NewManager("")
 	defer mgr.Close()
 
-	loginCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	acquireCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 
 	start := time.Now()
-	sess, err := protonclient.Login(loginCtx, mgr, creds)
+	sess, err := acquireSession(acquireCtx, mgr)
 	if err != nil {
 		return err
 	}
