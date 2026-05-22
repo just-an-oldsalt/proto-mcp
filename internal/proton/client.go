@@ -168,25 +168,33 @@ func (s *Session) PrimaryAddress() (gpa.Address, bool) {
 	return fallback, haveFallback
 }
 
-// Close revokes the session on the server and zeroes local keyring
-// state. Idempotent (guarded by sync.Once); subsequent calls are no-ops.
+// Close releases local crypto + HTTP state for the session. It does
+// NOT revoke the session on the Proton server — doing so would kill
+// the refresh token we just stored in the Keychain and force a fresh
+// SRP login on every subcommand. For explicit revoke (logout, or
+// abandoning a partial login), call CloseAndRevoke instead.
 //
-// Close builds its own short-timeout context for the server-side
-// AuthDelete call rather than taking one from the caller. This means
-// a Ctrl-C-cancelled parent context can't sneak through and skip the
-// revoke step — every Close attempt gets a fresh ~5s window. A hung
-// network can't block shutdown for longer than that.
+// Idempotent via sync.Once.
 func (s *Session) Close() {
 	s.closeOnce.Do(func() {
-		if s.UserKR != nil {
-			s.UserKR.ClearPrivateParams()
-			s.UserKR = nil
+		s.releaseLocal()
+		if s.Client != nil {
+			s.Client.Close()
+			s.Client = nil
 		}
-		for id, kr := range s.AddrKRs {
-			kr.ClearPrivateParams()
-			delete(s.AddrKRs, id)
-		}
-		s.SaltedKeyPass.Zero()
+	})
+}
+
+// CloseAndRevoke is Close plus a server-side AuthDelete. Use from the
+// logout subcommand or error-recovery paths that explicitly want the
+// session destroyed on Proton's side. The AuthDelete runs against a
+// fresh 5-second context so a cancelled parent ctx (Ctrl-C) cannot
+// smuggle through and skip the revoke step.
+//
+// Idempotent via sync.Once.
+func (s *Session) CloseAndRevoke() {
+	s.closeOnce.Do(func() {
+		s.releaseLocal()
 		if s.Client != nil {
 			ctx, cancel := detachedShutdownCtx()
 			defer cancel()
@@ -197,28 +205,19 @@ func (s *Session) Close() {
 	})
 }
 
-// CloseLocalOnly clears local crypto material without calling
-// AuthDelete on the server. Used by logout flows that want the server
-// session revoked AFTER unlock teardown (so the AuthRevoke call
-// happens against the still-authenticated client), or by background
-// shutdowns where the server is unreachable and we just want to wipe
-// memory.
-func (s *Session) CloseLocalOnly() {
-	s.closeOnce.Do(func() {
-		if s.UserKR != nil {
-			s.UserKR.ClearPrivateParams()
-			s.UserKR = nil
-		}
-		for id, kr := range s.AddrKRs {
-			kr.ClearPrivateParams()
-			delete(s.AddrKRs, id)
-		}
-		s.SaltedKeyPass.Zero()
-		if s.Client != nil {
-			s.Client.Close()
-			s.Client = nil
-		}
-	})
+// releaseLocal zeroes keyring material and the salted mailbox pass.
+// Not protected by closeOnce — callers (Close, CloseAndRevoke) own
+// the Once guard.
+func (s *Session) releaseLocal() {
+	if s.UserKR != nil {
+		s.UserKR.ClearPrivateParams()
+		s.UserKR = nil
+	}
+	for id, kr := range s.AddrKRs {
+		kr.ClearPrivateParams()
+		delete(s.AddrKRs, id)
+	}
+	s.SaltedKeyPass.Zero()
 }
 
 // NewManager constructs a Manager pre-configured for production Proton

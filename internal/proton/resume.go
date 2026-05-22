@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	gpa "github.com/ProtonMail/go-proton-api"
+	"github.com/go-resty/resty/v2"
 
 	"github.com/just-an-oldsalt/proto-mcp/internal/secret"
 )
@@ -104,17 +105,29 @@ func Resume(ctx context.Context, mgr *gpa.Manager, args ResumeArgs) (*Session, e
 }
 
 // isAuthExpired distinguishes "token dead" from other failure modes
-// (network down, server 500, etc.) so callers know whether to wipe the
-// keystore or retry later.
+// (network down, server 500, etc.) so callers know whether to wipe
+// the keystore or retry later.
 //
-// The Proton API returns HTTP 401 with a JSON body for invalid refresh
-// tokens; go-proton-api wraps these as gpa.APIError values. We check
-// for status code 401 conservatively — anything else falls through to
-// the generic "refresh failed" path.
+// Proton's auth endpoints can signal dead-token in several shapes:
+//
+//   - HTTP 401 wrapped as gpa.APIError (classic unauthorized)
+//   - HTTP 422 with Code=10013 ("Invalid refresh token") wrapped as
+//     resty.ResponseError — what /auth/v4/refresh actually returns
+//     when the token has been revoked by an AuthDelete call
+//
+// We treat any 4xx response from the refresh endpoint as "token
+// effectively expired — wipe and re-prompt"; only 5xx and network
+// errors leave the Keychain entry alone so they don't blow it away
+// on a transient outage.
 func isAuthExpired(err error) bool {
 	var apiErr *gpa.APIError
 	if errors.As(err, &apiErr) {
-		return apiErr.Status == 401
+		return apiErr.Status >= 400 && apiErr.Status < 500
+	}
+	var respErr *resty.ResponseError
+	if errors.As(err, &respErr) && respErr.Response != nil {
+		sc := respErr.Response.StatusCode()
+		return sc >= 400 && sc < 500
 	}
 	return false
 }

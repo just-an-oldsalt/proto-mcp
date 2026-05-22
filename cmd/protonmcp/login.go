@@ -66,7 +66,7 @@ func runLogout(ctx context.Context, _ []string) error {
 			SaltedKeyPass: stored.SaltedKeyPass,
 		})
 		if err == nil {
-			sess.Close() // hits AuthDelete server-side
+			sess.CloseAndRevoke() // explicit revoke: this is logout
 		}
 		mgr.Close()
 	}
