@@ -22,7 +22,18 @@ import (
 
 	"github.com/just-an-oldsalt/proto-mcp/internal/cli"
 	protonclient "github.com/just-an-oldsalt/proto-mcp/internal/proton"
+	"github.com/just-an-oldsalt/proto-mcp/internal/secret"
 )
+
+// secretEnvNames are the environment variables that may carry credential
+// material. Once collectCredentials has copied any of them into a Secret,
+// the underlying env entry is unset so it doesn't sit in `ps eww` /
+// /proc/<pid>/environ for the lifetime of the process.
+var secretEnvNames = []string{
+	"PROTONMCP_PASSWORD",
+	"PROTONMCP_MAILBOX_PASSWORD",
+	"PROTONMCP_TOTP",
+}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -70,7 +81,9 @@ Commands:
 All commands prompt interactively for missing credentials; passwords use
 echo-off /dev/tty.
 
-Environment (override prompts; useful for scripting):
+Environment (override prompts; useful for scripting). Secret-bearing
+vars are consumed and unset early so they do not survive in the
+process environment:
   PROTONMCP_EMAIL              Proton login email.
   PROTONMCP_PASSWORD           Login password.
   PROTONMCP_MAILBOX_PASSWORD   Only for legacy two-password accounts.
@@ -78,39 +91,55 @@ Environment (override prompts; useful for scripting):
 }
 
 // collectCredentials assembles a Credentials value from environment
-// variables, prompting interactively for anything still empty. The
-// AskTOTP / AskMailboxPassword callbacks are wired to interactive
-// prompts so login can request those mid-flow only when the server
-// actually needs them.
-func collectCredentials() (protonclient.Credentials, error) {
-	creds := protonclient.Credentials{
-		Email:           os.Getenv("PROTONMCP_EMAIL"),
-		Password:        os.Getenv("PROTONMCP_PASSWORD"),
-		MailboxPassword: os.Getenv("PROTONMCP_MAILBOX_PASSWORD"),
-		TOTP:            os.Getenv("PROTONMCP_TOTP"),
-		AskTOTP: func() (string, error) {
-			return cli.PromptLine("TOTP code: ")
+// variables, prompting interactively for anything still empty. Secret-
+// bearing env entries are unset immediately after copying into a Secret
+// so they don't linger in the process environment. AskTOTP and
+// AskMailboxPassword are wired so that login can request those mid-flow
+// only when the server actually needs them.
+func collectCredentials() (*protonclient.Credentials, error) {
+	creds := &protonclient.Credentials{
+		Email: os.Getenv("PROTONMCP_EMAIL"),
+		AskTOTP: func() (secret.Secret, error) {
+			v, err := cli.PromptLine("TOTP code: ")
+			if err != nil {
+				return secret.Secret{}, err
+			}
+			return secret.FromString(v), nil
 		},
-		AskMailboxPassword: func() (string, error) {
+		AskMailboxPassword: func() (secret.Secret, error) {
 			return cli.PromptSecret("Mailbox password (two-password mode): ")
 		},
 	}
+
+	if v := os.Getenv("PROTONMCP_PASSWORD"); v != "" {
+		creds.Password = secret.FromString(v)
+	}
+	if v := os.Getenv("PROTONMCP_MAILBOX_PASSWORD"); v != "" {
+		creds.MailboxPassword = secret.FromString(v)
+	}
+	if v := os.Getenv("PROTONMCP_TOTP"); v != "" {
+		creds.TOTP = secret.FromString(v)
+	}
+	for _, n := range secretEnvNames {
+		_ = os.Unsetenv(n)
+	}
+
 	if creds.Email == "" {
 		v, err := cli.PromptLine("Proton email: ")
 		if err != nil {
-			return creds, fmt.Errorf("read email: %w", err)
+			return nil, fmt.Errorf("read email: %w", err)
 		}
 		creds.Email = v
 	}
-	if creds.Password == "" {
-		v, err := cli.PromptSecret("Password: ")
+	if creds.Password.Empty() {
+		s, err := cli.PromptSecret("Password: ")
 		if err != nil {
-			return creds, fmt.Errorf("read password: %w", err)
+			return nil, fmt.Errorf("read password: %w", err)
 		}
-		creds.Password = v
+		creds.Password = s
 	}
-	if creds.Email == "" || creds.Password == "" {
-		return creds, errors.New("email and password are required")
+	if creds.Email == "" || creds.Password.Empty() {
+		return nil, errors.New("email and password are required")
 	}
 	return creds, nil
 }
@@ -120,6 +149,7 @@ func runWhoami(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	defer creds.Zero()
 
 	mgr := protonclient.NewManager("")
 	defer mgr.Close()
