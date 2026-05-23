@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/text/unicode/norm"
+
 	"github.com/just-an-oldsalt/proto-mcp/internal/approval"
 	"github.com/just-an-oldsalt/proto-mcp/internal/audit"
 	"github.com/just-an-oldsalt/proto-mcp/internal/caller"
@@ -268,19 +270,77 @@ type Logger interface {
 }
 
 // defaultPromptTitle / defaultPromptBody build the strings shown to
-// the user when a tool is gated by prompt. Phase 5 will likely
-// per-tool customize these (e.g., mail_send wants the recipient
-// list literal in the body); for Phase 4 the generic shape is
-// sufficient.
+// the user when a tool is gated by prompt. Both run through
+// SanitizePromptText (below) — SECURITY D21 / D23.
+//
+// Per-tool PromptBody implementations (in internal/mcptools) MUST
+// also route their output through SanitizePromptText. The send-family
+// builds the recipient list from raw LLM input, so the choke point
+// for the NSAlert content is essential.
 func defaultPromptTitle(tool string) string {
-	return "Approve " + tool + "?"
+	return SanitizePromptText("Approve "+tool+"?", 120)
 }
 
 func defaultPromptBody(tool string, args json.RawMessage, _ *policy.ToolPolicy) string {
 	if len(args) == 0 {
-		return tool + " was requested by an MCP client."
+		return SanitizePromptText(tool+" was requested by an MCP client.", 4000)
 	}
-	return tool + " was requested by an MCP client with args:\n" + string(redact.JSON(args))
+	return SanitizePromptText(
+		tool+" was requested by an MCP client with args:\n"+string(redact.JSON(args)),
+		4000,
+	)
+}
+
+// SanitizePromptText is the single chokepoint for any text the
+// approval broker is about to feed into NSAlert. SECURITY D21 +
+// D23: LLM-supplied content (recipients, subject) routes verbatim
+// into a macOS dialog, exposing the user to:
+//
+//  1. Terminal-escape / control-character corruption — same C0/C1
+//     range internal/sanitize.Text already strips on the read path.
+//  2. RTL-override / bidi spoofing — characters like U+202E flip
+//     visual rendering so "alice@example.com" can read as
+//     "moc.live@ecila". Strip them.
+//  3. Zero-width joiners hiding additional content.
+//  4. AppKit OOM from multi-MB strings. Cap.
+//  5. Look-alike Unicode glyphs (Cyrillic 'а' vs Latin 'a').
+//     NFKC normalization folds many compatibility forms; not a
+//     full homograph defense (those need explicit allowlisting)
+//     but cheap and helps.
+//
+// Exported so internal/mcptools' per-tool PromptBody builders can
+// call it without re-implementing the same logic.
+func SanitizePromptText(in string, maxRunes int) string {
+	if maxRunes <= 0 {
+		maxRunes = 4000
+	}
+	in = norm.NFKC.String(in)
+	var b strings.Builder
+	b.Grow(len(in))
+	for _, r := range in {
+		switch {
+		case r == '\n' || r == '\t':
+			b.WriteRune(r)
+		case r < 0x20:
+			// C0 controls — drop.
+		case r >= 0x7f && r <= 0x9f:
+			// DEL + C1 controls — drop.
+		case r == 0x200e || r == 0x200f, // LRM / RLM
+			r == 0x202a, r == 0x202b, r == 0x202c, r == 0x202d, r == 0x202e, // bidi embed / override
+			r == 0x2066, r == 0x2067, r == 0x2068, r == 0x2069: // bidi isolate
+			// Drop bidi-control codepoints entirely.
+		case r == 0x200b || r == 0x200c || r == 0x200d || r == 0xfeff:
+			// Zero-width joiners / non-joiners / BOM — drop.
+		default:
+			b.WriteRune(r)
+		}
+	}
+	out := b.String()
+	r := []rune(out)
+	if len(r) > maxRunes {
+		out = string(r[:maxRunes]) + "…[truncated]"
+	}
+	return out
 }
 
 // updateDecision backfills policy_decision into the audit row that
