@@ -164,7 +164,7 @@
 <div class="stats">
   <div class="stat"><div class="stat-num">7</div><div class="stat-label">Open defects</div></div>
   <div class="stat"><div class="stat-num">0</div><div class="stat-label">Investigating</div></div>
-  <div class="stat"><div class="stat-num">24</div><div class="stat-label">Resolved</div></div>
+  <div class="stat"><div class="stat-num">26</div><div class="stat-label">Resolved</div></div>
   <div class="stat"><div class="stat-num">0</div><div class="stat-label"><span class="tag critical">critical</span></div></div>
   <div class="stat"><div class="stat-num">2</div><div class="stat-label"><span class="tag high">high</span></div></div>
   <div class="stat"><div class="stat-num">5</div><div class="stat-label"><span class="tag medium">medium</span></div></div>
@@ -172,6 +172,15 @@
 </div>
 
 <h2>Open</h2>
+
+<h3><span class="id">D33</span><code>policy reload</code> SIGHUPs Claude.app disclaimer wrapper / unrelated processes <span class="tag fixed">fixed in 1.0-alpha PR</span> <span class="tag low">low</span></h3>
+<p><strong>Reported:</strong> 2026-05-22 from live test · <strong>Fixed:</strong> 1.0-alpha PR · Surface: <code>internal/policy/pidfile.go:FindRunningPIDs</code></p>
+<p><strong>Root cause:</strong> <code>pgrep -f "protonmcp serve-stdio"</code> matches any process whose full command line contains that substring. Claude Desktop's <code>disclaimer</code> helper at <code>/Applications/Claude.app/Contents/Helpers/disclaimer</code> invokes the binary with <code>protonmcp serve-stdio</code> as argv, so it matched. Editors with this filename open, grep processes, etc. matched too. Result: spurious SIGHUPs and a misleading "sent SIGHUP to N instances" count.</p>
+<p><strong>Fix:</strong> Post-filter each pgrep match by verifying its actual executable path (via <code>libproc.proc_pidpath</code>, same primitive the audit log uses for <code>caller_binary</code>) matches the running protonmcp binary. Comparison uses <code>os.SameFile</code> so symlinked installs work. New <code>caller.BinaryFor(pid)</code> exported helper; new <code>internal/policy/pidfile_darwin.go</code> + <code>_other.go</code> for the platform shim.</p>
+
+<h3><span class="id">D34</span><code>pgrep -f</code> match count includes editors / greps / wrappers <span class="tag fixed">fixed in 1.0-alpha PR</span> <span class="tag low">low</span></h3>
+<p><strong>Reported:</strong> 2026-05-22 from live test · <strong>Fixed:</strong> 1.0-alpha PR</p>
+<p>Same root cause as D33; same fix closes both. The matching is now executable-identity rather than command-line substring, so cosmetic overcount disappears.</p>
 
 <h3><span class="id">D32</span><code>labels_list</code> / <code>folders_list</code> return null on a freshly-backfilled mirror <span class="tag fixed">fixed in PR 5.5/A</span> <span class="tag low">low</span></h3>
 <p><strong>Reported:</strong> 2026-05-22 from live Claude Code MCP test ·
