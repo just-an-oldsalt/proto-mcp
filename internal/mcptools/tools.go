@@ -22,6 +22,7 @@ package mcptools
 
 import (
 	"github.com/just-an-oldsalt/proto-mcp/internal/mcp"
+	"github.com/just-an-oldsalt/proto-mcp/internal/policy"
 	protonclient "github.com/just-an-oldsalt/proto-mcp/internal/proton"
 	"github.com/just-an-oldsalt/proto-mcp/internal/store"
 )
@@ -38,6 +39,18 @@ type Deps struct {
 
 	// Store is the local SQLite mirror.
 	Store *store.Store
+
+	// Policy is the active policy engine, used for handler-side
+	// re-validation. SECURITY D6: send-family tools whose recipients
+	// can't be extracted from raw args (reply / reply_all /
+	// send_draft) need to re-check the allowlist AFTER fetching the
+	// recipient list from the server, before SendDraft. The
+	// middleware's pre-handler allowed_recipients stage only catches
+	// args-resident recipients; this Deps field lets handlers cover
+	// the rest. nil is acceptable (Phase-3 tests construct Deps
+	// without it) — handlers fall back to allow-by-default in that
+	// case.
+	Policy *policy.Engine
 }
 
 // All returns every tool registered, in the order the server should

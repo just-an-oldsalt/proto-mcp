@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -70,6 +71,18 @@ func runBackfill(ctx context.Context, args []string) error {
 		return fmt.Errorf("capture event cursor: %w", err)
 	}
 	fmt.Printf("Captured event cursor: %s\n", cursor)
+
+	// SECURITY D32 — seed the local labels/folders mirror. Before
+	// this, the labels table only populated via the sync event loop,
+	// so pre-existing labels never landed unless the user changed
+	// one. labels_list / folders_list both returned null on a freshly
+	// backfilled mirror.
+	if err := backfillLabels(ctx, sess, st); err != nil {
+		// Non-fatal — messages backfill is the main thing. Print a
+		// warning so the user knows labels_list / folders_list will
+		// return null until the next label-change event syncs.
+		fmt.Fprintf(os.Stderr, "warning: label backfill failed (continuing): %v\n", err)
+	}
 
 	total, err := sess.CountMessages(ctx)
 	if err != nil {
@@ -141,3 +154,32 @@ func runBackfill(ctx context.Context, args []string) error {
 // --limit is hit. It's not exposed and not an error condition for the
 // command — runBackfill swallows it.
 var errLimitReached = errors.New("limit reached")
+
+// backfillLabels fetches every user-defined label and folder from
+// Proton and upserts each into the local mirror's `labels` table.
+// SECURITY D32: previously the labels table only populated via the
+// sync event loop, so a freshly-backfilled mirror returned null
+// from labels_list and folders_list until the user changed a label.
+//
+// We fetch both LabelTypeLabel (user labels) and LabelTypeFolder
+// (user folders) — the schema column distinguishes them.
+func backfillLabels(ctx context.Context, sess *protonclient.Session, st *store.Store) error {
+	labels, err := sess.Client.GetLabels(ctx, gpa.LabelTypeLabel, gpa.LabelTypeFolder)
+	if err != nil {
+		return fmt.Errorf("fetch labels: %w", err)
+	}
+	n := 0
+	for _, l := range labels {
+		if err := st.UpsertLabel(ctx, store.Label{
+			ID:    l.ID,
+			Name:  l.Name,
+			Color: l.Color,
+			Type:  int(l.Type),
+		}); err != nil {
+			return fmt.Errorf("upsert label %s: %w", l.ID, err)
+		}
+		n++
+	}
+	fmt.Printf("Seeded %d label(s)/folder(s) into the local mirror.\n", n)
+	return nil
+}

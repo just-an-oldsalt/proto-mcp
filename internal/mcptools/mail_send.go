@@ -12,6 +12,7 @@ import (
 	"github.com/ProtonMail/gopenpgp/v2/crypto"
 
 	"github.com/just-an-oldsalt/proto-mcp/internal/mcp"
+	"github.com/just-an-oldsalt/proto-mcp/internal/policy"
 )
 
 // The send family. Five tools sharing one core send path:
@@ -105,8 +106,8 @@ func mailSendDraft(deps Deps) mcp.Tool {
 		PromptBody: func(args json.RawMessage) (string, string) {
 			var in input
 			_ = json.Unmarshal(args, &in)
-			return "Approve mail_send_draft?",
-				"Send draft " + in.DraftID + " to its stored recipients."
+			return mcp.SanitizePromptText("Approve mail_send_draft?", 120),
+				mcp.SanitizePromptText("Send draft "+in.DraftID+" to its stored recipients.", 4000)
 		},
 		Handler: func(ctx mcp.Context, raw json.RawMessage) (*mcp.ToolResult, error) {
 			var in input
@@ -149,8 +150,8 @@ func mailReply(deps Deps) mcp.Tool {
 		PromptBody: func(args json.RawMessage) (string, string) {
 			var in input
 			_ = json.Unmarshal(args, &in)
-			return "Approve mail_reply?",
-				"Reply to message " + in.InReplyTo + " (recipient = original sender)."
+			return mcp.SanitizePromptText("Approve mail_reply?", 120),
+				mcp.SanitizePromptText("Reply to message "+in.InReplyTo+" (recipient = original sender).", 4000)
 		},
 		Handler: func(ctx mcp.Context, raw json.RawMessage) (*mcp.ToolResult, error) {
 			var in input
@@ -191,8 +192,8 @@ func mailReplyAll(deps Deps) mcp.Tool {
 		PromptBody: func(args json.RawMessage) (string, string) {
 			var in input
 			_ = json.Unmarshal(args, &in)
-			return "Approve mail_reply_all?",
-				"Reply-all to message " + in.InReplyTo + " (sender + original To/CC minus you)."
+			return mcp.SanitizePromptText("Approve mail_reply_all?", 120),
+				mcp.SanitizePromptText("Reply-all to message "+in.InReplyTo+" (sender + original To/CC minus you).", 4000)
 		},
 		Handler: func(ctx mcp.Context, raw json.RawMessage) (*mcp.ToolResult, error) {
 			var in input
@@ -245,12 +246,12 @@ func mailForward(deps Deps) mcp.Tool {
 		PromptBody: func(args json.RawMessage) (string, string) {
 			var in input
 			_ = json.Unmarshal(args, &in)
-			return "Approve mail_forward?",
-				fmt.Sprintf("Forward message %s\nTo: %s\nCC: %s\nBCC: %s",
+			return mcp.SanitizePromptText("Approve mail_forward?", 120),
+				mcp.SanitizePromptText(fmt.Sprintf("Forward message %s\nTo: %s\nCC: %s\nBCC: %s",
 					in.ForwardOf,
 					strings.Join(in.To, ", "),
 					strings.Join(in.CC, ", "),
-					strings.Join(in.BCC, ", "))
+					strings.Join(in.BCC, ", ")), 4000)
 		},
 		Handler: func(ctx mcp.Context, raw json.RawMessage) (*mcp.ToolResult, error) {
 			var in input
@@ -271,18 +272,53 @@ func mailForward(deps Deps) mcp.Tool {
 // ============================================================
 
 // extractSendRecipients pulls To+CC+BCC out of a mail_send arg
-// payload for the allowed_recipients middleware stage. Returns nil
-// on parse failure — the handler's own validation will catch that
-// later with a clearer error message.
+// payload for the allowed_recipients middleware stage.
+//
+// SECURITY D7: each entry runs through mail.ParseAddressList rather
+// than being passed raw. That:
+//   - Strips display names ("Alice <alice@example.com>" → "alice@example.com")
+//     so the allowlist comparison sees the bare address.
+//   - Explodes any multi-address entries ("a@x.com,b@y.com" → ["a@x.com",
+//     "b@y.com"]) so a smuggled second recipient lands in the
+//     allowlist check rather than getting hidden in the display
+//     portion. (The actual SDK send path uses mail.ParseAddress
+//     singular and rejects multi-addr entries; this is defense
+//     in depth so the allowlist sees what the SDK would actually
+//     attempt.)
+//
+// Returns nil on parse failure — the handler's own validation will
+// catch that later with a clearer error message.
 func extractSendRecipients(args json.RawMessage) []string {
 	var in sendInput
 	if err := json.Unmarshal(args, &in); err != nil {
 		return nil
 	}
 	out := make([]string, 0, len(in.To)+len(in.CC)+len(in.BCC))
-	out = append(out, in.To...)
-	out = append(out, in.CC...)
-	out = append(out, in.BCC...)
+	for _, entry := range append(append(append([]string{}, in.To...), in.CC...), in.BCC...) {
+		out = append(out, normalizeRecipientList(entry)...)
+	}
+	return out
+}
+
+// normalizeRecipientList parses one address-list string into bare
+// .Address values. If parsing fails completely, returns the raw
+// input as a single-element slice so the allowlist still sees
+// SOMETHING (rather than the empty list, which would skip the
+// check entirely — fail closed, not open).
+func normalizeRecipientList(s string) []string {
+	addrs, err := mail.ParseAddressList(s)
+	if err != nil || len(addrs) == 0 {
+		return []string{s}
+	}
+	out := make([]string, 0, len(addrs))
+	for _, a := range addrs {
+		if a != nil && a.Address != "" {
+			out = append(out, a.Address)
+		}
+	}
+	if len(out) == 0 {
+		return []string{s}
+	}
 	return out
 }
 
@@ -302,7 +338,8 @@ func sendPromptBody(toolName string) func(json.RawMessage) (string, string) {
 			strings.Join(in.BCC, ", "),
 			in.Subject,
 		)
-		return "Approve " + toolName + "?", body
+		return mcp.SanitizePromptText("Approve "+toolName+"?", 120),
+			mcp.SanitizePromptText(body, 4000)
 	}
 }
 
@@ -432,8 +469,33 @@ func sendForward(ctx mcp.Context, deps Deps, in struct {
 // finalizeSend is the shared "build packages → SendDraft → return"
 // tail used by every send tool. Encapsulates the per-recipient
 // public-key lookup + AddTextPackage call.
+//
+// SECURITY D6: this is also the choke point where handler-side
+// allowed_recipients re-validation happens. reply / reply_all /
+// send_draft can't expose recipients via Tool.Recipients (the list
+// comes from a server fetch, not from raw args), so the middleware
+// allowlist stage skips them. We close that gap here — every send
+// tool that ends up calling SendDraft must pass through this
+// function, and every call validates against the active policy
+// before any encryption or network call to /mail/v4/send.
 func finalizeSend(ctx mcp.Context, deps Deps, toolName string, addrKR *crypto.KeyRing, draft gpa.Message, tpl gpa.DraftTemplate, mimeType string, recipients []string) (*mcp.ToolResult, error) {
-	prefs, err := buildSendPreferences(ctx.Std, deps, recipients, mimeType)
+	// Normalize the recipients we got from wherever (raw args via
+	// allRecipients, draft fetch via addressStrings, reply build) so
+	// the allowlist comparison sees the same shape extractSendRecipients
+	// produces for the middleware path.
+	normalized := make([]string, 0, len(recipients))
+	for _, r := range recipients {
+		normalized = append(normalized, normalizeRecipientList(r)...)
+	}
+	if deps.Policy != nil {
+		if _, pol := deps.Policy.Decide(toolName, nil, mcpCallerFromContext(ctx)); pol != nil && len(pol.AllowedRecipients) > 0 {
+			if bad := firstDisallowedRecipient(normalized, pol.AllowedRecipients); bad != "" {
+				return mcp.ErrorResult("%s denied: recipient %s not on allowlist", toolName, bad), nil
+			}
+		}
+	}
+
+	prefs, err := buildSendPreferences(ctx.Std, deps, normalized, mimeType)
 	if err != nil {
 		return mcp.ErrorResult("%s: build send preferences: %v", toolName, err), nil
 	}
@@ -448,9 +510,58 @@ func finalizeSend(ctx mcp.Context, deps Deps, toolName string, addrKR *crypto.Ke
 	return mcp.StructuredResult(sendResult{
 		MessageID:  sent.ID,
 		Subject:    sent.Subject,
-		Recipients: recipients,
+		Recipients: normalized,
 		Sent:       true,
 	})
+}
+
+// mcpCallerFromContext maps mcp.CallerInfo (a plain struct on
+// Context) to policy.Caller (which is caller.Caller). The two have
+// the same shape; the conversion is here rather than upstream so
+// the internal/mcp package doesn't need to depend on policy.Caller
+// shape.
+func mcpCallerFromContext(ctx mcp.Context) policy.Caller {
+	return policy.Caller{
+		PID:    ctx.Caller.PID,
+		UID:    ctx.Caller.UID,
+		Binary: ctx.Caller.Binary,
+	}
+}
+
+// firstDisallowedRecipient is duplicated from internal/mcp's
+// middleware so the handler-side D6 check uses identical
+// semantics. Same matching rules: full address (case-insensitive)
+// OR domain suffix ("@example.com").
+func firstDisallowedRecipient(extracted, allowed []string) string {
+	if len(allowed) == 0 {
+		return ""
+	}
+	full := map[string]struct{}{}
+	var domains []string
+	for _, a := range allowed {
+		if strings.HasPrefix(a, "@") {
+			domains = append(domains, strings.ToLower(a))
+		} else {
+			full[strings.ToLower(a)] = struct{}{}
+		}
+	}
+	for _, addr := range extracted {
+		lower := strings.ToLower(addr)
+		if _, ok := full[lower]; ok {
+			continue
+		}
+		matched := false
+		for _, d := range domains {
+			if strings.HasSuffix(lower, d) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return addr
+		}
+	}
+	return ""
 }
 
 // allRecipients merges To+CC+BCC into one slice.

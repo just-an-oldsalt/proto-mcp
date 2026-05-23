@@ -197,6 +197,7 @@ func runServeStdio(ctx context.Context, args []string) error {
 	for _, tl := range mcptools.All(mcptools.Deps{
 		Session: bundle.Session,
 		Store:   st,
+		Policy:  engine, // D6 — handler-side allowlist re-check
 	}) {
 		srv.Register(tl)
 	}
