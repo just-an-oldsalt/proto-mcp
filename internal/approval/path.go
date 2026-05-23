@@ -5,11 +5,19 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"testing"
 )
 
 // resolveHelperPath walks the three candidate locations in order:
 //
-//  1. PROTONMCP_TOUCHID env var (test override / dev convenience).
+//  1. PROTONMCP_TOUCHID env var — TEST ONLY. Refuses outside
+//     testing.Testing(); see SECURITY D4. The spawning process
+//     (Claude Desktop / Claude Code) is untrusted; if it could
+//     substitute the helper at runtime via env, every biometric
+//     check would be bypassable by an attacker who could set one
+//     env var (`PROTONMCP_TOUCHID=/bin/true` → all Touch ID
+//     prompts auto-approve, with audit showing
+//     approval_source=touchid for what is in fact no auth).
 //  2. Sibling of argv[0]: helpers/touchid/protonmcp-touchid relative
 //     to filepath.Dir(argv[0]).
 //  3. /Applications/protonmcp.app/Contents/MacOS/protonmcp-touchid
@@ -22,6 +30,14 @@ func resolveHelperPath(argv0 string) (string, error) {
 	var candidates []string
 
 	if env := os.Getenv("PROTONMCP_TOUCHID"); env != "" {
+		if !testing.Testing() {
+			return "", fmt.Errorf(
+				"PROTONMCP_TOUCHID env var refused: this override is test-only " +
+					"(SECURITY D4 — a parent process could otherwise replace the " +
+					"biometric helper with /bin/true and bypass every prompt). " +
+					"Unset PROTONMCP_TOUCHID and rely on the binary's own " +
+					"discovery path")
+		}
 		candidates = append(candidates, env)
 	}
 

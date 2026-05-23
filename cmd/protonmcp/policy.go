@@ -30,32 +30,40 @@ func runPolicy(ctx context.Context, args []string) error {
 	}
 }
 
-// runPolicyReload reads the PID file written by serve-stdio at
-// startup and sends SIGHUP to the running daemon. The daemon's HUP
-// handler calls policy.Engine.Reload().
+// runPolicyReload finds every live `protonmcp serve-stdio` process
+// via pgrep and sends each one SIGHUP. The daemon's HUP handler calls
+// policy.Engine.Reload(). Multiple processes (Claude Desktop + Claude
+// Code running concurrently) all reload their independently-loaded
+// policy snapshots.
+//
+// SECURITY D9: the previous PID-file-based approach was
+// unauthenticated — any local process could write a PID file with
+// its own PID and steal the SIGHUP. pgrep filters by process
+// command line, so the signal goes to actual serve-stdio instances.
 func runPolicyReload(_ context.Context, args []string) error {
 	if len(args) > 0 {
 		return fmt.Errorf("policy reload takes no arguments; got %v", args)
 	}
-	pidPath, err := policy.DefaultPIDPath()
-	if err != nil {
-		return err
-	}
-	pid, err := policy.ReadPIDFile(pidPath)
+	pids, err := policy.FindRunningPIDs()
 	if err != nil {
 		if errors.Is(err, policy.ErrNotRunning) {
 			return errors.New("no protonmcp serve-stdio appears to be running")
 		}
 		return err
 	}
-	p, err := os.FindProcess(pid)
-	if err != nil {
-		return fmt.Errorf("find pid %d: %w", pid, err)
+	for _, pid := range pids {
+		p, err := os.FindProcess(pid)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: find pid %d: %v\n", pid, err)
+			continue
+		}
+		if err := p.Signal(syscall.SIGHUP); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: signal pid %d: %v\n", pid, err)
+			continue
+		}
+		fmt.Printf("sent SIGHUP to protonmcp serve-stdio pid %d\n", pid)
 	}
-	if err := p.Signal(syscall.SIGHUP); err != nil {
-		return fmt.Errorf("signal pid %d: %w", pid, err)
-	}
-	fmt.Printf("sent SIGHUP to protonmcp serve-stdio (pid %d) — check the daemon's logs for reload outcome\n", pid)
+	fmt.Printf("reload signal sent to %d instance(s) — check each daemon's logs for the outcome\n", len(pids))
 	return nil
 }
 

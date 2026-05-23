@@ -149,10 +149,13 @@ Commands:
              talk to the read tools. Don't run by hand; use install
              to register with Claude Desktop instead.
              Flags: --db <path>.
-  install    Register protonmcp in Claude Desktop's config so the
-             desktop app launches it as an MCP server. Idempotent.
-             Flags: --dry-run (print what would be written).
-  uninstall  Remove protonmcp from Claude Desktop's config.
+  install    Register protonmcp in Claude Desktop and/or Claude Code's
+             config so the chosen client launches it as an MCP server.
+             Idempotent.
+             Flags: --client {desktop|code|all}  (default: all),
+                    --dry-run (print what would be written).
+  uninstall  Remove protonmcp from the selected client config(s).
+             Flags: --client {desktop|code|all}  (default: all).
   policy     Inspect or hot-reload the policy engine.
              Subcommands:
                reload                  Send SIGHUP to a running serve-stdio

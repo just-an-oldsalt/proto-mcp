@@ -4,10 +4,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 )
 
 // DefaultPIDPath returns the canonical PID file location:
@@ -22,103 +22,83 @@ func DefaultPIDPath() (string, error) {
 }
 
 // WritePIDFile creates path (with the containing dir, mode 0o700)
-// and writes os.Getpid() to it (mode 0o600). Acquires an advisory
-// flock so a second concurrent serve-stdio would observe the lock
-// and either coexist explicitly or bail.
+// and writes os.Getpid() to it (mode 0o600).
 //
-// Returns the *os.File holding the lock. Caller MUST keep it alive
-// for the life of the daemon — closing the file releases the flock.
-// On normal shutdown the file is removed (via the returned cleanup
-// func); on crash the OS releases the flock but the file lingers,
-// which is fine: the next startup detects the stale PID via
-// signal-0 and overwrites.
+// **Multi-instance friendly**: as of D9 fix, we no longer take an
+// advisory exclusive flock. The PID file is informational — useful
+// for `lsof` / debugging — and last-writer-wins. `policy reload`
+// uses pgrep to find every live serve-stdio process and signals
+// them all, so multiple concurrent clients (Claude Desktop +
+// Claude Code, for example) each receive the SIGHUP.
+//
+// The previous flock-based "only one serve-stdio at a time"
+// semantics broke the Claude Desktop + Claude Code coexistence
+// use case. The flock was also an unauthenticated lock — any local
+// process could plant a PID file with its own PID and either block
+// our startup or steal our SIGHUP. Dropping it removes both bugs.
+//
+// Returns a cleanup func to remove the file on normal shutdown.
+// On crash, the file lingers; next startup just overwrites.
 func WritePIDFile(path string) (cleanup func(), err error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("create pid dir: %w", err)
-	}
-
-	// Check for an already-live previous instance.
-	if existing, ok := readExistingPID(path); ok && processAlive(existing) {
-		return nil, fmt.Errorf("another protonmcp serve-stdio is already running (pid %d)", existing)
 	}
 
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("open pid file: %w", err)
 	}
-
-	// Advisory exclusive lock (non-blocking). If someone else holds
-	// it, we fail loudly rather than racing.
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		_ = f.Close()
-		return nil, fmt.Errorf("lock pid file (another serve-stdio running?): %w", err)
-	}
-
 	if _, err := fmt.Fprintf(f, "%d\n", os.Getpid()); err != nil {
 		_ = f.Close()
 		return nil, fmt.Errorf("write pid: %w", err)
 	}
-	if err := f.Sync(); err != nil {
-		// non-fatal — the write went into the page cache
-		_ = err
-	}
+	_ = f.Sync()
+	_ = f.Close()
 
 	return func() {
-		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-		_ = f.Close()
 		_ = os.Remove(path)
 	}, nil
 }
 
-// ReadPIDFile returns the PID written to path. Returns ErrNotRunning
-// if the file doesn't exist OR if the PID it names isn't a live
-// process. Distinguishes "no daemon" from "weirdly-formatted file"
-// (the latter is a real error).
-func ReadPIDFile(path string) (int, error) {
-	data, err := os.ReadFile(path)
+// FindRunningPIDs returns the PIDs of every live `protonmcp
+// serve-stdio` process. Used by `protonmcp policy reload` to signal
+// every running instance — the PID file's last-writer-wins shape
+// can't be relied on for "find the running daemon" anymore, and
+// pgrep is the natural macOS-side discovery primitive.
+//
+// Excludes os.Getpid() from the result so a `policy reload` invoked
+// from inside an MCP-tool handler doesn't signal itself (which
+// would race with the engine.Reload SIGHUP handler).
+//
+// Returns ErrNotRunning if no matching process exists.
+func FindRunningPIDs() ([]int, error) {
+	out, err := exec.Command("pgrep", "-f", "protonmcp serve-stdio").Output()
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return 0, ErrNotRunning
+		// pgrep exits 1 when no match — that's "not running",
+		// not a real error. Distinguish via *exec.ExitError.
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			return nil, ErrNotRunning
 		}
-		return 0, fmt.Errorf("read pid file: %w", err)
+		return nil, fmt.Errorf("pgrep: %w", err)
 	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil {
-		return 0, fmt.Errorf("malformed pid file %q: %w", path, err)
+	self := os.Getpid()
+	var pids []int
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line == "" {
+			continue
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(line))
+		if err != nil || pid == self {
+			continue
+		}
+		pids = append(pids, pid)
 	}
-	if !processAlive(pid) {
-		return 0, ErrNotRunning
+	if len(pids) == 0 {
+		return nil, ErrNotRunning
 	}
-	return pid, nil
+	return pids, nil
 }
 
 // ErrNotRunning is returned when no live serve-stdio is detected.
 var ErrNotRunning = errors.New("no protonmcp serve-stdio is running")
-
-func readExistingPID(path string) (int, bool) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return 0, false
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil {
-		return 0, false
-	}
-	return pid, true
-}
-
-// processAlive returns true if signal 0 succeeds against pid. On
-// macOS, kill(pid, 0) returns success if the process exists OR if
-// it's a zombie. Good enough for "stale PID file?" detection —
-// we'd rather false-positive a zombie than overwrite a live daemon's
-// PID file.
-func processAlive(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-	p, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	return p.Signal(syscall.Signal(0)) == nil
-}

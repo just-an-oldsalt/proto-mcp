@@ -8,20 +8,53 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
-// runInstall writes (or updates) Claude Desktop's
-// claude_desktop_config.json so it knows to spawn this binary as an
+// Claude clients we know how to install into. Each writes to its
+// own config file with the same JSON shape: a top-level mcpServers
+// map. Claude Desktop's docs predate the explicit "type": "stdio"
+// field; Claude Code's docs require it. Setting the field is
+// harmless either way, so we always include it.
+//
+// Both files are owned by their respective apps in normal use; we
+// preserve every top-level key we don't recognise (Claude Code in
+// particular stores project history and other settings in the same
+// file).
+
+type clientTarget struct {
+	id       string // "desktop" / "code"
+	name     string // human label
+	path     func() (string, error)
+}
+
+func clientTargets() []clientTarget {
+	return []clientTarget{
+		{
+			id:   "desktop",
+			name: "Claude Desktop",
+			path: claudeDesktopConfigPath,
+		},
+		{
+			id:   "code",
+			name: "Claude Code",
+			path: claudeCodeConfigPath,
+		},
+	}
+}
+
+// runInstall writes (or updates) the MCP server entry in each
+// selected client's config so the app launches this binary as an
 // MCP server. Idempotent — re-running just updates the path.
 //
-// Path: ~/Library/Application Support/Claude/claude_desktop_config.json
-//
-// The file is owned-by-Claude-Desktop in normal use; we read + merge
-// the existing content rather than overwriting blindly so we don't
-// stomp on other MCP servers the user has configured.
+// --client (desktop|code|all) controls which clients are touched.
+// Default "all" — installing to both Claude Desktop and Claude
+// Code, which is the multi-client setup the PID-relax work makes
+// possible.
 func runInstall(_ context.Context, args []string) error {
 	fs := flag.NewFlagSet("install", flag.ContinueOnError)
 	dryRun := fs.Bool("dry-run", false, "print what would be written without changing the file")
+	client := fs.String("client", "all", "which Claude client to install for: desktop, code, all")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -29,7 +62,6 @@ func runInstall(_ context.Context, args []string) error {
 		return fmt.Errorf("install takes no positional arguments; got %v", fs.Args())
 	}
 
-	// Path to this binary, absolute.
 	binPath, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("locate this binary: %w", err)
@@ -39,7 +71,24 @@ func runInstall(_ context.Context, args []string) error {
 		return fmt.Errorf("absolute path: %w", err)
 	}
 
-	cfgPath, err := claudeDesktopConfigPath()
+	targets, err := pickTargets(*client)
+	if err != nil {
+		return err
+	}
+
+	for _, t := range targets {
+		if err := installInto(t, binPath, *dryRun); err != nil {
+			return fmt.Errorf("%s: %w", t.name, err)
+		}
+	}
+	if !*dryRun {
+		fmt.Println("Restart any running Claude clients to pick up the new server.")
+	}
+	return nil
+}
+
+func installInto(t clientTarget, binPath string, dryRun bool) error {
+	cfgPath, err := t.path()
 	if err != nil {
 		return err
 	}
@@ -52,6 +101,7 @@ func runInstall(_ context.Context, args []string) error {
 		cfg.MCPServers = map[string]mcpServerEntry{}
 	}
 	cfg.MCPServers["protonmcp"] = mcpServerEntry{
+		Type:    "stdio",
 		Command: binPath,
 		Args:    []string{"serve-stdio"},
 	}
@@ -60,8 +110,8 @@ func runInstall(_ context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("marshal config: %w", err)
 	}
-	if *dryRun {
-		fmt.Println("# Would write to", cfgPath)
+	if dryRun {
+		fmt.Printf("# Would write to %s (%s)\n", cfgPath, t.name)
 		fmt.Println(string(out))
 		return nil
 	}
@@ -72,31 +122,48 @@ func runInstall(_ context.Context, args []string) error {
 	if err := os.WriteFile(cfgPath, append(out, '\n'), 0o600); err != nil {
 		return fmt.Errorf("write config: %w", err)
 	}
-	fmt.Printf("Installed protonmcp into Claude Desktop config: %s\n", cfgPath)
-	fmt.Println("Restart Claude Desktop to pick up the new server.")
+	fmt.Printf("Installed protonmcp into %s config: %s\n", t.name, cfgPath)
 	return nil
 }
 
-// runUninstall removes our entry from claude_desktop_config.json.
-// Idempotent — silent success if we weren't there.
+// runUninstall removes our entry from the selected client configs.
+// Idempotent — silent success per-client when we weren't there.
 func runUninstall(_ context.Context, args []string) error {
-	if len(args) > 0 {
-		return fmt.Errorf("uninstall takes no arguments; got %v", args)
+	fs := flag.NewFlagSet("uninstall", flag.ContinueOnError)
+	client := fs.String("client", "all", "which Claude client to uninstall from: desktop, code, all")
+	if err := fs.Parse(args); err != nil {
+		return err
 	}
-	cfgPath, err := claudeDesktopConfigPath()
+	if fs.NArg() > 0 {
+		return fmt.Errorf("uninstall takes no positional arguments; got %v", fs.Args())
+	}
+	targets, err := pickTargets(*client)
+	if err != nil {
+		return err
+	}
+	for _, t := range targets {
+		if err := uninstallFrom(t); err != nil {
+			return fmt.Errorf("%s: %w", t.name, err)
+		}
+	}
+	return nil
+}
+
+func uninstallFrom(t clientTarget) error {
+	cfgPath, err := t.path()
 	if err != nil {
 		return err
 	}
 	cfg, err := loadClaudeDesktopConfig(cfgPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			fmt.Println("Claude Desktop config does not exist — nothing to uninstall.")
+			fmt.Printf("%s: config does not exist — nothing to uninstall.\n", t.name)
 			return nil
 		}
 		return err
 	}
 	if _, ok := cfg.MCPServers["protonmcp"]; !ok {
-		fmt.Println("protonmcp not registered in Claude Desktop config — nothing to do.")
+		fmt.Printf("%s: protonmcp not registered — nothing to do.\n", t.name)
 		return nil
 	}
 	delete(cfg.MCPServers, "protonmcp")
@@ -107,28 +174,48 @@ func runUninstall(_ context.Context, args []string) error {
 	if err := os.WriteFile(cfgPath, append(out, '\n'), 0o600); err != nil {
 		return err
 	}
-	fmt.Printf("Removed protonmcp from %s\n", cfgPath)
+	fmt.Printf("Removed protonmcp from %s: %s\n", t.name, cfgPath)
 	return nil
 }
 
-// claudeDesktopConfig matches the documented Claude Desktop schema.
-// Other top-level keys are preserved verbatim via the extra field.
+func pickTargets(client string) ([]clientTarget, error) {
+	all := clientTargets()
+	switch strings.ToLower(client) {
+	case "all", "":
+		return all, nil
+	default:
+		for _, t := range all {
+			if t.id == strings.ToLower(client) {
+				return []clientTarget{t}, nil
+			}
+		}
+		return nil, fmt.Errorf("unknown client %q; expected one of: desktop, code, all", client)
+	}
+}
+
+// claudeDesktopConfig matches the documented Claude Desktop / Claude
+// Code schema. Both use a top-level mcpServers map; other top-level
+// keys are preserved verbatim via the extra field — Claude Code
+// stores project history in the same file, and dropping it would
+// stomp on the user's other state.
 type claudeDesktopConfig struct {
 	MCPServers map[string]mcpServerEntry `json:"mcpServers,omitempty"`
 
 	// Extra is everything else in the file — preserved on read /
-	// re-emitted on write so we don't stomp on other settings.
+	// re-emitted on write.
 	Extra map[string]json.RawMessage `json:"-"`
 }
 
 type mcpServerEntry struct {
+	Type    string            `json:"type,omitempty"`
 	Command string            `json:"command"`
 	Args    []string          `json:"args,omitempty"`
 	Env     map[string]string `json:"env,omitempty"`
 }
 
 // MarshalJSON / UnmarshalJSON preserve unknown top-level fields so
-// Claude Desktop's other settings aren't lost when we rewrite.
+// neither Claude Desktop's nor Claude Code's other settings get lost
+// when we rewrite.
 func (c *claudeDesktopConfig) UnmarshalJSON(data []byte) error {
 	raw := map[string]json.RawMessage{}
 	if err := json.Unmarshal(data, &raw); err != nil {
@@ -165,6 +252,23 @@ func claudeDesktopConfigPath() (string, error) {
 		return "", err
 	}
 	return filepath.Join(home, "Library", "Application Support", "Claude", "claude_desktop_config.json"), nil
+}
+
+// claudeCodeConfigPath is ~/.claude.json — the user-scope MCP
+// registration file for the Claude Code CLI. The same JSON shape as
+// Claude Desktop's config (top-level mcpServers map); Claude Code
+// requires the per-entry "type": "stdio" field, which we set
+// unconditionally so the same install logic works for either client.
+//
+// Note: this file also stores project-local Claude Code state under
+// other top-level keys (sessions, project history, user prefs). We
+// preserve those via the Extra map on claudeDesktopConfig.
+func claudeCodeConfigPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".claude.json"), nil
 }
 
 func loadClaudeDesktopConfig(path string) (claudeDesktopConfig, error) {

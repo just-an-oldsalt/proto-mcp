@@ -46,6 +46,35 @@ func runServeStdio(ctx context.Context, args []string) error {
 		return fmt.Errorf("serve-stdio takes no positional arguments; got %v", fs.Args())
 	}
 
+	// SECURITY D5 + D31. The spawning process's environment is
+	// untrusted in serve-stdio mode. Two specific vars previously
+	// bridged that gap dangerously:
+	//
+	//   PROTONMCP_DEBUG=1  — enables the redacting HTTP dump
+	//     transport. Stderr lands in Claude Desktop's MCP log dir
+	//     (~/Library/Logs/Claude/mcp-server-protonmcp.log), so an
+	//     inherited shell var sprays Proton API traffic (SRP
+	//     exchanges, partially-redacted bodies) into a file users
+	//     don't think of as sensitive. Refuse to start.
+	//
+	//   PROTONMCP_TOUCHID — see internal/approval/path.go (D4); the
+	//     resolver itself refuses it outside test mode, but unset
+	//     here too so a future code path can't accidentally read it.
+	//
+	// Anything else under PROTONMCP_* gets dropped defensively. The
+	// CLI paths (login/whoami/etc.) still honor these — the policy
+	// is "untrusted parent" only for serve-stdio.
+	if os.Getenv("PROTONMCP_DEBUG") != "" {
+		return fmt.Errorf(
+			"refusing to start serve-stdio with PROTONMCP_DEBUG=1 set " +
+				"(SECURITY D5 — debug stderr lands in Claude Desktop's MCP " +
+				"log directory and contains partially-redacted Proton API " +
+				"traffic). Unset PROTONMCP_DEBUG and restart")
+	}
+	for _, k := range []string{"PROTONMCP_TOUCHID", "PROTONMCP_DEBUG"} {
+		_ = os.Unsetenv(k)
+	}
+
 	// Open the local store. mail.list / mail.search / mail.read all
 	// read from this; mail.sync writes to it.
 	path := *dbPath
