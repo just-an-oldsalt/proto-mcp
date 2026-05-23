@@ -1080,37 +1080,190 @@ Decomposed into four branches A/B/C/D, sequenced in increasing risk.</p>
     users complain.</li>
 </ul>
 
-<h2>Phase 6 — Daemon, IPC, multi-client</h2>
-<p>This is the architecture flip described in the spec under "Why not
-stdio-only?". The MCP-over-stdio interim build from Phase 3 keeps working
-during this transition.</p>
+<h2>Phase 6 — Daemon, IPC, multi-client <span class="tag">planning</span></h2>
+<p>The architecture flip from "each Claude client spawns its own
+<code>serve-stdio</code>" to "one persistent <code>protonmcpd</code> daemon, multiple
+thin shims connect over a Unix socket." Closes the residual auth UX
+problem (re-SRP on every Claude restart), the rate-limit-resets-on-
+restart hole, and the audit caller-UID misattribution (D20). Also
+unlocks Foundational #5 — Touch-ID-gated Keychain ACL — which was
+deferred because it would have meant a Touch ID prompt on every CLI
+subcommand.</p>
+
+<h3>Decisions locked from sign-off</h3>
 <ul>
-  <li><span class="check">[ ]</span> <code>cmd/protonmcpd</code> long-running daemon. Listens on
-    <code>~/Library/Application Support/protonmcp/protonmcp.sock</code>.
-    Peer-credential check via <code>SO_PEERCRED</code> (only matching UID accepted).</li>
-  <li><span class="check">[ ]</span> <code>cmd/protonmcp-shim</code> — stdio↔socket bridge MCP clients spawn.
-    Forwards JSON-RPC frames either direction. Discovers the daemon
-    socket via well-known path.</li>
-  <li><span class="check">[ ]</span> <code>cmd/protonmcp install</code> writes a launchd plist to
-    <code>~/Library/LaunchAgents/zone.dort.protonmcp.plist</code> and <code>launchctl load</code>s
-    it. <code>protonmcp uninstall</code> reverses. Picks a stable label — see
-    "Open: naming" below.</li>
-  <li><span class="check">[ ]</span> Keychain integration: store mailbox password (and optional TOTP
-    secret — see open question) in macOS Keychain via the Security
-    framework. ACL restricts access to the signed <code>protonmcpd</code> binary.
-    Use <code>keybase/go-keychain</code> or shell out to <code>security</code> CLI for v1.</li>
-  <li><span class="check">[ ]</span> Lock/unlock state machine. Triggers per spec:
-    <code>com.apple.screenIsLocked</code> distributed notification,
-    <code>NSWorkspaceWillSleepNotification</code>, idle timeout
-    (<code>idle_lock_minutes</code>, default 30), <code>protonmcp lock</code> CLI, <code>SIGUSR1</code>.
-    In LOCKED state every tool call returns
-    <code>{error: "daemon_locked", recovery: "run 'protonmcp unlock'"}</code>.
-    Sync loop pauses but preserves <code>event_cursor</code>.</li>
-  <li><span class="check">[ ]</span> <code>protonmcp setup</code> interactive flow per spec:
-    "Proton email / Password / 2FA code / Touch ID consent to store
-    credentials / install plist / start daemon".</li>
-  <li><span class="check">[ ]</span> <code>protonmcp</code> CLI subcommands: <code>status</code>, <code>lock</code>, <code>unlock</code>,
-    <code>policy reload</code>, <code>audit tail</code>, <code>audit query --tool ... --since ...</code>.</li>
+  <li><strong>Keychain ACL = Touch-ID-required (Foundational #5).</strong>
+    Daemon prompts Touch ID once at startup (or after a manual
+    <code>protonmcp daemon restart</code>). Closes the "any same-UID
+    process can read the refresh token" hole. Tolerable because
+    it's once-per-boot, not once-per-tool-call.</li>
+  <li><strong>Rate-limit buckets persist to SQLite.</strong> New
+    <code>rate_limit_state</code> table; bucket updates write through.
+    Daemon crash / restart doesn't reset the 20/hour <code>mail_send</code>
+    cap. ~50 LOC.</li>
+  <li><strong>Keep <code>serve-stdio</code> as a runnable command.</strong> Useful
+    for development + users who'd rather not run a daemon. The
+    installer just defaults to registering the shim. Power-users
+    can point their Claude config at <code>serve-stdio</code> directly.</li>
+</ul>
+
+<h3>Branches in this phase</h3>
+
+<p><strong>6/A — <code>phase-6/daemon-skeleton</code></strong>. No deps.</p>
+<ul>
+  <li><span class="check">[ ]</span> New <code>cmd/protonmcpd</code> binary.
+    Listens on <code>~/Library/Application Support/protonmcp/protonmcp.sock</code>
+    (mode 0600). Same <code>internal/mcp.Server</code> + middleware stack
+    that <code>serve-stdio</code> uses — just over a different
+    <code>net.Conn</code> per connection instead of os.Stdin/Stdout.</li>
+  <li><span class="check">[ ]</span> One goroutine per connection. Each
+    runs an independent NDJSON loop; the SDK session, store,
+    policy, audit writer, and broker are shared (already
+    concurrency-safe).</li>
+  <li><span class="check">[ ]</span> Acquire session ONCE at startup
+    (same eager-acquire pattern serve-stdio uses). Holds for the
+    life of the daemon; on token rotation, the keystore re-Save
+    happens in-process.</li>
+  <li><span class="check">[ ]</span> No transport changes: the existing
+    NDJSON loop in <code>internal/mcp/server.go</code> takes an
+    <code>io.Reader</code> + <code>io.Writer</code>; a <code>net.Conn</code>
+    satisfies both. Should be a near-trivial swap.</li>
+</ul>
+
+<p><strong>6/B — <code>phase-6/shim</code></strong>. Depends on 6/A.</p>
+<ul>
+  <li><span class="check">[ ]</span> New <code>cmd/protonmcp-shim</code> binary
+    (~50 LOC). What Claude Desktop / Claude Code spawn.</li>
+  <li><span class="check">[ ]</span> Connects to the daemon socket
+    at the well-known path. If the daemon isn't running, prints a
+    clear error to stderr telling the user to
+    <code>protonmcp daemon start</code> or fall back to
+    <code>serve-stdio</code>. Exits with a JSON-RPC-shaped error so the
+    LLM sees a useful message rather than a silent crash.</li>
+  <li><span class="check">[ ]</span> Bidirectional stdio↔socket copy.
+    Two goroutines, <code>io.Copy</code> in each direction. Daemon
+    closing the connection (e.g. lock state) propagates EOF to
+    the shim, which exits cleanly.</li>
+  <li><span class="check">[ ]</span> <code>protonmcp install</code> switches
+    to registering the shim binary path. Existing serve-stdio
+    registrations keep working (we don't rewrite them; user
+    re-runs install if they want the daemon).</li>
+</ul>
+
+<p><strong>6/C — <code>phase-6/launchd</code></strong>. Depends on 6/A.</p>
+<ul>
+  <li><span class="check">[ ]</span> <code>~/Library/LaunchAgents/zone.dort.protonmcpd.plist</code>
+    written by <code>protonmcp daemon install</code>. <code>KeepAlive=true</code>
+    so a crash restarts the daemon; <code>RunAtLoad=true</code> so
+    login starts it. StandardErrorPath →
+    <code>~/Library/Logs/protonmcp/daemon.log</code>.</li>
+  <li><span class="check">[ ]</span> <code>protonmcp daemon</code>
+    subcommands: <code>install</code> / <code>uninstall</code> /
+    <code>start</code> / <code>stop</code> / <code>restart</code> /
+    <code>status</code>. <code>install</code> writes + <code>launchctl
+    bootstrap</code>s; <code>uninstall</code> reverses. <code>status</code>
+    reports whether the daemon socket accepts connections and
+    when it was started.</li>
+</ul>
+
+<p><strong>6/D — <code>phase-6/peer-credentials</code></strong>. Depends on 6/A.</p>
+<ul>
+  <li><span class="check">[ ]</span> Per-connection
+    <code>SO_PEERCRED</code> (LOCAL_PEERCRED on macOS) lookup. Each
+    accepted connection gets the connecting client's PID + UID
+    populated into <code>caller.Caller</code> for that connection's
+    audit rows. Closes D20.</li>
+  <li><span class="check">[ ]</span> Refuse connections from a UID
+    other than the daemon's. The daemon socket lives in the
+    user's <code>Application Support</code> dir (0700) so a different
+    UID can't reach it anyway, but the check is defense-in-depth.</li>
+  <li><span class="check">[ ]</span> Audit rows now show the real
+    caller per call rather than the daemon's own PID/UID. Phase
+    5/D's per-caller rate-limit buckets become meaningful (today
+    every tool call from every Claude client shares one bucket;
+    after this they bucket by real client PID).</li>
+</ul>
+
+<p><strong>6/E — <code>phase-6/keychain-acl-lock-unlock</code></strong>.
+Depends on 6/A + 6/D. The biggest single piece.</p>
+<ul>
+  <li><span class="check">[ ]</span> <code>internal/keystore</code> creates
+    items with <code>kSecAccessControlUserPresence</code> instead of
+    plain <code>AccessibleWhenUnlocked</code>. Touch ID required to
+    read. Daemon prompts ONCE at startup; subsequent in-process
+    reads use the cached unlock until lock/restart.</li>
+  <li><span class="check">[ ]</span> Migration from the existing
+    blob format: detect old ACL on first daemon startup, re-Save
+    with the new ACL. User sees one extra Touch ID prompt on the
+    upgrade boot, none after.</li>
+  <li><span class="check">[ ]</span> Lock state machine:
+    <ul>
+      <li><code>protonmcp lock</code> CLI — wipes in-memory session.</li>
+      <li><code>SIGUSR1</code> to the daemon — same effect.</li>
+      <li><code>com.apple.screenIsLocked</code> distributed notification.</li>
+      <li><code>NSWorkspaceWillSleepNotification</code>.</li>
+      <li>Idle timeout via <code>idle_lock_minutes</code> policy field
+        (default 30, 0 = disabled).</li>
+    </ul>
+  </li>
+  <li><span class="check">[ ]</span> LOCKED state: every tool call
+    returns <code>{error: "daemon_locked", recovery: "run
+    'protonmcp unlock'"}</code>. Read-from-mirror tools could
+    arguably still work (they don't need the session), but
+    sweeping them in keeps the policy clean — if the daemon is
+    locked, nothing happens until the user unlocks.</li>
+  <li><span class="check">[ ]</span> <code>protonmcp unlock</code> CLI —
+    sends <code>SIGUSR2</code> to the daemon; daemon re-runs the
+    keystore Load (Touch ID prompts), restores session, resumes
+    normal service.</li>
+  <li><span class="check">[ ]</span> Persistent rate-limit state:
+    new <code>rate_limit_state</code> table (tool, caller_pid,
+    tokens_remaining, last_refill_unix). Bucket updates write
+    through. On daemon startup, every bucket loads its prior
+    state.</li>
+</ul>
+
+<h3>Recommended sequencing</h3>
+<p><strong>6/A → 6/B → 6/D → 6/C → 6/E.</strong> Daemon first (A) so we
+have something to talk to; shim second (B) so we have something to
+talk THROUGH; SO_PEERCRED before launchd because the audit-row
+improvement is observable even from manual daemon-start; launchd
+fourth so the daemon's auto-managed; ACL hardening last because
+it's the most user-visible change and benefits from a stable daemon
+underneath.</p>
+
+<h3>Audits closed by this phase</h3>
+<ul>
+  <li><strong>D20</strong> — caller UID misattribution → 6/D via
+    <code>SO_PEERCRED</code>.</li>
+  <li><strong>Foundational #5</strong> — token persistence ACL → 6/E.</li>
+  <li><strong>D30</strong> — Touch ID password fallback. The daemon's
+    once-per-boot prompt model makes a password fallback tractable
+    (currently it'd mean a password on every CLI call). Adds to
+    Phase 7 or as a 6/E follow-up.</li>
+</ul>
+
+<h3>Risks</h3>
+<ul>
+  <li><strong>UX regression on first run.</strong> Today the user runs
+    <code>protonmcp login</code> once interactively and then Claude
+    spawns serve-stdio invisibly. After Phase 6 they need to also
+    run <code>protonmcp daemon install</code> (or have the new
+    <code>install</code> command do both). README needs an update.</li>
+  <li><strong>launchd debugging.</strong> When the daemon crashes
+    via launchd, the only signal is the stderr log file. Add a
+    boot-time slog line that prints the daemon's effective config
+    + path so the log is self-diagnosing.</li>
+  <li><strong>Migrating the Keychain ACL.</strong> Users with an
+    existing entry will see ONE extra Touch ID prompt on the
+    upgrade boot. Document this in the upgrade notes.</li>
+  <li><strong>Backward-compat with shipped serve-stdio configs.</strong>
+    Users who installed v1.0.0-alpha have <code>protonmcp serve-stdio</code>
+    registered in their Claude config. <code>protonmcp install</code>
+    must idempotently rewrite to point at the shim — and document
+    that running BOTH old serve-stdio and the new daemon will work
+    (they don't share state, but they don't conflict either, thanks
+    to the D9 pgrep-by-exe change).</li>
 </ul>
 
 <h2>Phase 7 — Polish</h2>
