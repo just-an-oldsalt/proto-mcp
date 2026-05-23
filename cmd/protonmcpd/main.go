@@ -42,16 +42,50 @@ import (
 )
 
 func main() {
-	// Match the CLI's logging configuration: redacting slog to
-	// stderr. Daemon stderr is captured by launchd into
-	// ~/Library/Logs/protonmcp/daemon.log per the LaunchAgent plist
-	// (added in Phase 6/C).
-	logging.Setup(os.Stderr)
+	// Phase 7/B: route the daemon's slog output through a rotating
+	// writer at ~/Library/Logs/protonmcp/daemon.log (50 MiB × 10
+	// generations). Launchd's plist StandardErrorPath also points
+	// at daemon.log, so anything written to FD 2 by lower-level Go
+	// runtime code (panics, race-detector output, etc.) still lands
+	// there until the first rotation; after that, launchd's FD
+	// tails the .1 file and our slog handler tails the current
+	// one. Acceptable split — operator can tail both.
+	//
+	// If the rotator fails to open (missing log dir, permission
+	// issue), fall back to plain stderr so the daemon still logs.
+	logWriter, err := openRotatedDaemonLog()
+	if err != nil {
+		// Plain stderr; the daemon proceeds. Operator sees the
+		// reason via launchd's own stderr capture.
+		fmt.Fprintln(os.Stderr, "warning: could not open rotated daemon log; falling back to stderr:", err)
+		logging.Setup(os.Stderr)
+	} else {
+		logging.Setup(logWriter)
+		// Best-effort close on shutdown. Don't fail on close error —
+		// nothing we can do with it at exit.
+		defer func() { _ = logWriter.Close() }()
+	}
 
 	if err := run(); err != nil {
 		slog.Error("protonmcpd exited with error", "err", err.Error())
 		os.Exit(1)
 	}
+}
+
+// openRotatedDaemonLog opens ~/Library/Logs/protonmcp/daemon.log
+// behind a *logging.Rotator. Path resolution matches the LaunchAgent
+// plist that cmd/protonmcp install daemon writes, so daemon-managed
+// rotation and launchd-managed redirect target the same file.
+func openRotatedDaemonLog() (io.WriteCloser, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("user home: %w", err)
+	}
+	dir := filepath.Join(home, "Library", "Logs", "protonmcp")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, fmt.Errorf("mkdir %s: %w", dir, err)
+	}
+	return logging.NewRotator(filepath.Join(dir, "daemon.log"), 0, 0)
 }
 
 func run() error {

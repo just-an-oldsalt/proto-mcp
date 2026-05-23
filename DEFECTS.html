@@ -162,13 +162,13 @@
 
 <h2>Status at a glance</h2>
 <div class="stats">
-  <div class="stat"><div class="stat-num">9</div><div class="stat-label">Open defects</div></div>
+  <div class="stat"><div class="stat-num">6</div><div class="stat-label">Open defects</div></div>
   <div class="stat"><div class="stat-num">0</div><div class="stat-label">Investigating</div></div>
-  <div class="stat"><div class="stat-num">28</div><div class="stat-label">Resolved</div></div>
+  <div class="stat"><div class="stat-num">31</div><div class="stat-label">Resolved</div></div>
   <div class="stat"><div class="stat-num">0</div><div class="stat-label"><span class="tag critical">critical</span></div></div>
-  <div class="stat"><div class="stat-num">1</div><div class="stat-label"><span class="tag high">high</span></div></div>
+  <div class="stat"><div class="stat-num">0</div><div class="stat-label"><span class="tag high">high</span></div></div>
   <div class="stat"><div class="stat-num">4</div><div class="stat-label"><span class="tag medium">medium</span></div></div>
-  <div class="stat"><div class="stat-num">4</div><div class="stat-label"><span class="tag low">low</span></div></div>
+  <div class="stat"><div class="stat-num">2</div><div class="stat-label"><span class="tag low">low</span></div></div>
 </div>
 
 <h2>Open</h2>
@@ -269,12 +269,9 @@ should pass through unredacted — they're not secrets.</p>
 <p><strong>Tracking:</strong> See TODO.html Backlog section "Touch ID
 prompt readability" for the implementation sketch.</p>
 
-<h3><span class="id">D11</span><code>raw_json</code> truncation produces invalid JSON <span class="tag open">open</span> <span class="tag high">high</span></h3>
+<h3><span class="id">D11</span><code>raw_json</code> truncation produces invalid JSON <span class="tag fixed">fixed in PR 7/B</span> <span class="tag high">high</span></h3>
 <p><strong>Reported:</strong> 2026-05-22 (security re-audit) · Surface: <code>internal/proton/messages.go:108-110</code></p>
-<p><strong>Evidence:</strong> Re-audit #2 flagged this verbatim: <code>if len(raw) &gt; MaxRawJSONBytes { raw = append(raw[:MaxRawJSONBytes], []byte("...\"[truncated]\"")...) }</code>. The result is <code>...{actual JSON prefix}...\"[truncated]\"</code> — broken JSON. <code>mail_list_attachments</code> (<code>internal/mcptools/attachments.go</code>) doesn't currently parse <code>raw_json</code>, but any future consumer that does <code>json.Unmarshal([]byte(row.RawJSON), ...)</code> panics or errors on the corrupted bytes. There's also no <code>slog.Warn</code> on truncation, so silent corruption.</p>
-<p><strong>Impact:</strong> A malicious or buggy server returning &gt;1 MiB metadata blobs poisons rows in a way that breaks downstream consumers later. The intent of the cap was to prevent DoS; the implementation also breaks correctness for that mailbox forever (the row stays poisoned until next backfill).</p>
-<p><strong>Remediation:</strong> Replace with <code>raw = []byte(<code>{"truncated": true, "original_bytes": &lt;n&gt;, "id": "&lt;m.ID&gt;"}</code>)</code>. Log a Warn with <code>msg_id</code> and <code>bytes</code>. Better: enforce a hard cap on per-row write to SQLite at the store layer, return an error to the upserter.</p>
-<p class="meta"><strong>Related:</strong> B-9 (still partial)</p>
+<p><strong>Fix:</strong> Oversized blobs are now replaced wholesale with a structured marker (<code>{"truncated":true,"original_bytes":N,"id":"...","reason":"..."}</code>) and a <code>slog.Warn</code> with msg_id + bytes. The bytes parse cleanly via <code>json.Unmarshal</code> so any future consumer of <code>raw_json</code> can detect the marker without exploding on broken syntax. Regression guarded by <code>TestToStoreMessage_RawJSONTruncationStaysValid</code>.</p>
 
 <h3><span class="id">D12</span>DSN pragma injection via <code>--db</code> flag <span class="tag open">open</span> <span class="tag medium">medium</span></h3>
 <p><strong>Reported:</strong> 2026-05-22 (security re-audit) · Surface: <code>internal/store/store.go:115-129</code></p>
@@ -304,17 +301,13 @@ prompt readability" for the implementation sketch.</p>
 <p><strong>Remediation:</strong> Short-term, document loudly that <code>claude_desktop_config.json</code> paths must point at signed binaries (chicken-and-egg with Phase 7). Medium-term, on every serve-stdio startup, log the SHA-256 of the running binary and require a <code>~/Library/Application Support/protonmcp/expected_sha</code> file match to proceed.</p>
 <p class="meta"><strong>Related:</strong> new (Phase 6/7-adjacent)</p>
 
-<h3><span class="id">D26</span><code>audit.Writer.Begin</code> binds <code>args_json</code> as string — extra allocation, unclear semantics <span class="tag open">open</span> <span class="tag low">low</span></h3>
+<h3><span class="id">D26</span><code>audit.Writer.Begin</code> binds <code>args_json</code> as string — extra allocation, unclear semantics <span class="tag fixed">fixed in PR 7/B</span> <span class="tag low">low</span></h3>
 <p><strong>Reported:</strong> 2026-05-22 (security re-audit) · Surface: <code>internal/audit/audit.go:111-121</code></p>
-<p><strong>Evidence:</strong> SQLite TEXT columns store NUL-tolerantly via modernc/sqlite (the driver uses <code>?</code> binding with the byte length). But <code>json.RawMessage</code> (containing a redacted blob) coming back through <code>json.Marshal</code> shouldn't carry NULs in practice. The string conversion costs an allocation per row. Hygiene.</p>
-<p><strong>Impact:</strong> None in normal operation.</p>
-<p><strong>Remediation:</strong> Bind as <code>[]byte</code> for clarity and to avoid an unnecessary copy: <code>string(e.ArgsJSON)</code> → just pass <code>[]byte(e.ArgsJSON)</code>. modernc/sqlite handles it identically.</p>
-<p class="meta"><strong>Related:</strong> new</p>
+<p><strong>Fix:</strong> <code>e.ArgsJSON</code> binds as <code>[]byte</code> rather than <code>string</code>. modernc/sqlite treats them identically at the wire, but <code>[]byte</code> avoids the string-conversion allocation and reads naturally for "this column holds opaque bytes." No behavior change.</p>
 
-<h3><span class="id">D28</span><code>SearchMessages</code> uses <code>fmt.Sprintf</code> for <code>LIMIT</code> — copy-paste footgun <span class="tag open">open</span> <span class="tag low">low</span></h3>
+<h3><span class="id">D28</span><code>SearchMessages</code> uses <code>fmt.Sprintf</code> for <code>LIMIT</code> — copy-paste footgun <span class="tag fixed">fixed in PR 7/B</span> <span class="tag low">low</span></h3>
 <p><strong>Reported:</strong> 2026-05-22 (security re-audit) · Surface: <code>internal/store/messages.go:131-135</code></p>
-<p><strong>Evidence:</strong> <code>q += fmt.Sprintf(" LIMIT %d", limit)</code>. <code>limit</code> is a Go <code>int</code>, <code>%d</code> is safe. But this is the same shape of pattern that <code>Search</code> (in <code>search.go:153-163</code>) was fixed to use <code>?</code> binding per C-8. The inconsistency means future maintainers might assume "Sprintf LIMIT is fine" and copy the pattern with a user-supplied value.</p>
-<p><strong>Impact:</strong> Zero today.</p>
+<p><strong>Fix:</strong> Replaced <code>q += fmt.Sprintf(" LIMIT %d", limit)</code> with <code>q += " LIMIT ?"</code> + parameter binding, matching the pattern <code>Search</code> uses. Removes the temptation for a future maintainer to copy the Sprintf shape onto a user-supplied value.</p>
 <p><strong>Remediation:</strong> Change <code>SearchMessages</code> to use <code>LIMIT ?</code> binding for consistency, even though <code>int</code> is safe. Or delete <code>SearchMessages</code> if <code>Search</code> has subsumed its use cases.</p>
 <p class="meta"><strong>Related:</strong> C-8 (FIXED partially — one path remains inconsistent)</p>
 

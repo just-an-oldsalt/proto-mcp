@@ -3,10 +3,48 @@ package proton
 import (
 	"encoding/json"
 	"net/mail"
+	"strings"
 	"testing"
 
 	gpa "github.com/ProtonMail/go-proton-api"
 )
+
+// D11 — oversized raw_json must NOT corrupt JSON. Prior behaviour
+// appended `..."[truncated]"` which made the bytes syntactically
+// invalid. Now we substitute the whole blob with a structured marker
+// that json.Unmarshal can parse.
+func TestToStoreMessage_RawJSONTruncationStaysValid(t *testing.T) {
+	// Build a metadata struct whose marshaled JSON exceeds the cap.
+	// The Subject field is unbounded in the upstream struct so we can
+	// pad it deliberately.
+	big := strings.Repeat("X", MaxRawJSONBytes+1024)
+	meta := gpa.MessageMetadata{
+		ID:        "msg-big",
+		AddressID: "addr-1",
+		Subject:   big,
+		Sender:    &mail.Address{Address: "alice@example.com"},
+	}
+	got, err := ToStoreMessage(meta)
+	if err != nil {
+		t.Fatalf("ToStoreMessage: %v", err)
+	}
+	if len(got.RawJSON) == 0 {
+		t.Fatal("RawJSON empty after truncation; expected marker")
+	}
+	// Most important: the bytes must parse as JSON, otherwise any
+	// future consumer doing json.Unmarshal(row.RawJSON, ...) errors.
+	var probe map[string]any
+	if err := json.Unmarshal([]byte(got.RawJSON), &probe); err != nil {
+		t.Fatalf("post-truncation RawJSON does not parse: %v\nbytes: %s",
+			err, string(got.RawJSON))
+	}
+	if probe["truncated"] != true {
+		t.Errorf("marker missing truncated=true; got %v", probe)
+	}
+	if probe["id"] != "msg-big" {
+		t.Errorf("marker missing original id; got %v", probe["id"])
+	}
+}
 
 func TestToStoreMessage_BasicFields(t *testing.T) {
 	meta := gpa.MessageMetadata{
