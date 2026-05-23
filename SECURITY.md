@@ -635,169 +635,125 @@ audit + Touch ID approval (`internal/policy`, `internal/audit`,
 `internal/approval`, `helpers/touchid`), and the redactor extraction
 (`internal/redact`).
 
-**The full finding list — 28 items, D4 through D31 — lives in
-[`DEFECTS.html`](./DEFECTS.html).** This section captures the verification
-matrix against prior cycles, the foundational themes worth carrying
-forward, and the net assessment. Per-finding evidence/impact/remediation
-is not duplicated here — refer to DEFECTS.html by ID.
+The audit surfaced 28 findings (D4–D31 in [`DEFECTS.html`](./DEFECTS.html))
+plus three from live MCP testing (D32–D34). Five fix PRs (#43–#47) landed
+the same day and closed **20 of the 28 audit findings + all 3 live-test
+findings = 23 fixed**, leaving **8 open** (mostly Low + Phase-6-adjacent).
+This re-audit section is structured around what shipped vs. what remains,
+not around the audit's findings list (DEFECTS.html holds that).
+
+## Fix batch — what shipped in PRs #43–#47
+
+| PR | Commit | Findings closed | Themes |
+|---|---|---|---|
+| **#43** | `5315158` | D4, D5, D9, D31 | env-var hygiene in `serve-stdio`; pgrep-based PID discovery replaces unauthenticated PID file |
+| **#44** | `c709963` | D6, D7, D21, D23, D32 | send-family allowlist re-validation post-fetch; `mail.ParseAddressList` for CSV/display-name safety; NSAlert prompt sanitization; `labels_list`/`folders_list` backfill |
+| **#45** | `097fcfb` | D13 (C-1) | `protonmcp purge --older-than D` + startup sweep with 30-day default retention; closes the single biggest residual risk pending Phase-6 envelope encryption |
+| **#46** | `a7e85d1` | D8, D14, D18 | audit writes on detached 5s ctx; approval cache dropped on policy reload; JSONL row gains tool/caller/policy_decision |
+| **#47** | `19b0bf5` | D10, D15, D16, D17, D19, D25, D27, D29 | `.github/CODEOWNERS` finally landed; `defer stored.Zero()` in tryResume/runLogout; `errors.Is` on deadline; keystore empty-SaltedKeyPass guard; sync loop respects GetEvent `more`; JWT/Bearer detection in redactor; `mail_read_thread` no longer leaks raw decryption error |
+
+Live-MCP-test findings (D32, D33, D34) were closed under their respective
+PRs. D33/D34 specifically: pgrep discovery now post-filters by executable
+identity via `libproc.proc_pidpath` + `os.SameFile`, so the Claude.app
+disclaimer wrapper and editors/greps with matching command lines no
+longer receive spurious SIGHUPs.
 
 ## Verification matrix vs. re-audit #2
 
 | ID | Status | Notes |
 |---|---|---|
-| **B-3** Secret/Live pass-by-value | **STILL PARTIAL** | `tryResume` / `runLogout` still don't `defer stored.Zero()`. → D10 |
-| **B-5** CODEOWNERS | **STILL PARTIAL** | govulncheck moved to macOS; `.github/CODEOWNERS` never landed. → D27 |
-| **B-6** DSN pragma injection | **STILL NOT FIXED** | `internal/store/store.go:115-129` unchanged across three cycles. → D12 |
-| **B-9** backfill bounds / truncation | **STILL PARTIAL** | Max-pages + per-row cap landed; truncation still emits invalid JSON. → D11 |
-| **B-14** keystore Save guards | **STILL NOT FIXED** | No `SaltedKeyPass` empty-guard. → D16 |
-| **M-1** AppVersion warning surface | **UNCHANGED** | Still only printed in `whoami`. |
-| **M-4** error wrapping with `%w` | **STILL PARTIAL** | Redactor B-4 catches most heap exposure; `%w` chains in library calls still echo into LLM context. → D19, D29 |
-| **M-5** error classification | **STILL NOT FIXED** | Sentinel error set in `internal/mcperrors` is mostly used for MCP-side classification; CLI stderr still prints raw chains. |
-| **C-1** plaintext bodies at rest | **STILL OPEN** | No eviction, no `purge` command, drafts now persisted on the same path. → D13 |
-| **C-2** terminal-escape injection | **FIXED** | `internal/sanitize/sanitize.go` strips C0/C1 controls. |
-| **C-3** `CloseAndRevoke` discards error | **FIXED** | Error surfaces through login's recovery path. |
-| **C-4** `releaseLocal` / `OnAuthUpdate` race | **STILL OPEN** | Symptom now also captured in D16. |
-| **C-5** sync loop backoff + paging | **STILL OPEN** | → D17 |
-| **C-6 / C-7** sanitizer link-loss + missing test cases | **PARTIAL** | bluemonday policy hardened; href-as-plaintext rewriter still not landed. |
-| **C-8** Sprintf in store | **PARTIAL** | `search.Search` fixed with `?` binding (C-8 main path); `messages.SearchMessages` still uses Sprintf for `LIMIT`. → D28 |
-| **C-9** FTS5 query DSL | **FIXED** | `internal/store/query.go` phrase-wraps every term via `ftsQuote`; tests cover `NEAR`, operators, unterminated quotes. |
-| **Foundational #2** redacting logger | **FIXED with caveats** | Value-heuristic in `internal/redact/redact.go`; misses tokens embedded in prose (Bearer/JSON/quoted contexts). → D19 |
-| **Foundational #3** MCP trust model | **FIXED in stdio mode** | `internal/mcp/trustguard.go` panics on any `net.Listen`. Caveat: `caller.UID` records the daemon's own UID, not the spawner's. → D20 |
-| **Foundational #4** default-deny policy | **FIXED** | `internal/policy/policy.go` engine with `default.yaml`; explicit allow per tool; SIGHUP-driven atomic reload. |
-| **Updated #6** (re-audit #1): refuse `PROTONMCP_DEBUG=1` in daemon mode | **STILL NOT FIXED** | `serve-stdio` has no guard. Predicted leak vector is now real. → D5 (Critical) |
-| **Foundational #5** token persistence story | **PARTIAL** | Code shipped; Phase 6 Keychain ACL hardening still pending. |
-| **Foundational #6** login rate-limit | **STILL NOT YET** | Tools have per-call limits; login flow doesn't. Sync loop (D17) adds pressure. |
-| **Foundational #7** HTML sanitization at MCP boundary | **STILL INVERTED** | Sanitization happens at storage, not at MCP boundary. C-1 / D13 unchanged. |
+| **B-3** Secret/Live pass-by-value | **FIXED** | PR #47 added `defer stored.Zero()` at both hot paths. → D10 resolved |
+| **B-5** CODEOWNERS | **FIXED** | PR #47 landed `.github/CODEOWNERS` covering keystore/approval/policy/audit/redact/proton/cmd/helpers paths. → D27 resolved |
+| **B-6** DSN pragma injection | **STILL OPEN** | `internal/store/store.go:116,129` still `path + "?" + v.Encode()`. → D12 (medium) |
+| **B-9** backfill bounds / truncation | **STILL PARTIAL** | Per-row 1 MiB cap landed in re-audit #2; truncation still emits invalid JSON. → D11 (high) |
+| **B-14** keystore Save guards | **FIXED** | PR #47 added empty-SaltedKeyPass guard with diagnostic error. → D16 resolved |
+| **M-1** AppVersion warning surface | **DOCUMENTED** | Top-of-file banner added to `SECURITY.md`; user-facing decision rather than code change |
+| **M-4** error wrapping with `%w` | **PARTIAL** | PR #47's redactor handles JWT/Bearer/quoted-JSON cases (→ D19 resolved); D29 fixed `mail_read_thread`'s raw-error leak. Architectural `%w` use in library wrappers unchanged |
+| **M-5** error classification | **STILL NOT FIXED** | Sentinel error set in `internal/mcperrors` is used for MCP classification; CLI stderr still prints raw chains. Open |
+| **C-1** plaintext bodies at rest | **FIXED** | PR #45 shipped `protonmcp purge` + startup sweep. Three cycles open, now closed. → D13 resolved. Phase-6 envelope encryption is the long-term follow-up |
+| **C-2** terminal-escape injection | **FIXED** (re-audit #2) | `internal/sanitize/sanitize.go` strips C0/C1 controls |
+| **C-3** `CloseAndRevoke` discards error | **FIXED** (re-audit #2) | Error surfaces through login's recovery path |
+| **C-4** `releaseLocal` / `OnAuthUpdate` race | **FIXED** (via D16) | The empty-SaltedKeyPass guard closes the observable symptom |
+| **C-5** sync loop backoff + paging | **PARTIAL** | PR #47 fixed the off-by-one (`more` bool replaces `len(events) < 2`); auth-failure backoff still pending (Foundational #6 territory) |
+| **C-6 / C-7** sanitizer link-loss + missing test cases | **PARTIAL** | bluemonday policy hardened; href-as-plaintext rewriter still not landed |
+| **C-8** Sprintf in store | **PARTIAL** | `search.Search` fixed with `?` binding; `messages.SearchMessages` still uses Sprintf for `LIMIT`. → D28 (low, copy-paste footgun) |
+| **C-9** FTS5 query DSL | **FIXED** (re-audit #2) | `internal/store/query.go` phrase-wraps every term via `ftsQuote` |
+| **Foundational #2** redacting logger | **FIXED** | Value-heuristic in `internal/redact/redact.go` + PR #47's JWT/Bearer handling closes the prose-context gap. → D19 resolved |
+| **Foundational #3** MCP trust model | **FIXED in stdio mode** | `internal/mcp/trustguard.go` panics on any `net.Listen`. Caveat: `caller.UID` records the daemon's own UID, not the spawner's. → D20 (medium) |
+| **Foundational #4** default-deny policy | **FIXED** | `internal/policy/policy.go` engine with `default.yaml`; explicit allow per tool; SIGHUP-driven atomic reload + approval-cache invalidation (PR #46) |
+| **Updated #6** (re-audit #1): refuse `PROTONMCP_DEBUG=1` in daemon mode | **FIXED** | PR #43 made `serve-stdio` refuse to start when the env var is set, then `Unsetenv`s it. → D5 resolved |
+| **Foundational #5** token persistence story | **PARTIAL** | Code shipped; Phase 6 Keychain ACL hardening still pending |
+| **Foundational #6** login rate-limit | **STILL NOT YET** | Tools have per-call limits; login flow doesn't. Sync loop partial-fix (C-5) reduces, doesn't eliminate, pressure |
+| **Foundational #7** HTML sanitization at MCP boundary | **STILL INVERTED** | Sanitization happens at storage, not at MCP boundary. `D13` fix mitigates by purging plaintext at rest, but the architectural inversion remains |
 
-## New findings — summary
+## Still open after the fix batch (8 defects)
 
-Full text, severity, surface (file:line), evidence, impact, and remediation
-for each finding live in [`DEFECTS.html`](./DEFECTS.html). High-level
-breakdown:
+Full per-defect detail in [`DEFECTS.html`](./DEFECTS.html). Grouped by
+severity:
 
-**Critical (2)** — both trace to env-variable trust that was safe in CLI
-mode and broken in serve-stdio mode:
-
-- **D4** — `PROTONMCP_TOUCHID` env var lets the spawning process substitute
-  the approval helper at runtime. A parent setting `PROTONMCP_TOUCHID=/bin/true`
-  bypasses every biometric check, including `mail_send` / `mail_delete_permanent` /
-  any `prompt+confirm:true` tool. Middleware records `approval_source=touchid`
-  for what is in fact zero authentication.
-- **D5** — `PROTONMCP_DEBUG=1` enables the redacting HTTP dump transport in
-  serve-stdio. Claude Desktop captures the spawned MCP server's stderr to
-  its log directory, so an inherited shell var sprays Proton API traffic
-  (SRP exchanges, headers, partially-redacted bodies) into a path users
-  don't realize is sensitive. Re-audit #1's updated foundational #6
-  predicted this exact leak.
-
-**High (6)** — send-family allowlist bypassed for reply / forward / send_draft
-(D6); recipient suffix-match bypassable via display-name / CSV smuggling
-(D7); audit `Begin` / `Complete` run under cancellable request ctx → NULL
-outcomes on shutdown (D8); policy reload PID file unauthenticated, any
-local process can SIGHUP via planted file (D9); plus the still-open
-carry-overs D10 (B-3) and D11 (B-9).
-
-**Medium (13)** — DSN pragma injection (D12 / B-6 carry-over),
-plaintext-bodies-at-rest (D13 / C-1 carry-over), approval cache key omits
-`Confirm` flag (D14), `==` vs `errors.Is` on deadline error (D15), keystore
-Save empty-`SaltedKeyPass` guard (D16 / B-14 + C-4 carry-overs), sync loop
-backoff + paging (D17 / C-5 carry-over), JSONL audit mirror lacks
-tool/caller/args (D18), redactor heuristic misses tokens in prose contexts
-(D19), caller UID misattribution (D20), NSAlert spoofing via un-sanitized
-prompt body (D21) and generic `defaultPromptBody` (D23), `mail_read`
-allow-by-default with no structured untrusted-input marker (D22), binary
-integrity / PATH-swap (D24).
-
-**Low (7)** — `TTLDuration` silent-zero on parse failure (D25), audit
-`args_json` binding hygiene (D26), CODEOWNERS still missing (D27 / B-5
-carry-over), `SearchMessages` Sprintf footgun (D28 / C-8 partial),
-`mail_read_thread` returns raw decryption error to LLM (D29), Touch ID
-helper has no password fallback (D30), `serve-stdio` doesn't `Unsetenv`
-secret-bearing env vars (D31 / H-1 regression).
-
-## Updated foundational recommendations
-
-These re-frame the project invariants in light of the Phase 4/5 surface:
-
-1. **Treat the spawning-process environment as untrusted in serve-stdio
-   mode.** Three of the new findings (D4, D5, D31) trace to env-var trust
-   that was reasonable in CLI mode and broken once Claude Desktop spawns
-   us. New rule for `runServeStdio`: unset every `PROTONMCP_*` env var
-   that isn't strictly required at startup, and refuse to honor test-only
-   override paths (`PROTONMCP_TOUCHID`) outside `testing.Testing()`. The
-   re-audit #1 updated #6 ("refuse to start in daemon mode with
-   `PROTONMCP_DEBUG=1`") needs to become a hard invariant, not a
-   recommendation.
-
-2. **Make the audit log unconditional.** D8 lets the request context kill
-   the row that documents what just happened. `audit.Begin` / `Complete`
-   must run on a detached short-timeout context — the same pattern as
-   `detachedShutdownCtx` in `internal/proton/client.go:105` — so abort
-   and timeout cases produce a complete row, not a NULL outcome. The
-   audit log is the source of truth; this design lets it forget exactly
-   when forensic questions get interesting.
-
-3. **Plumb policy through the handler, not just the middleware.** The
-   send-family bypass (D6) and the approval-cache staleness (D14) both
-   come from decisions made in the middleware that then have to be
-   re-applied (or aren't) inside the handler. Either pass the resolved
-   policy down in `Context` so handlers can re-check the allowlist before
-   `SendDraft`, or move recipient resolution into the middleware itself.
-   The current split is "middleware enforces unless `Recipients == nil`,
-   in which case the handler is on the honor system" — handlers are not
-   honoring it.
-
-4. **Sanitize Touch ID prompt content at one chokepoint.** D21 (send
-   tools) and D23 (generic prompt) are the same bug class: LLM-supplied
-   text rendered verbatim in NSAlert, vulnerable to RTL-override /
-   zero-width-joiner / look-alike-glyph spoofing and to multi-MB
-   AppKit-OOM. Adopt `sanitize.stripControlChars` + length cap +
-   `norm.NFKC` at `defaultPromptBody`, and have every per-tool
-   `PromptBody` impl route through that shared helper.
-
-5. **Long-overdue carry-overs (cycles unchanged, now load-bearing):**
-   `.github/CODEOWNERS` (B-5 → D27, two cycles open), DSN escaping
-   (B-6 → D12, two cycles open), plaintext-body eviction + `purge`
-   command (C-1 → D13, single largest residual risk, two cycles open),
-   `keystore.Save` empty-`SaltedKeyPass` guard (B-14 → D16, two cycles
-   open), sentinel-error set + `%v`-not-`%w` for library errors
-   (M-4 → D19/D29, three cycles open). Each is small in isolation;
-   together they describe an audit cycle that consistently lands
-   architectural items and consistently defers hygiene.
+- **High (1)** — **D11** (B-9 partial): `raw_json` truncation still
+  produces invalid JSON. No current consumer parses `raw_json`, but the
+  poisoned row breaks any future `json.Unmarshal`.
+- **Medium (4)** — **D12** (B-6, three cycles): DSN escaping via `--db`.
+  **D20**: `caller.Resolver` records daemon's own UID, not spawner's —
+  misleading audit field, actively wrong once Phase 6 lands SO_PEERCRED.
+  **D22**: `mail_read` allow-by-default with no structured
+  `<UNTRUSTED_INPUT>` marker; the description-string warning is the only
+  prompt-injection mitigation. **D24**: no integrity check on the
+  running protonmcp binary path (PATH-swap defense-in-depth, blocked on
+  Phase 7 code signing).
+- **Low (3)** — **D26**: `args_json` binding hygiene (no impact, copy
+  cost only). **D28** (C-8 partial): `SearchMessages` Sprintf for
+  `LIMIT` — safe today, copy-paste footgun. **D30**: Touch ID helper
+  has no password fallback; hardware-without-Touch-ID Macs can't use
+  prompted tools.
 
 ## Net assessment
 
 **Genuinely improved this cycle:** Foundational #3 (MCP trust model —
 stdio + TCP-bind panic via `trustguard.go`), Foundational #4 (default-deny
-policy + engine + atomic reload), Foundational #2 (value-heuristic
-redactor extracted into `internal/redact` with documented caveats), C-2
-(control-char stripping), C-3 (logout revoke error surfaced), C-9 (FTS5
-escaping), B-1 / B-2 / B-12 (already done in re-audit #2, still holding).
+policy + engine + atomic reload + approval-cache invalidation),
+Foundational #2 (value-heuristic redactor + JWT/Bearer handling), C-1
+(plaintext-body eviction + `purge` subcommand — closes the single biggest
+residual risk after three cycles open), env-var trust hygiene in
+serve-stdio (D4/D5/D31), send-family allowlist correctness (D6/D7),
+NSAlert prompt sanitization (D21/D23), audit-log integrity under
+cancellation (D8), `.github/CODEOWNERS` (two cycles open, now closed),
+C-2/C-3/C-9 + B-1/B-2/B-12 holding from re-audit #2.
 
-**Phase 4 itself is architecturally sound.** The policy engine, audit
-log, Touch ID broker, and middleware composition all work as designed.
-The findings against them are configuration / boundary issues (D4 env
-override, D6 handler bypass, D8 ctx plumbing, D14 cache key staleness),
-not flaws in the design. Phase 4's PRs each closed real foundational
-items; the gaps are in the seams between Phase 4 and what spawns it.
+**Notable about the cadence:** the audit was run on 2026-05-22 and the
+five fix PRs (#43–#47) landed the same day. Every Critical and every
+High was closed except D11 (which is a partial of B-9, has no current
+exploit path, and was triaged below the in-day batch). The remaining 8
+items are dominated by Low (3) and Medium defense-in-depth / Phase-6-
+adjacent work (D20, D22, D24). The two-cycle-open hygiene items
+(CODEOWNERS, plaintext bodies, B-3, B-14) all shipped in this batch.
 
-**Biggest *new* risks introduced by Phase 4/5:**
+**Phase 4 architecturally validated.** Every Phase-4 finding (D4, D6, D8,
+D14) was a configuration / boundary issue rather than a design flaw, and
+all four shipped fixes within the day. The policy engine, audit log,
+Touch ID broker, and middleware composition are working as designed; the
+seams to the spawning process (which Phase 4 doesn't own) needed the
+hardening.
 
-- **D4** (env-var biometric bypass) is the highest-impact single finding
-  in this cycle — one env var defeats the entire Touch ID story. The
-  test-only path was never gated.
-- **D5** reopens an item that re-audit #1 explicitly predicted would
-  become a real leak the moment a daemon path existed.
-- **D6** (reply-tool allowlist bypass) is the biggest write-tool gap
-  shipped in Phase 5 and lands *before* write tools go GA — fixing it
-  now is cheap, fixing it after users have policies that assume the
-  guarantee is much more expensive.
+**Residual risk profile:**
 
-**Single biggest residual risk: still C-1 (now D13).** Plaintext mail at
-rest, unchanged through three audit cycles. Phase 5 added draft bodies to
-the same persistence path, so the surface grew. If the laptop is lost,
-stolen, iCloud-backed-up, or imaged for support, every message ever
-opened — and every draft ever composed — in `protonmcp` is recoverable
-in cleartext without the Keychain. A `protonmcp purge` command + a
-startup sweeper that hard-deletes past-TTL rows is the cheapest meaningful
-mitigation pending SQLCipher / envelope encryption.
+- **D11 (high)** — corruption-class, not a leak; safe to land in next
+  hygiene round. No current consumer of `raw_json`.
+- **D12 (B-6, three cycles)** — local attack requiring `--db` control;
+  consequence is `secure_delete(off)` / `journal_mode(off)` injection.
+  Mitigated by `D13`'s purge sweeper running at startup with
+  `secure_delete=on` already on the DSN.
+- **D22 (mail_read prompt-injection)** — the residual write-tool risk
+  rests on the user reading the Touch ID dialog carefully. The Phase 5
+  recipient allowlist + literal recipients in NSAlert (post-D7/D21) is
+  the practical protection; structured `<UNTRUSTED_INPUT>` tagging is
+  a defense-in-depth upgrade for the next cycle.
+- **D24 (binary integrity)** — chicken-and-egg with Phase 7 code
+  signing; the recommended interim is SHA-pinning in
+  `~/Library/Application Support/protonmcp/expected_sha`.
+
+The next non-trivial code paths (Phase 6 daemon, Phase 7 signing) will
+likely reopen Foundational #3 (peer UID once SO_PEERCRED matters), close
+D24 (signing), and clear the D20 misattribution. Until then this audit
+cycle has consumed every actionable finding it raised.
