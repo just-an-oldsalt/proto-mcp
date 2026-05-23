@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -250,6 +251,50 @@ func TestMiddlewareAllowRecordsOK(t *testing.T) {
 	}
 	if duration < 0 {
 		t.Errorf("duration should be non-negative, got %d", duration)
+	}
+}
+
+// TestMiddlewareContextCallerOverridesResolver — Phase 6/D. The
+// daemon stashes peer-cred via caller.WithCaller(ctx, peer) so the
+// audit row gets the connecting client's identity, not the
+// daemon's own PID. Middleware must prefer the ctx-stashed Caller
+// over the process-wide Resolver.
+func TestMiddlewareContextCallerOverridesResolver(t *testing.T) {
+	pol := newTestPolicy(t, `tools:
+  echo: { decision: allow }
+`)
+	var seenCaller CallerInfo
+	srv := New(nil, WithPolicy(pol), WithCallerResolver(caller.New()))
+	srv.Register(Tool{
+		Name:        "echo",
+		Description: "echo",
+		InputSchema: json.RawMessage(`{"type":"object"}`),
+		Handler: func(ctx Context, _ json.RawMessage) (*ToolResult, error) {
+			seenCaller = ctx.Caller
+			return StructuredResult(map[string]string{"ok": "yes"})
+		},
+	})
+
+	// Inject a peer-cred Caller into ctx the way the daemon does
+	// in its accept loop.
+	peer := caller.Caller{PID: 99887, UID: 501, Binary: "/peer/binary"}
+	ctx := caller.WithCaller(context.Background(), peer)
+
+	in := strings.NewReader(strings.Join([]string{
+		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}`,
+		`{"jsonrpc":"2.0","method":"notifications/initialized"}`,
+		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"echo","arguments":{}}}`,
+	}, "\n") + "\n")
+	var out bytes.Buffer
+	if err := srv.Serve(ctx, in, &out); err != nil {
+		t.Fatalf("Serve: %v", err)
+	}
+
+	if seenCaller.PID != 99887 {
+		t.Errorf("Caller.PID = %d, want 99887 (ctx-stashed peer-cred should override Resolver)", seenCaller.PID)
+	}
+	if seenCaller.Binary != "/peer/binary" {
+		t.Errorf("Caller.Binary = %q, want /peer/binary", seenCaller.Binary)
 	}
 }
 
