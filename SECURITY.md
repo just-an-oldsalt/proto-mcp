@@ -1,5 +1,32 @@
 # SECURITY.md
 
+> ## ⚠ AppVersion impersonation (alpha-1.0 scoping)
+>
+> proto-mcp sends `AppVersion: macos-bridge@3.24.2` on every Proton API
+> request. **That is Proton Bridge's identifier, not ours.** We are not
+> registered with Proton as a recognized client; the impersonation is a
+> deliberate development shortcut so the API allowlist accepts our
+> requests at all.
+>
+> Implications:
+>
+> - Anything that violates Proton's
+>   [Terms](https://proton.me/legal/terms) — rate-abuse, scraping,
+>   multi-account automation, etc. — is no less violating because the
+>   header reads "Bridge." Don't.
+> - Proton's security team may revoke `macos-bridge@3.24.2`'s allowlist
+>   entry in any future Bridge release. If that happens, proto-mcp
+>   stops working until we re-pin to a newer Bridge version OR we
+>   apply for and receive our own client identifier.
+> - A `protonmcp@x.y.z` registration with Proton is the right
+>   long-term answer; it's a follow-up after alpha.
+>
+> By installing and running proto-mcp, you accept that this is a
+> personal-use development tool, not a sanctioned third-party client.
+> The full README mirrors this paragraph for first-time visibility.
+
+---
+
 Security groundwork for proto-mcp. Drafted from a read-only audit before the
 codebase grows past its current 4-file footprint. Items are prioritized — the
 **Foundational** section is the load-bearing one; everything else gets cheaper

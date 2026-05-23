@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	// procExeFor is platform-defined; see pidfile_darwin.go.
 )
 
 // DefaultPIDPath returns the canonical PID file location:
@@ -70,12 +71,20 @@ func WritePIDFile(path string) (cleanup func(), err error) {
 // from inside an MCP-tool handler doesn't signal itself (which
 // would race with the engine.Reload SIGHUP handler).
 //
+// SECURITY D33 / D34: pgrep -f matches on the full command line, so
+// it picks up wrappers (Claude.app/Contents/Helpers/disclaimer
+// invokes protonmcp with serve-stdio in argv) and editor processes
+// with this filename open. We post-filter each PID by verifying its
+// actual executable path via proc_pidpath equals the running
+// protonmcp binary. PIDs whose path can't be resolved (permission
+// denied / gone) are dropped from the result — better to miss one
+// than to send SIGHUP to a wrapper that ignores it and produce a
+// misleading success log.
+//
 // Returns ErrNotRunning if no matching process exists.
 func FindRunningPIDs() ([]int, error) {
 	out, err := exec.Command("pgrep", "-f", "protonmcp serve-stdio").Output()
 	if err != nil {
-		// pgrep exits 1 when no match — that's "not running",
-		// not a real error. Distinguish via *exec.ExitError.
 		var ee *exec.ExitError
 		if errors.As(err, &ee) {
 			return nil, ErrNotRunning
@@ -83,6 +92,9 @@ func FindRunningPIDs() ([]int, error) {
 		return nil, fmt.Errorf("pgrep: %w", err)
 	}
 	self := os.Getpid()
+	selfExe, _ := os.Executable()
+	selfExe, _ = filepath.Abs(selfExe)
+
 	var pids []int
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		if line == "" {
@@ -92,12 +104,48 @@ func FindRunningPIDs() ([]int, error) {
 		if err != nil || pid == self {
 			continue
 		}
+		// D33/D34: verify the PID's actual executable matches ours.
+		// caller.BinaryFor returns "" on can't-determine (permission /
+		// non-darwin); drop those rather than SIGHUP a stranger.
+		if !matchesExecutable(pid, selfExe) {
+			continue
+		}
 		pids = append(pids, pid)
 	}
 	if len(pids) == 0 {
 		return nil, ErrNotRunning
 	}
 	return pids, nil
+}
+
+// matchesExecutable returns true if the process at pid is running
+// the same executable as us. Lives here rather than in
+// internal/caller because it's specifically the SIGHUP-filtering
+// rule — a future caller might want a looser match.
+//
+// Comparison uses os.SameFile (st_dev + st_ino) so symlinks /
+// resolved-vs-raw paths between os.Executable() and proc_pidpath
+// don't cause false negatives. proc_pidpath returns the
+// canonical resolved path; os.Executable on a symlinked install
+// may return the symlink. Without SameFile, the strings differ
+// and the filter rejects legitimate matches.
+func matchesExecutable(pid int, selfExe string) bool {
+	if selfExe == "" {
+		// We don't know our own path either — fall through to the
+		// previous behavior of "trust the pgrep match." Conservative
+		// but not strictly wrong.
+		return true
+	}
+	bin := procExeFor(pid)
+	if bin == "" {
+		return false
+	}
+	selfInfo, serr := os.Stat(selfExe)
+	binInfo, berr := os.Stat(bin)
+	if serr != nil || berr != nil {
+		return false
+	}
+	return os.SameFile(selfInfo, binInfo)
 }
 
 // ErrNotRunning is returned when no live serve-stdio is detected.

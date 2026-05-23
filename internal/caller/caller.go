@@ -49,6 +49,18 @@ func New() *Resolver {
 	return &Resolver{}
 }
 
+// BinaryFor returns the absolute path of the binary running with the
+// given PID, or "" if it can't be determined (PID gone, EPERM, non-
+// macOS platform). Exported so internal/policy.FindRunningPIDs can
+// filter pgrep matches by actual executable path — see D33/D34 fix.
+//
+// Empty-string return is intentional and non-fatal; callers treat
+// it as "can't verify, skip."
+func BinaryFor(pid int) string {
+	bin, _ := resolveBinary(pid)
+	return bin
+}
+
 // Resolve returns the cached Caller, computing it on first call.
 // Never returns an error — partial resolution (PID only, no binary)
 // is acceptable; consumers handle empty Binary as "unknown."
