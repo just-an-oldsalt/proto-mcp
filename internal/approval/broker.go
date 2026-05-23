@@ -67,6 +67,19 @@ type Broker struct {
 // startup rather than mid-call.
 //
 // Use ResolveHelperPath for the standard discovery sequence.
+// Invalidate drops every cached approval. SECURITY D14: serve-stdio
+// hooks this into the SIGHUP handler after engine.Reload() so a
+// policy that newly demands confirm:true (or newly restricts
+// allowed_recipients) takes effect immediately, instead of being
+// shadowed by a still-valid pre-reload cache entry. Returns the
+// number of entries dropped, mostly for log messages.
+func (b *Broker) Invalidate() int {
+	if b == nil || b.cache == nil {
+		return 0
+	}
+	return b.cache.purge()
+}
+
 func New(helperPath string, logger *slog.Logger) (*Broker, error) {
 	if logger == nil {
 		logger = slog.Default()

@@ -50,6 +50,21 @@ func (c *cache) set(key string, ttl time.Duration) {
 	c.entries[key] = c.now().Add(ttl)
 }
 
+// purge drops every cached approval. SECURITY D14: called after
+// `policy reload` (via the broker's Invalidate method) so cached
+// approvals issued under the OLD policy don't bypass the NEW
+// policy's tightened rules (e.g. confirm:true newly required,
+// allowed_recipients newly restricted). Simpler than diff'ing
+// every cached key against the new policy — start fresh, the user
+// pays at most one re-prompt per tool per TTL window.
+func (c *cache) purge() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	n := len(c.entries)
+	c.entries = map[string]time.Time{}
+	return n
+}
+
 // cacheKey computes sha256(tool || pid || args). PID is included so
 // concurrent Claude Desktop sessions (Phase 6 multi-process scenario)
 // can't piggyback on each other's approvals. args is included so

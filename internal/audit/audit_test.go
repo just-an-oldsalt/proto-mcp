@@ -163,3 +163,79 @@ func TestBeginIDIsZeroOnNullDBFails(t *testing.T) {
 	// Complete with id=0 is a no-op; just verifying it doesn't panic.
 	w.Complete(context.Background(), 0, OutcomeOK, "", "", time.Millisecond)
 }
+
+// SECURITY D8 — audit Begin / Complete must complete even when the
+// caller's request context is already cancelled. Before the fix,
+// a cancelled ctx would propagate into ExecContext and the row
+// would never land.
+func TestAuditWritesSurviveCancelledCtx(t *testing.T) {
+	st := openTestStore(t)
+	w, err := New(st.DB, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Cancel ctx BEFORE either call.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	id := w.Begin(ctx, &Entry{
+		Caller:         caller.Caller{PID: 1234},
+		Tool:           "mail_send",
+		ArgsJSON:       json.RawMessage(`{"x":1}`),
+		PolicyDecision: "prompt",
+	})
+	if id == 0 {
+		t.Fatal("Begin returned 0 despite cancelled-ctx fix — detached ctx should still write the row")
+	}
+	w.Complete(ctx, id, OutcomeOK, "touchid", "", 50*time.Millisecond)
+
+	var outcome string
+	if err := st.DB.QueryRow(`SELECT outcome FROM audit_log WHERE id = ?`, id).Scan(&outcome); err != nil {
+		t.Fatal(err)
+	}
+	if outcome != "ok" {
+		t.Errorf("outcome = %q under cancelled ctx, want ok", outcome)
+	}
+}
+
+// SECURITY D18 — JSONL line carries tool / caller / decision / args
+// so an operator tailing the file doesn't need a SQLite query to
+// know what each entry was.
+func TestJSONLLineIncludesToolAndCaller(t *testing.T) {
+	st := openTestStore(t)
+	jpath := filepath.Join(t.TempDir(), "audit.log")
+	w, err := New(st.DB, jpath, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+
+	ctx := context.Background()
+	id := w.Begin(ctx, &Entry{
+		Caller:         caller.Caller{PID: 9999, Binary: "/Applications/Claude.app/Contents/MacOS/Claude"},
+		Tool:           "mail_send",
+		ArgsJSON:       json.RawMessage(`{"to":["alice@example.com"]}`),
+		PolicyDecision: "prompt",
+	})
+	w.Complete(ctx, id, OutcomeOK, "touchid", "", 100*time.Millisecond)
+
+	data, err := os.ReadFile(jpath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	line := string(data)
+	for _, want := range []string{
+		`"tool":"mail_send"`,
+		`"caller_pid":9999`,
+		`/Applications/Claude.app`,
+		`"policy_decision":"prompt"`,
+		`alice@example.com`,
+		`"outcome":"ok"`,
+		`"approval_source":"touchid"`,
+	} {
+		if !strings.Contains(line, want) {
+			t.Errorf("JSONL line missing %q: %s", want, line)
+		}
+	}
+}
