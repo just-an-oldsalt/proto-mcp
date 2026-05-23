@@ -39,16 +39,32 @@ type Server struct {
 	mu     sync.RWMutex
 	logger *slog.Logger
 
-	// initialized flips to true after the client sends the
-	// initialized notification. tools/list and tools/call before
-	// that point are rejected per spec.
-	initialized bool
-	initMu      sync.Mutex
-
 	// Phase 4 middleware. Each is optional; nil → that pipeline
 	// stage is a no-op (preserves Phase-3 behavior for tests that
 	// construct mcp.New without options).
 	middleware *Middleware
+}
+
+// connState is the per-connection MCP session state. Lifted out of
+// Server in Phase 6 so multiple concurrent connections (the daemon
+// model — one Server, N clients) each have their own initialized
+// flag. The old serve-stdio path still works: Serve creates one
+// connState locally and threads it through.
+type connState struct {
+	mu          sync.Mutex
+	initialized bool
+}
+
+func (c *connState) isInitialized() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.initialized
+}
+
+func (c *connState) markInitialized() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.initialized = true
 }
 
 // Option configures the Server during construction. Use the
@@ -156,6 +172,7 @@ func (s *Server) Tools() []Tool {
 // initialize handshake. Cancelling ctx interrupts the loop on the
 // next message boundary.
 func (s *Server) Serve(ctx context.Context, in io.Reader, out io.Writer) error {
+	state := &connState{}
 	scanner := bufio.NewScanner(in)
 	// Default Scanner buffer is 64 KiB; allow up to 8 MiB per message
 	// to fit large attachment-metadata responses and similar.
@@ -175,7 +192,7 @@ func (s *Server) Serve(ctx context.Context, in io.Reader, out io.Writer) error {
 		if len(line) == 0 {
 			continue // tolerate blank lines defensively
 		}
-		s.handleLine(ctx, line, enc)
+		s.handleLine(ctx, state, line, enc)
 	}
 	if err := scanner.Err(); err != nil {
 		if errors.Is(err, io.EOF) {
@@ -189,7 +206,7 @@ func (s *Server) Serve(ctx context.Context, in io.Reader, out io.Writer) error {
 // handleLine parses one NDJSON line and dispatches. Errors are
 // written back as JSON-RPC error responses; nothing here returns to
 // the caller — Serve only stops on transport failure.
-func (s *Server) handleLine(ctx context.Context, line []byte, enc *json.Encoder) {
+func (s *Server) handleLine(ctx context.Context, state *connState, line []byte, enc *json.Encoder) {
 	var req Request
 	if err := json.Unmarshal(line, &req); err != nil {
 		// Parse error → JSON-RPC -32700 with null id per spec.
@@ -209,7 +226,7 @@ func (s *Server) handleLine(ctx context.Context, line []byte, enc *json.Encoder)
 		return
 	}
 
-	resp := s.dispatch(ctx, &req)
+	resp := s.dispatch(ctx, state, &req)
 	if req.IsNotification() {
 		// Per spec: notifications get no response. dispatch returns a
 		// Response for symmetry but we drop it.
@@ -222,7 +239,7 @@ func (s *Server) handleLine(ctx context.Context, line []byte, enc *json.Encoder)
 // returns the response. Always returns non-nil for non-notification
 // requests; notifications return a sentinel that the caller
 // discards.
-func (s *Server) dispatch(ctx context.Context, req *Request) *Response {
+func (s *Server) dispatch(ctx context.Context, state *connState, req *Request) *Response {
 	resp := &Response{JSONRPC: "2.0", ID: req.ID}
 
 	switch req.Method {
@@ -236,14 +253,12 @@ func (s *Server) dispatch(ctx context.Context, req *Request) *Response {
 		return resp
 
 	case "notifications/initialized":
-		s.initMu.Lock()
-		s.initialized = true
-		s.initMu.Unlock()
+		state.markInitialized()
 		// Notification — caller discards.
 		return resp
 
 	case "tools/list":
-		if !s.isInitialized() {
+		if !state.isInitialized() {
 			resp.Error = NewError(CodeInvalidRequest, "server not initialized")
 			return resp
 		}
@@ -256,7 +271,7 @@ func (s *Server) dispatch(ctx context.Context, req *Request) *Response {
 		return resp
 
 	case "tools/call":
-		if !s.isInitialized() {
+		if !state.isInitialized() {
 			resp.Error = NewError(CodeInvalidRequest, "server not initialized")
 			return resp
 		}
@@ -277,12 +292,6 @@ func (s *Server) dispatch(ctx context.Context, req *Request) *Response {
 		resp.Error = NewError(CodeMethodNotFound, "unknown method: "+req.Method)
 		return resp
 	}
-}
-
-func (s *Server) isInitialized() bool {
-	s.initMu.Lock()
-	defer s.initMu.Unlock()
-	return s.initialized
 }
 
 func (s *Server) handleInitialize(raw json.RawMessage) (*InitializeResult, *Error) {

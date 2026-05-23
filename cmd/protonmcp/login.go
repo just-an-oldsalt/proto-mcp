@@ -9,6 +9,7 @@ import (
 
 	"github.com/just-an-oldsalt/proto-mcp/internal/keystore"
 	protonclient "github.com/just-an-oldsalt/proto-mcp/internal/proton"
+	"github.com/just-an-oldsalt/proto-mcp/internal/session"
 )
 
 // runLogin does the full SRP + TOTP + key-unlock flow interactively
@@ -40,7 +41,7 @@ func runLogin(ctx context.Context, _ []string) error {
 	defer sess.Close()
 
 	bundle := &sessionBundle{Session: sess, Manager: mgr, Jar: jar}
-	if err := persistSession(bundle); err != nil {
+	if err := session.Persist(bundle); err != nil {
 		return fmt.Errorf("save session to Keychain: %w", err)
 	}
 
