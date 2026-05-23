@@ -162,7 +162,7 @@
 
 <h2>Status at a glance</h2>
 <div class="stats">
-  <div class="stat"><div class="stat-num">7</div><div class="stat-label">Open defects</div></div>
+  <div class="stat"><div class="stat-num">8</div><div class="stat-label">Open defects</div></div>
   <div class="stat"><div class="stat-num">0</div><div class="stat-label">Investigating</div></div>
   <div class="stat"><div class="stat-num">28</div><div class="stat-label">Resolved</div></div>
   <div class="stat"><div class="stat-num">0</div><div class="stat-label"><span class="tag critical">critical</span></div></div>
@@ -173,13 +173,63 @@
 
 <h2>Open</h2>
 <p class="meta">
-  Eight residual defects from the 2026-05-22 security re-audit. The other 20
-  audit findings landed in PRs #43–#47 (commits <code>5315158</code>, <code>c709963</code>,
-  <code>097fcfb</code>, <code>a7e85d1</code>, <code>19b0bf5</code>) — see <em>Resolved</em> below for what
-  shipped and where. The eight here either carry over from prior audit
-  cycles (B-6, B-9, M-4) or are Low / Phase-6-adjacent hygiene the fix
-  batch deliberately skipped.
+  Seven residual defects from the 2026-05-22 security re-audit + one
+  UX defect surfaced from live testing on 2026-05-23. The audit
+  findings landed in PRs #43–#47 + #51–#54 — see <em>Resolved</em> below
+  for what shipped and where. The carry-overs here are either prior-
+  audit-cycle items (B-6, B-9, M-4) or Low / Phase-6-adjacent hygiene
+  the fix batch deliberately skipped.
 </p>
+
+<h3><span class="id">D36</span>Touch ID prompt is grammatically broken and over-redacted — user can't read what they're approving <span class="tag open">open</span> <span class="tag medium">medium</span></h3>
+<p><strong>Reported:</strong> 2026-05-23 from live screenshot · Surface:
+<code>internal/mcp/middleware.go:defaultPromptBody</code>,
+<code>internal/redact/redact.go:looksLikeToken</code>, every prompted
+tool without a custom <code>PromptBody</code> closure.</p>
+<p><strong>Evidence:</strong> Live prompt for <code>mail_move</code>:</p>
+<pre><code>protonmcp-touchid is trying to
+mail_move was requested by an MCP client with args:
+{"destination":"[REDACTED-VALUE]","message_id":"[REDACTED-VALUE]"}.
+
+Touch ID or enter your password to allow this.</code></pre>
+<p>Two distinct bugs visible:</p>
+<ul>
+  <li><strong>Grammar.</strong> macOS prepends <em>"protonmcp-touchid
+    is trying to "</em> before our <code>localizedReason</code>. Our
+    string ("<code>mail_move was requested by …</code>") concatenates
+    to nonsense. The reason text MUST be a verb phrase that completes
+    the prepended subject — e.g. "<em>move 'Re: gear list' from
+    Inbox to Archive</em>". Today only the send family has a per-tool
+    <code>PromptBody</code> closure; everything else falls back to
+    the generic <code>defaultPromptBody</code> which produces this.</li>
+  <li><strong>Over-redaction.</strong> <code>destination</code> (often
+    a long base64 user-folder ID) and <code>message_id</code>
+    (always a long base64 Proton ID) both trip
+    <code>redact.looksLikeToken</code>'s ≥32-char base64url
+    heuristic. Correct for credentials; wrong here — these are
+    opaque identifiers visible in any Proton URL, not secrets,
+    and blanking them in the prompt is exactly the wrong direction
+    (the whole point of the prompt is so the user can see what
+    they're approving).</li>
+</ul>
+<p><strong>Impact:</strong> The prompt is functionally a yes/no toggle
+on every prompted write. The user can't tell <em>which</em> message
+or <em>where to</em>, so the Touch ID gate becomes ceremonial:
+people either rubber-stamp every prompt or learn to mistrust them.
+Either outcome hollows out the Phase-4 security model.</p>
+<p><strong>Remediation:</strong> Each prompted tool (mail_move,
+mail_label, mail_trash, mail_draft_delete, labels_create/update/delete,
+folders_*) gets a per-tool <code>PromptBody</code> closure (the
+pattern mail_send already uses) that constructs a human-readable
+sentence by looking up <code>message_id → Subject</code> and
+<code>label_id → Name</code> through the local <code>Store</code>.
+That requires giving PromptBody access to Deps (today it takes
+only <code>args json.RawMessage</code>); cleanest seam is to thread
+Deps through a closure, same way send-family handlers do.
+Defensive: even if a PromptBody falls back to default, raw IDs
+should pass through unredacted — they're not secrets.</p>
+<p><strong>Tracking:</strong> See TODO.html Backlog section "Touch ID
+prompt readability" for the implementation sketch.</p>
 
 <h3><span class="id">D11</span><code>raw_json</code> truncation produces invalid JSON <span class="tag open">open</span> <span class="tag high">high</span></h3>
 <p><strong>Reported:</strong> 2026-05-22 (security re-audit) · Surface: <code>internal/proton/messages.go:108-110</code></p>
