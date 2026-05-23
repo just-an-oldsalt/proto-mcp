@@ -7,17 +7,9 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"os/signal"
-	"syscall"
 	"time"
 
-	"github.com/just-an-oldsalt/proto-mcp/internal/approval"
-	"github.com/just-an-oldsalt/proto-mcp/internal/audit"
-	"github.com/just-an-oldsalt/proto-mcp/internal/caller"
-	"github.com/just-an-oldsalt/proto-mcp/internal/mcp"
-	"github.com/just-an-oldsalt/proto-mcp/internal/mcptools"
-	"github.com/just-an-oldsalt/proto-mcp/internal/policy"
-	"github.com/just-an-oldsalt/proto-mcp/internal/store"
+	"github.com/just-an-oldsalt/proto-mcp/internal/serve"
 )
 
 // runServeStdio is the MCP entry point. Claude Desktop spawns this
@@ -75,161 +67,30 @@ func runServeStdio(ctx context.Context, args []string) error {
 		_ = os.Unsetenv(k)
 	}
 
-	// Open the local store. mail.list / mail.search / mail.read all
-	// read from this; mail.sync writes to it.
-	path := *dbPath
-	if path == "" {
-		p, err := store.DefaultPath()
-		if err != nil {
-			return err
-		}
-		path = p
-	}
-	st, err := store.Open(path)
+	// Setup the shared runtime — store + session + policy + audit +
+	// broker + caller + MCP server + SIGHUP handler. Same wiring the
+	// protonmcpd daemon uses; only the transport differs.
+	rt, err := serve.Setup(ctx, serve.SetupConfig{
+		DBPath: *dbPath,
+		AcquireSession: func(ctx context.Context) (serve.SessionBundle, error) {
+			acquireCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+			defer cancel()
+			return acquireSessionResumeOnly(acquireCtx)
+		},
+		SweepBodiesAtStartup: sweepBodiesAtStartup,
+	})
 	if err != nil {
-		return fmt.Errorf("open store: %w", err)
+		return err
 	}
-	defer st.Close()
-
-	// SECURITY D13 / C-1 — sweep stale cached bodies at startup.
-	// Default retention is store.DefaultBodyRetention (30 days);
-	// `protonmcp purge --older-than 7d` tightens it explicitly.
-	// Failure here logs but doesn't block serving — the sweep is
-	// best-effort hygiene, not a load-bearing security feature.
-	if n, err := sweepBodiesAtStartup(ctx, st); err != nil {
-		slog.Warn("body purge sweep failed at startup", "err", err.Error())
-	} else if n > 0 {
-		slog.Info("purged stale cached bodies at startup", "rows", n)
-	}
-
-	// Q4 decision: acquire the session EAGERLY at initialize time —
-	// AND in resume-only mode, since Claude Desktop spawns us with
-	// no controlling TTY. Any failure here surfaces as "MCP server
-	// failed to start" in Claude Desktop with a stderr message
-	// telling the user to run `protonmcp login` from a real
-	// terminal first.
-	acquireCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
-	bundle, err := acquireSessionResumeOnly(acquireCtx)
-	cancel()
-	if err != nil {
-		return fmt.Errorf("acquire session: %w", err)
-	}
-	defer bundle.Close()
-	defer bundle.Session.Close()
-
-	// Phase 4: construct the policy engine BEFORE the MCP server so
-	// SIGHUP reload + the PID file land before any tool call. The
-	// engine itself is wired into the MCP middleware in 4/D; today
-	// it's loaded so `protonmcp policy reload` works against this
-	// daemon instance and so the override file is validated at
-	// startup (rather than first tool call).
-	overridePath, err := policy.DefaultOverridePath()
-	if err != nil {
-		return fmt.Errorf("policy override path: %w", err)
-	}
-	engine, err := policy.New(ctx, overridePath, slog.Default())
-	if err != nil {
-		return fmt.Errorf("policy engine: %w", err)
-	}
-
-	// PID file so `protonmcp policy reload` can find us. Held by an
-	// advisory flock so a second serve-stdio fails fast rather than
-	// stomping. cleanup removes the file on normal shutdown.
-	pidPath, err := policy.DefaultPIDPath()
-	if err != nil {
-		return fmt.Errorf("pid file path: %w", err)
-	}
-	pidCleanup, err := policy.WritePIDFile(pidPath)
-	if err != nil {
-		return fmt.Errorf("pid file: %w", err)
-	}
-	defer pidCleanup()
-
-	// Phase 4 middleware bits — audit writer + approval broker on
-	// top of the policy engine built above. Constructed BEFORE the
-	// SIGHUP handler so D14 (drop approval cache on reload) can
-	// reach `broker.Invalidate()` from inside the handler closure.
-	jsonlPath, err := audit.DefaultJSONLPath()
-	if err != nil {
-		return fmt.Errorf("audit path: %w", err)
-	}
-	auditWriter, err := audit.New(st.DB, jsonlPath, slog.Default())
-	if err != nil {
-		return fmt.Errorf("audit writer: %w", err)
-	}
-	defer auditWriter.Close()
-
-	helperPath, err := approval.ResolveHelperPath(os.Args[0])
-	var broker *approval.Broker
-	if err != nil {
-		// Missing helper isn't fatal — read tools are allow-by-policy,
-		// they don't need the broker. Tools with decision:prompt
-		// will safe-fall-through to deny via Middleware's nil-broker
-		// branch. Log loudly so the user knows write tools won't
-		// work until they run `make touchid`.
-		slog.Warn("touchid helper not found; prompted tools will be denied",
-			"hint", "run `make touchid` from the repo root",
-			"err", err.Error())
-	} else {
-		broker, err = approval.New(helperPath, slog.Default())
-		if err != nil {
-			return fmt.Errorf("approval broker: %w", err)
-		}
-	}
-
-	resolver := caller.New()
-
-	// SIGHUP → policy reload + approval cache drop. Installed AFTER
-	// main.go drops HUP from its NotifyContext, so the signal
-	// arrives here and only here. SECURITY D14: dropping the
-	// approval cache on reload means a policy that newly demands
-	// confirm:true (or newly restricts allowed_recipients) takes
-	// effect immediately — without invalidation, a still-valid
-	// pre-reload cache entry could satisfy a request that the new
-	// policy would have prompted on.
-	hupCh := make(chan os.Signal, 1)
-	signal.Notify(hupCh, syscall.SIGHUP)
-	defer signal.Stop(hupCh)
-	go func() {
-		for range hupCh {
-			if rerr := engine.Reload(); rerr != nil {
-				slog.Warn("policy reload failed; previous policy retained", "err", rerr.Error())
-				continue
-			}
-			n := 0
-			if broker != nil {
-				n = broker.Invalidate()
-			}
-			slog.Info("policy reloaded", "approvals_dropped", n)
-		}
-	}()
-
-	// Build the MCP server with the full Phase-4 middleware stack.
-	opts := []mcp.Option{
-		mcp.WithPolicy(engine),
-		mcp.WithAudit(auditWriter),
-		mcp.WithCallerResolver(resolver),
-	}
-	if broker != nil {
-		opts = append(opts, mcp.WithApproval(broker))
-	}
-	srv := mcp.New(slog.Default(), opts...)
-	for _, tl := range mcptools.All(mcptools.Deps{
-		Session: bundle.Session,
-		Store:   st,
-		Policy:  engine, // D6 — handler-side allowlist re-check
-	}) {
-		srv.Register(tl)
-	}
+	defer rt.Close()
 
 	slog.Info("serve-stdio ready",
-		"email", bundle.Session.Email,
-		"tools", len(srv.Tools()),
-		"db", path,
+		"email", rt.Session.Email,
+		"tools", len(rt.MCPServer.Tools()),
 	)
 
 	// Serve runs until stdin closes (client quit) or ctx cancels.
-	if err := srv.Serve(ctx, os.Stdin, os.Stdout); err != nil {
+	if err := rt.MCPServer.Serve(ctx, os.Stdin, os.Stdout); err != nil {
 		if errors.Is(err, context.Canceled) {
 			return nil
 		}
