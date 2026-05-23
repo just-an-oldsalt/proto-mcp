@@ -103,12 +103,23 @@ func (w *Writer) Close() error {
 // transiently unavailable (we'd rather degrade the audit trail than
 // brick the daemon).
 //
+// SECURITY D8: the SQL write runs on a DETACHED context with a
+// short timeout, not the caller's. The caller's ctx may already be
+// cancelled (handler timeout, client disconnect, SIGTERM mid-Touch
+// ID); modernc/sqlite would refuse the write and the row would
+// never land. We want the audit log to be complete precisely when
+// shutdowns get interesting — otherwise the row that documents
+// what just happened loses the moment forensic questions get
+// asked.
+//
 // Caller MUST have already redacted ArgsJSON via internal/redact.JSON.
 func (w *Writer) Begin(ctx context.Context, e *Entry) int64 {
 	if e.Timestamp.IsZero() {
 		e.Timestamp = time.Now().UTC()
 	}
-	res, err := w.db.ExecContext(ctx, `
+	detached, cancel := detachedAuditCtx(ctx)
+	defer cancel()
+	res, err := w.db.ExecContext(detached, `
 INSERT INTO audit_log (ts, caller_pid, caller_binary, caller_uid, tool, args_json, policy_decision)
 VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		e.Timestamp.Unix(),
@@ -137,13 +148,27 @@ VALUES (?, ?, ?, ?, ?, ?, ?)`,
 // and appends one line to the JSONL mirror. approvalSource is one
 // of "policy", "touchid", "cached", or "" if not gated.
 //
+// SECURITY D8: same detached-ctx treatment as Begin. A cancelled
+// request ctx mid-handler would otherwise leave the row's outcome
+// NULL forever — the exact state the audit row is supposed to
+// prevent.
+//
 // id=0 (Begin failed) → Complete is a no-op; we logged the Begin
 // failure already.
 func (w *Writer) Complete(ctx context.Context, id int64, outcome, approvalSource, errMsg string, dur time.Duration) {
 	if id == 0 {
 		return
 	}
-	_, err := w.db.ExecContext(ctx, `
+	detached, cancel := detachedAuditCtx(ctx)
+	defer cancel()
+
+	// Caller info comes from the in-flight Entry; the middleware
+	// holds it via the closure that built this Complete invocation.
+	// For JSONL we need it on the line too (D18), so we fetch the
+	// row's metadata as part of the same statement that updates
+	// outcome. Cheap UPDATE...RETURNING isn't supported by all
+	// drivers; we do a separate SELECT for the JSONL path.
+	_, err := w.db.ExecContext(detached, `
 UPDATE audit_log SET outcome = ?, approval_source = ?, error_msg = ?, duration_ms = ?
 WHERE id = ?`,
 		outcome, approvalSource, errMsg, dur.Milliseconds(), id,
@@ -154,13 +179,50 @@ WHERE id = ?`,
 		return
 	}
 	if w.jsonl != nil {
+		// D18: read back the row's identifying fields so the JSONL
+		// line is self-contained — operators tailing the file
+		// shouldn't need a SQLite query to know what the entry was.
+		var row jsonlContext
+		_ = w.db.QueryRowContext(detached, `
+SELECT tool, caller_pid, caller_binary, policy_decision, args_json
+  FROM audit_log WHERE id = ?
+`, id).Scan(&row.Tool, &row.CallerPID, &row.CallerBinary, &row.PolicyDecision, &row.ArgsJSON)
+
 		w.mu.Lock()
 		defer w.mu.Unlock()
-		if jerr := w.jsonl.WriteCompleted(ctx, id, outcome, approvalSource, errMsg, dur); jerr != nil {
+		if jerr := w.jsonl.WriteCompleted(detached, id, outcome, approvalSource, errMsg, dur, row); jerr != nil {
 			w.logger.Warn("audit jsonl write failed; SQLite row OK",
 				"id", id, "err", jerr.Error())
 		}
 	}
+}
+
+// jsonlContext is the per-row identifying metadata the D18 fix
+// pulls back from SQLite so the JSONL mirror line is self-
+// contained. Populated via the SELECT inside Complete.
+type jsonlContext struct {
+	Tool           string
+	CallerPID      int64
+	CallerBinary   string
+	PolicyDecision string
+	ArgsJSON       string
+}
+
+// detachedAuditCtx returns a fresh context with a short timeout,
+// independent of the caller's ctx. Used by Begin / Complete /
+// SetDecision so audit writes run to completion even when the
+// request context is already cancelled.
+//
+// 5 seconds is generous for a one-row local SQLite UPDATE. If we
+// can't write within that window, the DB is in trouble and the
+// daemon has bigger problems than missing one audit row.
+func detachedAuditCtx(parent context.Context) (context.Context, context.CancelFunc) {
+	// We deliberately ignore the parent — that's the whole point of
+	// "detached." But if the parent has a trace/span context, future
+	// observability work might want to propagate that; the comment
+	// is here so the seam is obvious.
+	_ = parent
+	return context.WithTimeout(context.Background(), 5*time.Second)
 }
 
 // SetDecision backfills the policy_decision column on a row Begin
@@ -168,12 +230,16 @@ WHERE id = ?`,
 // policy engine returns — keeps the audit row reflective of the
 // decision even if a panic happens between Begin and Complete.
 //
+// SECURITY D8: detached-ctx, same reasons as Begin / Complete.
+//
 // No-op if id is 0 (Begin failed).
 func (w *Writer) SetDecision(ctx context.Context, id int64, decision string) error {
 	if id == 0 {
 		return nil
 	}
-	_, err := w.db.ExecContext(ctx,
+	detached, cancel := detachedAuditCtx(ctx)
+	defer cancel()
+	_, err := w.db.ExecContext(detached,
 		`UPDATE audit_log SET policy_decision = ? WHERE id = ?`,
 		decision, id)
 	if err != nil {

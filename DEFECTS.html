@@ -162,11 +162,11 @@
 
 <h2>Status at a glance</h2>
 <div class="stats">
-  <div class="stat"><div class="stat-num">18</div><div class="stat-label">Open defects</div></div>
+  <div class="stat"><div class="stat-num">15</div><div class="stat-label">Open defects</div></div>
   <div class="stat"><div class="stat-num">0</div><div class="stat-label">Investigating</div></div>
-  <div class="stat"><div class="stat-num">13</div><div class="stat-label">Resolved</div></div>
+  <div class="stat"><div class="stat-num">16</div><div class="stat-label">Resolved</div></div>
   <div class="stat"><div class="stat-num">0</div><div class="stat-label"><span class="tag critical">critical</span></div></div>
-  <div class="stat"><div class="stat-num">4</div><div class="stat-label"><span class="tag high">high</span></div></div>
+  <div class="stat"><div class="stat-num">3</div><div class="stat-label"><span class="tag high">high</span></div></div>
   <div class="stat"><div class="stat-num">13</div><div class="stat-label"><span class="tag medium">medium</span></div></div>
   <div class="stat"><div class="stat-num">7</div><div class="stat-label"><span class="tag low">low</span></div></div>
 </div>
@@ -221,7 +221,7 @@ messages backfill still proceeds and a stderr warning surfaces.</p>
 <p><strong>Remediation:</strong> In <code>firstDisallowedRecipient</code>, parse every entry via <code>mail.ParseAddress</code> and run the suffix check against the resulting <code>.Address</code>. Return any unparseable entry as disallowed. Same change in <code>extractSendRecipients</code>.</p>
 <p class="meta"><strong>Related:</strong> new (Phase 5/D)</p>
 
-<h3><span class="id">D8</span>Audit <code>Begin</code>/<code>Complete</code> run under request ctx — cancellation drops outcome <span class="tag open">open</span> <span class="tag high">high</span></h3>
+<h3><span class="id">D8</span>Audit <code>Begin</code>/<code>Complete</code> run under request ctx — cancellation drops outcome <span class="tag fixed">fixed in PR 5.5/C</span> <span class="tag high">high</span></h3>
 <p><strong>Reported:</strong> 2026-05-22 (security re-audit) · Surface: <code>internal/audit/audit.go:107-184</code>, <code>internal/mcp/middleware.go:140-143</code></p>
 <p><strong>Evidence:</strong> <code>Begin</code> uses <code>db.ExecContext(ctx, ...)</code>, <code>Complete</code> and <code>SetDecision</code> likewise. The middleware's defer (<code>middleware.go:140-142</code>) calls <code>m.audit.Complete(ctx, ...)</code> with the same context that may have been cancelled mid-handler (handler timeout, client disconnect, SIGTERM). When ctx is already Done, modernc/sqlite's <code>ExecContext</code> returns <code>context.Canceled</code> immediately, the audit row stays at NULL outcome forever, the JSONL line never appends.</p>
 <p><strong>Impact:</strong> The audit log loses provenance precisely when it matters most — during forced shutdowns / Ctrl-C of long-running write tools. A <code>mail_send</code> that the user aborts mid-Touch-ID via SIGTERM leaves an audit row with NULL outcome (so the forensic question "did this actually send?" can't be answered from the audit). The <code>audit_log</code> is supposed to be the source of truth; this design makes it forgetful exactly when the daemon's behavior gets interesting.</p>
@@ -276,7 +276,7 @@ Pending Phase-6 envelope encryption.</p>
 <p><strong>Remediation:</strong> Add a startup sweep <code>UPDATE messages SET body_text = NULL, body_html = NULL WHERE body_cached_at IS NULL OR body_cached_at &lt; ?</code>. Ship <code>protonmcp purge [--all|--older-than DUR]</code>. Document loudly in README. Long-term: SQLCipher or envelope-encrypt the body columns with a Keychain-stored key.</p>
 <p class="meta"><strong>Related:</strong> C-1 (still open after Phase 2)</p>
 
-<h3><span class="id">D14</span>Approval cache key omits <code>Confirm</code> flag — policy reload doesn't invalidate stale approvals <span class="tag open">open</span> <span class="tag medium">medium</span></h3>
+<h3><span class="id">D14</span>Approval cache key omits <code>Confirm</code> flag — policy reload doesn't invalidate stale approvals <span class="tag fixed">fixed in PR 5.5/C</span> <span class="tag medium">medium</span></h3>
 <p><strong>Reported:</strong> 2026-05-22 (security re-audit) · Surface: <code>internal/approval/cache.go:58-66</code>, <code>internal/approval/broker.go:94-110</code></p>
 <p><strong>Evidence:</strong> <code>cacheKey</code> hashes <code>tool || pid || args</code> — not the <code>confirm:true</code> bit, not the TTL, not the <code>allowed_recipients</code>. If a user has approved <code>mail_move</code> (no confirm) with TTL=5m, then SIGHUPs an updated policy that flips it to <code>confirm:true</code>, the still-valid cache entry from the original approval will satisfy a subsequent call <strong>without</strong> running the NSAlert step. Same shape: changing <code>allowed_recipients</code> doesn't invalidate cached approvals for the new list.</p>
 <p><strong>Impact:</strong> Policy reload doesn't fully take effect for in-flight cached approvals — a 5-minute window where the prior, possibly weaker, decision keeps applying. The model says reload is supposed to be "atomic" (<code>policy_test.go</code>'s <code>TestReloadAtomicOnInvalidYAML</code>); approval cache breaks that for the approval pathway.</p>
@@ -304,7 +304,7 @@ Pending Phase-6 envelope encryption.</p>
 <p><strong>Remediation:</strong> Compare against the actual page size (<code>GetEvent</code>'s documented 50). Add exponential backoff with jitter in <code>mail_sync</code>'s tool handler (5/10/20s, max 3). Detect <code>isAuthExpired</code> (<code>resume.go:152</code>) and surface "needs re-login" as the tool result.</p>
 <p class="meta"><strong>Related:</strong> C-5 (still open)</p>
 
-<h3><span class="id">D18</span>JSONL audit mirror loses tool/caller/args — only outcome+duration recorded <span class="tag open">open</span> <span class="tag medium">medium</span></h3>
+<h3><span class="id">D18</span>JSONL audit mirror loses tool/caller/args — only outcome+duration recorded <span class="tag fixed">fixed in PR 5.5/C</span> <span class="tag medium">medium</span></h3>
 <p><strong>Reported:</strong> 2026-05-22 (security re-audit) · Surface: <code>internal/audit/jsonl.go:38-67</code></p>
 <p><strong>Evidence:</strong> <code>jsonlEntry</code> is <code>{ID, CompletedAt, Outcome, ApprovalSource, ErrorMsg, DurationMS}</code> — no tool name, no caller, no redacted args. The comment at line 35-37 frames this as "for ops monitoring, not forensics" and tells operators to query SQLite for detail.</p>
 <p><strong>Impact:</strong> A JSONL tail (the user's primary live-monitoring affordance per the package doc) shows entries like <code>{"id":42,"outcome":"ok","duration_ms":18}</code> — meaningless without a separate <code>sqlite3</code> query for what tool ran or what args. In an incident, the SQLite DB might be locked / corrupted / unavailable; the JSONL mirror is the durable evidence and is intentionally information-poor.</p>

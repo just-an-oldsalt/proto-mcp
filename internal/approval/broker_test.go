@@ -211,3 +211,58 @@ func TestResolveHelperPathReturnsErrorWhenMissing(t *testing.T) {
 		t.Error("expected error when no helper exists")
 	}
 }
+
+// SECURITY D14 — broker.Invalidate drops every cached approval so
+// a policy reload that tightens rules (newly confirm:true, newly
+// restricted allowed_recipients) takes effect immediately, instead
+// of being shadowed by stale cache entries from the prior policy.
+func TestBrokerInvalidateDropsCache(t *testing.T) {
+	helper := fixtureHelper(t, 0)
+	b, err := New(helper, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := Request{
+		Tool:   "test_tool",
+		Caller: caller.Caller{PID: 1},
+		Args:   json.RawMessage(`{"to":"alice@example.com"}`),
+		Policy: policy.ToolPolicy{Decision: policy.DecisionPrompt, TTL: "5m"},
+	}
+
+	// First call runs the helper, populates cache.
+	src, err := b.Request(context.Background(), r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if src != SourceTouchID {
+		t.Fatalf("first call source = %s, want touchid", src)
+	}
+
+	// Second call is a cache hit.
+	src, _ = b.Request(context.Background(), r)
+	if src != SourceCached {
+		t.Fatalf("second call source = %s, want cached", src)
+	}
+
+	// Simulate policy reload.
+	n := b.Invalidate()
+	if n != 1 {
+		t.Errorf("Invalidate dropped %d entries, want 1", n)
+	}
+
+	// Third call (post-reload) must NOT hit the cache.
+	src, err = b.Request(context.Background(), r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if src == SourceCached {
+		t.Error("post-invalidate request hit the cache — D14 fix not working")
+	}
+}
+
+func TestBrokerInvalidateNilSafe(t *testing.T) {
+	var b *Broker
+	if got := b.Invalidate(); got != 0 {
+		t.Errorf("nil broker Invalidate = %d, want 0", got)
+	}
+}

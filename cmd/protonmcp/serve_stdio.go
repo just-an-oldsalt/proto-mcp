@@ -145,26 +145,10 @@ func runServeStdio(ctx context.Context, args []string) error {
 	}
 	defer pidCleanup()
 
-	// SIGHUP → policy reload. Installed AFTER main.go drops HUP
-	// from its NotifyContext, so the signal arrives here and only
-	// here. The handler logs success/failure but never crashes the
-	// daemon — a malformed override file keeps the previous policy
-	// in place per Engine.Reload semantics.
-	hupCh := make(chan os.Signal, 1)
-	signal.Notify(hupCh, syscall.SIGHUP)
-	defer signal.Stop(hupCh)
-	go func() {
-		for range hupCh {
-			if rerr := engine.Reload(); rerr != nil {
-				slog.Warn("policy reload failed; previous policy retained", "err", rerr.Error())
-				continue
-			}
-			slog.Info("policy reloaded")
-		}
-	}()
-
 	// Phase 4 middleware bits — audit writer + approval broker on
-	// top of the policy engine built above.
+	// top of the policy engine built above. Constructed BEFORE the
+	// SIGHUP handler so D14 (drop approval cache on reload) can
+	// reach `broker.Invalidate()` from inside the handler closure.
 	jsonlPath, err := audit.DefaultJSONLPath()
 	if err != nil {
 		return fmt.Errorf("audit path: %w", err)
@@ -194,6 +178,31 @@ func runServeStdio(ctx context.Context, args []string) error {
 	}
 
 	resolver := caller.New()
+
+	// SIGHUP → policy reload + approval cache drop. Installed AFTER
+	// main.go drops HUP from its NotifyContext, so the signal
+	// arrives here and only here. SECURITY D14: dropping the
+	// approval cache on reload means a policy that newly demands
+	// confirm:true (or newly restricts allowed_recipients) takes
+	// effect immediately — without invalidation, a still-valid
+	// pre-reload cache entry could satisfy a request that the new
+	// policy would have prompted on.
+	hupCh := make(chan os.Signal, 1)
+	signal.Notify(hupCh, syscall.SIGHUP)
+	defer signal.Stop(hupCh)
+	go func() {
+		for range hupCh {
+			if rerr := engine.Reload(); rerr != nil {
+				slog.Warn("policy reload failed; previous policy retained", "err", rerr.Error())
+				continue
+			}
+			n := 0
+			if broker != nil {
+				n = broker.Invalidate()
+			}
+			slog.Info("policy reloaded", "approvals_dropped", n)
+		}
+	}()
 
 	// Build the MCP server with the full Phase-4 middleware stack.
 	opts := []mcp.Option{
