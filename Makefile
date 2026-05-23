@@ -8,17 +8,21 @@
 BINDIR        := bin
 PROTONMCP     := $(BINDIR)/protonmcp
 PROTONMCPD    := $(BINDIR)/protonmcpd
+SHIM          := $(BINDIR)/protonmcp-shim
 TOUCHID_DIR   := helpers/touchid
 TOUCHID       := $(TOUCHID_DIR)/protonmcp-touchid
 
 .PHONY: all
-all: $(PROTONMCP) $(PROTONMCPD) $(TOUCHID)
+all: $(PROTONMCP) $(PROTONMCPD) $(SHIM) $(TOUCHID)
 
 .PHONY: protonmcp
 protonmcp: $(PROTONMCP)
 
 .PHONY: protonmcpd
 protonmcpd: $(PROTONMCPD)
+
+.PHONY: shim
+shim: $(SHIM)
 
 $(PROTONMCP): $(shell find cmd internal -name '*.go' 2>/dev/null) go.mod go.sum
 	@mkdir -p $(BINDIR)
@@ -29,6 +33,13 @@ $(PROTONMCP): $(shell find cmd internal -name '*.go' 2>/dev/null) go.mod go.sum
 $(PROTONMCPD): $(shell find cmd internal -name '*.go' 2>/dev/null) go.mod go.sum
 	@mkdir -p $(BINDIR)
 	go build -o $@ ./cmd/protonmcpd
+
+# Phase 6/B: stdio↔socket forwarder Claude clients spawn instead
+# of serve-stdio. Tiny binary, no internal/ deps; the cross-binary
+# coordination lives in the daemon.
+$(SHIM): $(shell find cmd/protonmcp-shim -name '*.go' 2>/dev/null) go.mod go.sum
+	@mkdir -p $(BINDIR)
+	go build -o $@ ./cmd/protonmcp-shim
 
 # Touch ID helper. swiftc is part of the Xcode command-line tools;
 # CI's macos-14 runner has it, dev machines need `xcode-select
@@ -49,4 +60,4 @@ race:
 
 .PHONY: clean
 clean:
-	rm -f $(PROTONMCP) $(PROTONMCPD) $(TOUCHID)
+	rm -f $(PROTONMCP) $(PROTONMCPD) $(SHIM) $(TOUCHID)
