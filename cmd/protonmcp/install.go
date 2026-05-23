@@ -55,6 +55,13 @@ func runInstall(_ context.Context, args []string) error {
 	fs := flag.NewFlagSet("install", flag.ContinueOnError)
 	dryRun := fs.Bool("dry-run", false, "print what would be written without changing the file")
 	client := fs.String("client", "all", "which Claude client to install for: desktop, code, all")
+	// Phase 6/B: default is now the shim binary (which connects to
+	// the persistent protonmcpd daemon). --transport serve-stdio
+	// keeps the v1.0.0-alpha behavior of spawning a fresh
+	// serve-stdio per Claude session for users who'd rather not
+	// run the daemon.
+	transport := fs.String("transport", "shim",
+		"MCP server invocation: shim (Claude → protonmcp-shim → daemon) or serve-stdio (Claude → fresh serve-stdio per session)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -62,13 +69,18 @@ func runInstall(_ context.Context, args []string) error {
 		return fmt.Errorf("install takes no positional arguments; got %v", fs.Args())
 	}
 
-	binPath, err := os.Executable()
+	thisBin, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("locate this binary: %w", err)
 	}
-	binPath, err = filepath.Abs(binPath)
+	thisBin, err = filepath.Abs(thisBin)
 	if err != nil {
 		return fmt.Errorf("absolute path: %w", err)
+	}
+
+	cmdPath, cmdArgs, err := transportLaunchSpec(*transport, thisBin)
+	if err != nil {
+		return err
 	}
 
 	targets, err := pickTargets(*client)
@@ -77,17 +89,46 @@ func runInstall(_ context.Context, args []string) error {
 	}
 
 	for _, t := range targets {
-		if err := installInto(t, binPath, *dryRun); err != nil {
+		if err := installInto(t, cmdPath, cmdArgs, *dryRun); err != nil {
 			return fmt.Errorf("%s: %w", t.name, err)
 		}
 	}
 	if !*dryRun {
 		fmt.Println("Restart any running Claude clients to pick up the new server.")
+		if *transport == "shim" {
+			fmt.Println("Also: make sure protonmcpd is running — `protonmcp daemon start` (Phase 6/C).")
+		}
 	}
 	return nil
 }
 
-func installInto(t clientTarget, binPath string, dryRun bool) error {
+// transportLaunchSpec returns (command, args) for the chosen
+// transport. "shim" looks up cmd/protonmcp-shim next to this
+// binary (Makefile builds them into the same bin/ directory).
+// "serve-stdio" uses this binary with the existing subcommand.
+//
+// SECURITY-relevant: the shim path comes from `filepath.Dir(thisBin)`,
+// not from PATH. A planted protonmcp-shim earlier on PATH cannot
+// hijack the install. The downside is we require the user to
+// build/install both binaries to the same location.
+func transportLaunchSpec(transport, thisBin string) (string, []string, error) {
+	switch transport {
+	case "shim":
+		shim := filepath.Join(filepath.Dir(thisBin), "protonmcp-shim")
+		if _, err := os.Stat(shim); err != nil {
+			return "", nil, fmt.Errorf(
+				"protonmcp-shim not found next to %s — run `make all` (or pass --transport serve-stdio): %w",
+				thisBin, err)
+		}
+		return shim, nil, nil
+	case "serve-stdio":
+		return thisBin, []string{"serve-stdio"}, nil
+	default:
+		return "", nil, fmt.Errorf("unknown transport %q; expected: shim, serve-stdio", transport)
+	}
+}
+
+func installInto(t clientTarget, cmdPath string, cmdArgs []string, dryRun bool) error {
 	cfgPath, err := t.path()
 	if err != nil {
 		return err
@@ -102,8 +143,8 @@ func installInto(t clientTarget, binPath string, dryRun bool) error {
 	}
 	cfg.MCPServers["protonmcp"] = mcpServerEntry{
 		Type:    "stdio",
-		Command: binPath,
-		Args:    []string{"serve-stdio"},
+		Command: cmdPath,
+		Args:    cmdArgs,
 	}
 
 	out, err := json.MarshalIndent(cfg, "", "  ")
