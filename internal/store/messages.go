@@ -278,6 +278,96 @@ func (s *Store) InvalidateBodyCache(ctx context.Context, messageID string) error
 	return nil
 }
 
+// PurgeOlderThan hard-deletes body_text / body_html / body_cached_at
+// on every row whose body_cached_at < cutoff. Returns the number of
+// rows updated.
+//
+// SECURITY D13 / C-1 mitigation. The audit's biggest residual risk
+// — three cycles open — is that decrypted message bodies live on
+// disk in cleartext until something explicitly removes them. This
+// is the explicit-removal helper: serve-stdio calls it at startup,
+// `protonmcp purge` calls it on demand.
+//
+// The FTS update trigger fires on every UPDATE, so messages_fts
+// re-indexes with the now-NULL body_text on the same statement.
+// Combined with the secure_delete=on pragma (set in store.go via
+// the DSN), the cleared cells get zeroed on the next page write
+// rather than left as recoverable slack space.
+//
+// rowsAffected is best-effort: modernc/sqlite returns it correctly
+// for our UPDATE; if a driver behind-this-interface ever didn't,
+// the count would be -1 and we'd still have purged successfully.
+func (s *Store) PurgeOlderThan(ctx context.Context, cutoff time.Time) (int64, error) {
+	res, err := s.DB.ExecContext(ctx, `
+UPDATE messages
+   SET body_text       = NULL,
+       body_html       = NULL,
+       body_cached_at  = NULL
+ WHERE body_cached_at IS NOT NULL
+   AND body_cached_at  < ?
+`, cutoff.Unix())
+	if err != nil {
+		return 0, fmt.Errorf("purge bodies: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("purge bodies rows-affected: %w", err)
+	}
+	return n, nil
+}
+
+// PurgeStats reports how many rows have cached bodies AND how many
+// would be removed by a purge with the given cutoff. Used by
+// `protonmcp purge --dry-run` and by the serve-stdio startup
+// log so the user has a sense of what got cleaned.
+type PurgeStats struct {
+	TotalCached   int64
+	WouldPurge    int64
+	OldestCached  *time.Time
+}
+
+// CountCachedBodies returns purge planning info: total rows with
+// cached bodies, how many would be purged at the given cutoff, and
+// the timestamp of the oldest cached body (or nil if none cached).
+func (s *Store) CountCachedBodies(ctx context.Context, cutoff time.Time) (PurgeStats, error) {
+	var stats PurgeStats
+	err := s.DB.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM messages WHERE body_cached_at IS NOT NULL
+`).Scan(&stats.TotalCached)
+	if err != nil {
+		return stats, fmt.Errorf("count cached bodies: %w", err)
+	}
+	err = s.DB.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM messages WHERE body_cached_at IS NOT NULL AND body_cached_at < ?
+`, cutoff.Unix()).Scan(&stats.WouldPurge)
+	if err != nil {
+		return stats, fmt.Errorf("count would-purge bodies: %w", err)
+	}
+	var oldestUnix sql.NullInt64
+	err = s.DB.QueryRowContext(ctx, `
+SELECT MIN(body_cached_at) FROM messages WHERE body_cached_at IS NOT NULL
+`).Scan(&oldestUnix)
+	if err != nil {
+		return stats, fmt.Errorf("oldest cached: %w", err)
+	}
+	if oldestUnix.Valid {
+		t := time.Unix(oldestUnix.Int64, 0).UTC()
+		stats.OldestCached = &t
+	}
+	return stats, nil
+}
+
+// DefaultBodyRetention is the at-rest TTL applied at serve-stdio
+// startup. Bodies older than this get hard-deleted from the local
+// mirror. 30 days is a sensible default: long enough that the
+// LLM's working set survives a typical idle period, short enough
+// that a stolen laptop's exposure is bounded.
+//
+// SECURITY D13 / C-1: this is the only at-rest mitigation pending
+// SQLCipher / envelope encryption (Phase 6+). Tighten by overriding
+// via `protonmcp purge --older-than 7d`.
+const DefaultBodyRetention = 30 * 24 * time.Hour
+
 // BodyTTL is how long a cached body counts as fresh. After this, the
 // row's body_* columns are treated as missing (GetCachedBody returns
 // ErrNotFound). Re-fetch will replace them. The sync loop's

@@ -101,6 +101,8 @@ func main() {
 		err = runUninstall(ctx, args)
 	case "policy":
 		err = runPolicy(ctx, args)
+	case "purge":
+		err = runPurge(ctx, args)
 	case "help", "-h", "--help":
 		usage()
 		return
@@ -156,6 +158,11 @@ Commands:
                     --dry-run (print what would be written).
   uninstall  Remove protonmcp from the selected client config(s).
              Flags: --client {desktop|code|all}  (default: all).
+  purge      Hard-delete cached message bodies older than a TTL.
+             SECURITY D13 — the at-rest plaintext mitigation
+             pending Phase-6 envelope encryption.
+             Flags: --older-than {30d|7d|24h|...} (default 30d),
+                    --dry-run, --vacuum, --db <path>.
   policy     Inspect or hot-reload the policy engine.
              Subcommands:
                reload                  Send SIGHUP to a running serve-stdio
