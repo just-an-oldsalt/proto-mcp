@@ -1415,6 +1415,37 @@ LocalAuthentication / AuthenticationServices.</p>
 
 <h2>Backlog (post-1.0)</h2>
 <ul>
+  <li><span class="check">[ ]</span> <strong>Touch ID prompt readability</strong>
+    (filed as D36). Today's prompt for a typical write reads:
+    <em>"protonmcp-touchid is trying to mail_move was requested by an
+    MCP client with args: {&quot;destination&quot;:&quot;[REDACTED-VALUE]&quot;,
+    &quot;message_id&quot;:&quot;[REDACTED-VALUE]&quot;}."</em> — gibberish, and
+    the args the user needs to verify are wrongly redacted.
+    <ul>
+      <li>macOS prepends <em>"protonmcp-touchid is trying to "</em>
+        before our <code>localizedReason</code>; our reason must start
+        with a verb phrase so it concatenates to a real sentence.</li>
+      <li><code>looksLikeToken</code> redacts long base64-ish strings
+        in <code>redact.JSON</code> — correct for credentials, but
+        Proton's <code>message_id</code> / <code>label_id</code> values
+        look identical to tokens despite being opaque identifiers,
+        not secrets. The redactor needs an identifier carve-out, OR
+        the per-tool PromptBody should bypass the redacted-args dump
+        entirely.</li>
+      <li>Fix shape: every prompted tool gets a per-tool
+        <code>PromptBody</code> closure that builds a human sentence
+        from the args + a Store lookup. Example for mail_move:
+        <em>"Move 'Re: gear list' (from Alice) to Archive"</em> — that
+        means PromptBody needs access to <code>Deps</code> so it can
+        resolve <code>message_id → Subject</code> and
+        <code>destination → label name</code>. mail_send already does
+        this pattern (Phase 5/D); extend it to the rest of the
+        prompted family (mail_move, mail_label, mail_trash,
+        mail_draft_delete, labels_create/update/delete, folders_*).
+        ~200 LOC. Slot before Phase 7 packaging — UX is more visible
+        than signing.</li>
+    </ul>
+  </li>
   <li><span class="check">[ ]</span> <strong>Contacts tools</strong>. <code>go-proton-api</code>
     already exposes full CRUD: <code>GetContact</code>, <code>GetContacts</code>,
     <code>GetAllContacts</code>, <code>CreateContacts</code>,
