@@ -53,19 +53,61 @@ notarize` targets from then on.
 
 ## Day-to-day flow
 
-Build → sign → notarize → staple:
+Build → sign → verify → notarize → confirm:
 
 ```sh
-make all                # build all 4 binaries unsigned
-make sign               # codesign each with hardened runtime + entitlements
-make verify-sign        # spctl --assess + codesign --verify each
-make notarize           # zip → notarytool submit --wait → staple ticket
+export DEVELOPER_ID='Developer ID Application: <NAME> (<TEAMID>)'
+make all                 # build all 4 binaries unsigned
+make sign                # codesign each with hardened runtime + entitlements
+make verify-sign         # codesign --verify (signature validity)
+make notarize            # zip → notarytool submit --wait
+make verify-notarized    # codesign --test-requirement "=notarized"
 ```
 
-If everything passes, the binaries in `bin/` are now ready to
-distribute. The next step is bundling them into a release artifact
-(Phase 7/E) — but for personal-use distribution you can already
-hand someone the zip and they won't see Gatekeeper warnings.
+If `verify-notarized` reports "All binaries satisfy the =notarized
+requirement," Apple's database has accepted them and Gatekeeper
+will run them on first launch without the developer-unknown
+dialog.
+
+## A note about stapling (Error 73)
+
+The Makefile's `notarize` target intentionally does NOT call
+`xcrun stapler staple`. Stapling fails with error 73 on bare
+Mach-O CLI binaries:
+
+> The signed item cannot be stapled. Notarization tickets cannot
+> be attached to individual signed binaries — only to `.app` /
+> `.pkg` / `.dmg` containers.
+
+This is a documented macOS limitation, not a bug in our setup. For
+bare CLI tools, Gatekeeper performs an online ticket lookup against
+Apple's database at first launch and caches the result. Notarization
+still works; the ticket just isn't physically attached.
+
+Phase 7/E wraps the binaries in a `.pkg` (or `.dmg`) for Homebrew
+distribution, and THAT container CAN be stapled. End users then get
+offline-checkable tickets.
+
+To verify a binary is notarized without launching it:
+
+```sh
+codesign --test-requirement="=notarized" --verify --verbose <binary>
+```
+
+A successful line reads `explicit requirement satisfied`. That's
+the truthful "Apple has notarized this" answer.
+
+## Why `spctl --assess --type execute` rejects CLI binaries
+
+`spctl --assess --type execute` is the Gatekeeper assessment tool,
+but the `execute` type specifically certifies `.app` bundles. Bare
+CLI binaries trip a different rule and get rejected with "the code
+is valid but does not seem to be an app" — even when notarized.
+
+This is why the Makefile uses `codesign --test-requirement` instead
+for `verify-notarized`. When Phase 7/E ships an actual `.app`
+bundle or `.pkg`, `spctl --assess` becomes the right tool for that
+container.
 
 ## What gets signed
 

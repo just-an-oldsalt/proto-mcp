@@ -124,10 +124,14 @@ verify-sign:
 	echo "All binaries pass codesign --verify (signature shape valid)."; \
 	echo "Run 'make verify-notarized' AFTER 'make notarize' to confirm Gatekeeper acceptance."
 
-# Post-notarization Gatekeeper check. Uses codesign --test-requirement
+# Post-notarization check. Uses codesign --test-requirement
 # "=notarized" — the correct query for CLI binaries (spctl --assess
 # --type execute is for .app bundles and rejects bare Mach-O as
 # "not an app" even when notarized).
+#
+# A "passes" result means Apple's notary database has the binary on
+# its accept list. Gatekeeper looks this up online at first launch
+# and lets the binary run without a developer-unknown warning.
 .PHONY: verify-notarized
 verify-notarized:
 	@fail=0; \
