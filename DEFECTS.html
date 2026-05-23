@@ -162,9 +162,9 @@
 
 <h2>Status at a glance</h2>
 <div class="stats">
-  <div class="stat"><div class="stat-num">8</div><div class="stat-label">Open defects</div></div>
+  <div class="stat"><div class="stat-num">7</div><div class="stat-label">Open defects</div></div>
   <div class="stat"><div class="stat-num">0</div><div class="stat-label">Investigating</div></div>
-  <div class="stat"><div class="stat-num">26</div><div class="stat-label">Resolved</div></div>
+  <div class="stat"><div class="stat-num">28</div><div class="stat-label">Resolved</div></div>
   <div class="stat"><div class="stat-num">0</div><div class="stat-label"><span class="tag critical">critical</span></div></div>
   <div class="stat"><div class="stat-num">1</div><div class="stat-label"><span class="tag high">high</span></div></div>
   <div class="stat"><div class="stat-num">4</div><div class="stat-label"><span class="tag medium">medium</span></div></div>
@@ -195,7 +195,7 @@
 <p><strong>Remediation:</strong> Build the DSN via <code>url.URL{Scheme: "file", Opaque: path, RawQuery: v.Encode()}.String()</code> or <code>url.PathEscape(path)</code>. Reject paths containing <code>?</code> outright. Test added in <code>store_test.go</code>.</p>
 <p class="meta"><strong>Related:</strong> B-6 (still open after three cycles)</p>
 
-<h3><span class="id">D20</span><code>caller.Resolver</code> records daemon's own UID, not spawner's — audit field misleading <span class="tag open">open</span> <span class="tag medium">medium</span></h3>
+<h3><span class="id">D20</span><code>caller.Resolver</code> records daemon's own UID, not spawner's — audit field misleading <span class="tag fixed">fixed in PR 6/D</span> <span class="tag medium">medium</span></h3>
 <p><strong>Reported:</strong> 2026-05-22 (security re-audit) · Surface: <code>internal/caller/caller.go:55-63</code></p>
 <p><strong>Evidence:</strong> <code>Resolve()</code> sets <code>Caller.UID = os.Getuid()</code> — that's the daemon's own UID, not the parent's. Comment at the top of the file claims this is acceptable because "our parent PID can't legitimately change after startup" — correct for <em>PID</em> but the <em>UID field</em> documents the wrong fact entirely.</p>
 <p><strong>Impact:</strong> Audit log's <code>caller_uid</code> column is uninformative (always equal to the daemon's UID). In Phase 6 (Unix socket multi-client), this becomes actively wrong — the peer over <code>SO_PEERCRED</code> may have a different UID and we'd record our own anyway. Defense-in-depth: a per-call UID-mismatch check makes no sense with this field. Today's MCP stdio model trusts the spawner; the audit field should still record the spawner's UID, not ours.</p>
@@ -259,6 +259,27 @@
 <p class="meta"><em>None.</em></p>
 
 <h2>Resolved</h2>
+
+<h3><span class="id">D35</span>Policy stubs missing for <code>mail_draft_list</code> + <code>mail_send_draft</code> → fall through to default-deny <span class="tag fixed">fixed in docs/cleanup PR</span> <span class="tag medium">medium</span></h3>
+<p><strong>Reported:</strong> 2026-05-23 from live read-only sweep test ·
+<strong>Fixed:</strong> docs-refresh PR · Surface:
+<code>internal/policy/default.yaml</code></p>
+<p><strong>Evidence:</strong> A direct call to <code>mail_draft_list</code>
+returned <code>denied by policy</code>, but the equivalent
+<code>mail_list folder=&quot;drafts&quot;</code> happily returned the same draft
+envelopes. Same root cause for <code>mail_send_draft</code>. Both tools
+shipped in Phase 5/C / 5/D but their <code>default.yaml</code> stubs
+were forgotten — so the engine fell through to
+<code>defaults.decision: deny</code> (Foundational #4), making the tool
+unreachable by default while a sibling path remained allow.</p>
+<p><strong>Fix:</strong> Added explicit entries:
+<code>mail_draft_list</code> = allow (envelope listing only, same shape
+as <code>mail_list folder=drafts</code>);
+<code>mail_send_draft</code> = prompt + confirm:true + ttl:0 +
+allowed_recipients (mirrors the rest of the send family). Plus a
+regression-guard test <code>TestEveryToolHasNonDenyPolicyDefault</code>
+that fails CI if any future tool registers without a corresponding
+non-deny stub.</p>
 
 <h3><span class="id">D34</span><code>pgrep -f</code> match count includes editors / greps / wrappers <span class="tag fixed">fixed in 1.0-alpha PR</span> <span class="tag low">low</span></h3>
 <p><strong>Reported:</strong> 2026-05-22 from live test · <strong>Fixed:</strong> 1.0-alpha PR</p>

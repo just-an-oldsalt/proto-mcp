@@ -1,11 +1,14 @@
 package mcptools
 
 import (
+	"context"
 	"encoding/json"
 	"regexp"
 	"testing"
 
+	"github.com/just-an-oldsalt/proto-mcp/internal/caller"
 	"github.com/just-an-oldsalt/proto-mcp/internal/mcp"
+	"github.com/just-an-oldsalt/proto-mcp/internal/policy"
 	"github.com/just-an-oldsalt/proto-mcp/internal/store"
 )
 
@@ -169,5 +172,39 @@ func TestCursorRoundTrip(t *testing.T) {
 	// Empty cursor → success, offset 0.
 	if off, ok := decodeCursor("", hash); !ok || off != 0 {
 		t.Errorf("empty cursor = (%d, %v), want (0, true)", off, ok)
+	}
+}
+
+// TestEveryToolHasNonDenyPolicyDefault — D35 regression guard.
+// Every tool registered via All() MUST have a non-deny entry in
+// internal/policy/default.yaml. If a tool is missing from
+// default.yaml it falls through to defaults.decision=deny, which
+// makes the tool unreachable by default — even though sibling tools
+// that hit the same underlying data may be allow.
+//
+// History: mail_draft_list was missing from the stubs and got
+// denied while mail_list folder=drafts worked. The cleaner solution
+// was to land the entry; the test exists so the next forgotten
+// stub fails CI instead of a confused user-report.
+func TestEveryToolHasNonDenyPolicyDefault(t *testing.T) {
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	eng, err := policy.New(context.Background(), "", nil)
+	if err != nil {
+		t.Fatalf("policy.New: %v", err)
+	}
+
+	for _, tl := range All(Deps{Store: st}) {
+		decision, _ := eng.Decide(tl.Name, nil, caller.Caller{})
+		if decision == policy.DecisionDeny {
+			t.Errorf("tool %q resolves to DecisionDeny — missing from "+
+				"internal/policy/default.yaml stubs. Add an entry there "+
+				"with decision: allow (read-only/reversible) or "+
+				"decision: prompt (write).", tl.Name)
+		}
 	}
 }
