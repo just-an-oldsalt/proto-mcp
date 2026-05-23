@@ -2,6 +2,7 @@ package mcptools
 
 import (
 	"encoding/json"
+	"log/slog"
 
 	"github.com/just-an-oldsalt/proto-mcp/internal/mcp"
 	"github.com/just-an-oldsalt/proto-mcp/internal/store"
@@ -87,12 +88,22 @@ func mailReadThread(deps Deps) mcp.Tool {
 				}
 				rr, rerr := readOne(ctx, deps, h.MessageID, format, false)
 				if rerr != nil {
-					// One bad message shouldn't kill the whole thread.
-					// Include a placeholder with isError-ish text.
+					// SECURITY D29: log the raw error to stderr, but
+					// return a generic placeholder to the LLM. The
+					// raw gopenpgp error chain can include cipher
+					// algorithm names / key IDs / partial cleartext
+					// hex that gives an attacker who can observe
+					// tool responses more information than they
+					// should have. One bad message shouldn't kill
+					// the whole thread; one bad message also
+					// shouldn't leak decrypt internals into the
+					// LLM's context.
+					slog.Warn("mail_read_thread: per-message decrypt failed (placeholder returned)",
+						"message_id", h.MessageID, "err", rerr.Error())
 					out.Messages = append(out.Messages, readResult{
 						MessageID: h.MessageID,
 						Subject:   h.Subject,
-						Text:      "(failed to decrypt: " + rerr.Error() + ")",
+						Text:      "(this message could not be decrypted or loaded; skipped)",
 					})
 					continue
 				}

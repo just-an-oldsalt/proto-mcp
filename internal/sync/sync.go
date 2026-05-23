@@ -89,7 +89,7 @@ func RunOnce(ctx context.Context, sess *protonclient.Session, st *store.Store) (
 		if err := ctx.Err(); err != nil {
 			return res, err
 		}
-		events, _, err := sess.Client.GetEvent(ctx, cursor)
+		events, more, err := sess.Client.GetEvent(ctx, cursor)
 		if err != nil {
 			return res, fmt.Errorf("get event %s: %w", cursor, err)
 		}
@@ -110,10 +110,14 @@ func RunOnce(ctx context.Context, sess *protonclient.Session, st *store.Store) (
 				return res, fmt.Errorf("persist cursor: %w", err)
 			}
 		}
-		// GetEvent already chunked up to its internal limit (50 by
-		// default). If we got fewer than that, the server is caught
-		// up; stop polling so we don't spin.
-		if len(events) < 2 {
+		// SECURITY D17 / C-5: respect the SDK's `more` bool rather
+		// than guessing via len(events). The previous heuristic
+		// `len(events) < 2` exited after legitimate 1-event pages,
+		// leaving the next-cursor-state-vs-server-state question
+		// implicit. `more == true` means the server has at least
+		// one more event past this batch; keep polling. `more ==
+		// false` means we're caught up; stop.
+		if !more {
 			break
 		}
 	}

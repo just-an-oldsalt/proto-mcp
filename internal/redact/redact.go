@@ -23,6 +23,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"log/slog"
+	"regexp"
 	"strings"
 )
 
@@ -104,8 +105,21 @@ func Attr(a slog.Attr) slog.Attr {
 		sha, n := Body(a.Value.String())
 		return slog.String(a.Key, formatBody(sha, n))
 	}
-	if a.Value.Kind() == slog.KindString && looksLikeToken(a.Value.String()) {
-		return slog.String(a.Key, "[REDACTED-VALUE]")
+	if a.Value.Kind() == slog.KindString {
+		s := a.Value.String()
+		if looksLikeToken(s) {
+			return slog.String(a.Key, "[REDACTED-VALUE]")
+		}
+		// SECURITY D19: looksLikeToken intentionally rejects strings
+		// with spaces / quotes / brackets / colons (phrase-shaped,
+		// not token-shaped). That leaves a real gap: library errors
+		// embed quoted JSON snippets ("unknown auth response:
+		// {\"refreshToken\":\"eyJ…\"}") that slip through. The
+		// substring redactor below catches embedded JWTs and long
+		// base64url runs without changing the surrounding text.
+		if scrubbed := scrubEmbeddedTokens(s); scrubbed != s {
+			return slog.String(a.Key, scrubbed)
+		}
 	}
 	return a
 }
@@ -150,6 +164,40 @@ func Body(text string) (sha256hex string, byteLen int) {
 // heuristic. Same threshold as the inline version in old logging.go:
 // ≥32 chars, all base64url + optional dots, no whitespace/slashes.
 func LooksLikeToken(s string) bool { return looksLikeToken(s) }
+
+// scrubEmbeddedTokens scrubs tokens that appear INSIDE a larger
+// string — typically a wrapped error message or a quoted JSON
+// snippet. Two patterns:
+//
+//  1. JWT-shaped: three base64url runs of ≥8 chars joined by dots.
+//  2. Long base64url runs of ≥40 chars (covers Proton's refresh
+//     tokens, access tokens, UIDs, salted-key-pass etc.).
+//
+// Returns the input unchanged if neither matches. Caller can use
+// `scrubbed != original` to detect whether redaction happened.
+//
+// SECURITY D19 — closes the looksLikeToken gap for prose contexts.
+// Pair with M-4 (sentinel errors instead of %w-ing library
+// strings) for the architectural fix; this is the defense in
+// depth.
+func scrubEmbeddedTokens(s string) string {
+	s = jwtTokenRE.ReplaceAllString(s, "[REDACTED-JWT]")
+	s = longBase64RE.ReplaceAllStringFunc(s, func(m string) string {
+		// Don't over-redact short alphanumeric runs that happen to
+		// be 40+ chars but aren't tokens (file paths missing
+		// slashes, hex hashes already-public, etc.). The
+		// constraint is "base64url charset + length ≥ 40" which
+		// is the regex's job; this hook is a future seam for
+		// allowlist tightening.
+		return "[REDACTED-TOKEN]"
+	})
+	return s
+}
+
+var (
+	jwtTokenRE   = regexp.MustCompile(`\b[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b`)
+	longBase64RE = regexp.MustCompile(`\b[A-Za-z0-9_+/=-]{40,}\b`)
+)
 
 func looksLikeToken(s string) bool {
 	if len(s) < 32 {

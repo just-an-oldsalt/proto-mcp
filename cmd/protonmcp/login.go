@@ -65,6 +65,12 @@ func runLogout(ctx context.Context, _ []string) error {
 	if loadErr != nil && !errors.Is(loadErr, keystore.ErrNotFound) {
 		slog.Warn("couldn't load stored session for server-side revoke", "err", loadErr.Error())
 	}
+	// SECURITY D10 / B-3: zero salted material on return regardless
+	// of whether we proceed to Resume — heap-resident keys for a
+	// logout call are exactly the kind of leak the defense exists for.
+	if loadErr == nil {
+		defer stored.Zero()
+	}
 
 	if loadErr == nil {
 		jar := protonclient.NewCookieJar()

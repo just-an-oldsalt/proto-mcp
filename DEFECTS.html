@@ -162,13 +162,13 @@
 
 <h2>Status at a glance</h2>
 <div class="stats">
-  <div class="stat"><div class="stat-num">15</div><div class="stat-label">Open defects</div></div>
+  <div class="stat"><div class="stat-num">7</div><div class="stat-label">Open defects</div></div>
   <div class="stat"><div class="stat-num">0</div><div class="stat-label">Investigating</div></div>
-  <div class="stat"><div class="stat-num">16</div><div class="stat-label">Resolved</div></div>
+  <div class="stat"><div class="stat-num">24</div><div class="stat-label">Resolved</div></div>
   <div class="stat"><div class="stat-num">0</div><div class="stat-label"><span class="tag critical">critical</span></div></div>
-  <div class="stat"><div class="stat-num">3</div><div class="stat-label"><span class="tag high">high</span></div></div>
-  <div class="stat"><div class="stat-num">13</div><div class="stat-label"><span class="tag medium">medium</span></div></div>
-  <div class="stat"><div class="stat-num">7</div><div class="stat-label"><span class="tag low">low</span></div></div>
+  <div class="stat"><div class="stat-num">2</div><div class="stat-label"><span class="tag high">high</span></div></div>
+  <div class="stat"><div class="stat-num">5</div><div class="stat-label"><span class="tag medium">medium</span></div></div>
+  <div class="stat"><div class="stat-num">3</div><div class="stat-label"><span class="tag low">low</span></div></div>
 </div>
 
 <h2>Open</h2>
@@ -235,7 +235,7 @@ messages backfill still proceeds and a stderr warning surfaces.</p>
 <p><strong>Remediation:</strong> Before signaling, read <code>/proc</code>-equivalent (libproc <code>proc_pidpath</code> is already wrapped in <code>internal/caller/caller_darwin.go</code>) for the target PID; verify the path matches <code>os.Executable()</code> of the protonmcp CLI. Also verify the file is owned by <code>os.Geteuid()</code>. The advisory <code>flock</code> on the file at write time doesn't protect a read-side reader at all.</p>
 <p class="meta"><strong>Related:</strong> new (Phase 4/A) · <strong>Needs verification:</strong> <code>kill(2)</code> requires sender UID == target UID for non-zero signals — bounded to same-user processes, not a privilege escalation.</p>
 
-<h3><span class="id">D10</span><code>tryResume</code> and <code>runLogout</code> never <code>stored.Zero()</code> — salted key material leaks to GC <span class="tag open">open</span> <span class="tag high">high</span></h3>
+<h3><span class="id">D10</span><code>tryResume</code> and <code>runLogout</code> never <code>stored.Zero()</code> — salted key material leaks to GC <span class="tag fixed">fixed in PR 5.5/D</span> <span class="tag high">high</span></h3>
 <p><strong>Reported:</strong> 2026-05-22 (security re-audit) · Surface: <code>cmd/protonmcp/session.go:109-147</code>, <code>cmd/protonmcp/login.go:64-79</code></p>
 <p><strong>Evidence:</strong> Re-audit #2's B-3 partial. <code>inspect.go:44</code> correctly <code>defer stored.Zero()</code>s. The hot paths — <code>tryResume</code> (called by every <code>whoami</code>/<code>backfill</code>/<code>sync</code>/<code>read</code>/<code>search</code>) and <code>runLogout</code> — still don't. Pattern <code>stored, err := keystore.Load()</code> followed by no zero. <code>SaltedKeyPass</code> is ultimately copied into the <code>Session</code> via <code>Resume</code>, but the local <code>Live</code> struct's <code>SaltedKeyPass</code> Secret holds its own slice header that points to bytes the keystore decoded — those bytes stay live until GC.</p>
 <p><strong>Impact:</strong> Heap-resident PGP-key-deriving salted material for the full lifetime of the process for every short-lived CLI run. A coredump / memory-image attack recovers it. The mitigation exists in <code>inspect.go</code> and is exactly two lines per call site.</p>
@@ -283,21 +283,21 @@ Pending Phase-6 envelope encryption.</p>
 <p><strong>Remediation:</strong> Include <code>confirm</code> and a hash of <code>AllowedRecipients</code> in the cache key. Or, simpler: drop the entire approval cache on <code>engine.Reload()</code> — call from <code>serve_stdio.go</code>'s HUP handler.</p>
 <p class="meta"><strong>Related:</strong> new (Phase 4/C)</p>
 
-<h3><span class="id">D15</span>Approval <code>subCtx.Err()</code> uses <code>==</code> — misses wrapped deadline errors <span class="tag open">open</span> <span class="tag medium">medium</span></h3>
+<h3><span class="id">D15</span>Approval <code>subCtx.Err()</code> uses <code>==</code> — misses wrapped deadline errors <span class="tag fixed">fixed in PR 5.5/D</span> <span class="tag medium">medium</span></h3>
 <p><strong>Reported:</strong> 2026-05-22 (security re-audit) · Surface: <code>internal/approval/broker.go:170-176</code></p>
 <p><strong>Evidence:</strong> <code>if subCtx.Err() == context.DeadlineExceeded { ... return ErrUserCanceled }</code>. Go's <code>context.WithTimeout</code> returns the deadline error directly (so <code>==</code> works today), but any wrapping (via a future custom Context, or a child layer) breaks this. Idiomatic Go uses <code>errors.Is(subCtx.Err(), context.DeadlineExceeded)</code>.</p>
 <p><strong>Impact:</strong> A forgotten Touch ID prompt times out → broker returns <code>ErrAuthFailed</code> instead of <code>ErrUserCanceled</code>. The middleware then writes <code>outcome=denied</code> with the wrong <code>error_msg</code>, and the user-facing ToolResult says "biometric authentication failed" rather than "user canceled." Minor today (the <code>==</code> path works), real once context plumbing grows.</p>
 <p><strong>Remediation:</strong> <code>errors.Is(subCtx.Err(), context.DeadlineExceeded)</code>.</p>
 <p class="meta"><strong>Related:</strong> new</p>
 
-<h3><span class="id">D16</span><code>keystore.Save</code> doesn't refuse empty <code>SaltedKeyPass</code> — race writes corrupt blob <span class="tag open">open</span> <span class="tag medium">medium</span></h3>
+<h3><span class="id">D16</span><code>keystore.Save</code> doesn't refuse empty <code>SaltedKeyPass</code> — race writes corrupt blob <span class="tag fixed">fixed in PR 5.5/D</span> <span class="tag medium">medium</span></h3>
 <p><strong>Reported:</strong> 2026-05-22 (security re-audit) · Surface: <code>internal/keystore/keystore.go:104-106</code>, <code>cmd/protonmcp/session.go:170-184</code></p>
 <p><strong>Evidence:</strong> Re-audit #1's B-14 unchanged. <code>Save</code> guards only <code>Email</code>/<code>UID</code>/<code>RefreshToken</code>. The <code>wireKeystoreSync</code> callback re-Saves with <code>b.Session.SaltedKeyPass</code> on every token rotation. <code>releaseLocal</code> (<code>client.go:294-304</code>) zeroes <code>SaltedKeyPass</code> on <code>Session.Close</code>. If <code>Close</code> and <code>OnAuthUpdate</code> race (long-running sync getting torn down mid-rotation), <code>Save</code> writes a blob whose <code>salted_key_pass</code> is <code>nil</code>. Next <code>Resume</code> fails at <code>resume.go:73</code> "re-login required."</p>
 <p><strong>Impact:</strong> In narrow race scenarios (which Phase 6 daemon work will widen), Keychain blob silently corrupts → user gets an unexpected re-login prompt with no diagnostic clue. Not a confidentiality breach but a reliability/UX hole that masks a real bug.</p>
 <p><strong>Remediation:</strong> <code>if len(l.SaltedKeyPass.Bytes()) == 0 { return errors.New("keystore: refusing to save empty SaltedKeyPass") }</code> in <code>Save</code>. Pair with C-4's <code>OnAuthUpdate</code> guard.</p>
 <p class="meta"><strong>Related:</strong> B-14 (still open), C-4 (still open)</p>
 
-<h3><span class="id">D17</span>Sync loop off-by-one paging + no auth/network backoff <span class="tag open">open</span> <span class="tag medium">medium</span></h3>
+<h3><span class="id">D17</span>Sync loop off-by-one paging + no auth/network backoff <span class="tag fixed">fixed in PR 5.5/D</span> <span class="tag medium">medium</span></h3>
 <p><strong>Reported:</strong> 2026-05-22 (security re-audit) · Surface: <code>internal/sync/sync.go:88-119</code></p>
 <p><strong>Evidence:</strong> Re-audit #2's C-5 unchanged. Line 116 <code>if len(events) &lt; 2 { break }</code> — a legitimate single-event page exits the loop with the cursor advanced inside the inner loop, hiding the gap on the next <code>RunOnce</code>. Line 92-94: <code>GetEvent</code> errors return immediately. No exponential backoff, no <code>isAuthExpired</code> detection, no max-retry. <code>mail_sync</code> is an LLM-callable tool, so a network blip during conversation gives the model an immediately-actionable error it might loop on.</p>
 <p><strong>Impact:</strong> Events can be silently lost (one-page-at-a-time gaps). Phase 4 audit-deletion entries propagated via events would be the most consequential loss. Repeated <code>mail_sync</code> calls during outage hit Proton anti-abuse — Foundational #6 (login rate limit) doesn't cover this.</p>
@@ -311,7 +311,7 @@ Pending Phase-6 envelope encryption.</p>
 <p><strong>Remediation:</strong> Include <code>tool</code>, <code>caller_binary</code>, <code>caller_pid</code>, and <code>policy_decision</code> in <code>jsonlEntry</code>. Optionally include the redacted <code>args_json</code> (the redactor already produced it). Same line length budget for <code>tail -f</code>.</p>
 <p class="meta"><strong>Related:</strong> new (Phase 4/B)</p>
 
-<h3><span class="id">D19</span><code>looksLikeToken</code> heuristic misses URL-encoded / quoted-context tokens <span class="tag open">open</span> <span class="tag medium">medium</span></h3>
+<h3><span class="id">D19</span><code>looksLikeToken</code> heuristic misses URL-encoded / quoted-context tokens <span class="tag fixed">fixed in PR 5.5/D</span> <span class="tag medium">medium</span></h3>
 <p><strong>Reported:</strong> 2026-05-22 (security re-audit) · Surface: <code>internal/redact/redact.go:154-171</code></p>
 <p><strong>Evidence:</strong> The heuristic immediately returns <code>false</code> for any string containing space, <code>/</code>, <code>:</code>, <code>"</code>, <code>'</code>, <code>&lt;</code>, <code>&gt;</code>, <code>\n</code>, <code>\t</code>. That's intentional ("phrase-shaped, not token-shaped") but means <code>"refresh_token=eyJhbGciOi…"</code> (embedded <code>=</code>, OK), <code>"Bearer eyJhbG…"</code> (space → not redacted), <code>"&lt;token&gt;eyJhbG…&lt;/token&gt;"</code> (angle brackets → not redacted), <code>"prefix: eyJhbG…"</code> (colon → not redacted) all pass through. A library error like <code>unknown auth response: {"refreshToken":"eyJhbG…"}</code> passes through completely.</p>
 <p><strong>Impact:</strong> Error messages from <code>go-proton-api</code> that quote response bodies into their <code>Error()</code> string can leak tokens to slog despite the value heuristic. Combined with <code>slog.Warn("…", "err", err.Error())</code> pattern (multiple call sites: <code>session.go:78,99,142,181</code>, <code>login.go:66</code>, etc.), this is a real leak vector the way M-4 was originally framed.</p>
@@ -353,7 +353,7 @@ Pending Phase-6 envelope encryption.</p>
 <p><strong>Remediation:</strong> Short-term, document loudly that <code>claude_desktop_config.json</code> paths must point at signed binaries (chicken-and-egg with Phase 7). Medium-term, on every serve-stdio startup, log the SHA-256 of the running binary and require a <code>~/Library/Application Support/protonmcp/expected_sha</code> file match to proceed.</p>
 <p class="meta"><strong>Related:</strong> new (Phase 6/7-adjacent)</p>
 
-<h3><span class="id">D25</span><code>TTLDuration</code> silently returns 0 on parse failure <span class="tag open">open</span> <span class="tag low">low</span></h3>
+<h3><span class="id">D25</span><code>TTLDuration</code> silently returns 0 on parse failure <span class="tag fixed">fixed in PR 5.5/D</span> <span class="tag low">low</span></h3>
 <p><strong>Reported:</strong> 2026-05-22 (security re-audit) · Surface: <code>internal/policy/policy.go:75-81</code></p>
 <p><strong>Evidence:</strong> <code>if p.TTL == "" || p.TTL == "0" { return 0 }; d, _ := time.ParseDuration(p.TTL); return d</code>. The error is discarded. <code>parseDocument</code> (line 266-270) validates TTL at load time — good — but <code>Decide</code> returns <code>*ToolPolicy</code> and consumers call <code>.TTLDuration()</code>. If anything ever bypasses the validator (test fixture, direct construction, in-memory mutation), a bad TTL silently becomes 0 = always reprompt.</p>
 <p><strong>Impact:</strong> Minor today. The redundant default produces safe behavior (reprompt is the safe direction), so this is a hygiene issue not a vulnerability.</p>
@@ -367,7 +367,7 @@ Pending Phase-6 envelope encryption.</p>
 <p><strong>Remediation:</strong> Bind as <code>[]byte</code> for clarity and to avoid an unnecessary copy: <code>string(e.ArgsJSON)</code> → just pass <code>[]byte(e.ArgsJSON)</code>. modernc/sqlite handles it identically.</p>
 <p class="meta"><strong>Related:</strong> new</p>
 
-<h3><span class="id">D27</span>CODEOWNERS still missing (B-5 second half) <span class="tag open">open</span> <span class="tag low">low</span></h3>
+<h3><span class="id">D27</span>CODEOWNERS still missing (B-5 second half) <span class="tag fixed">fixed in PR 5.5/D</span> <span class="tag low">low</span></h3>
 <p><strong>Reported:</strong> 2026-05-22 (security re-audit) · Surface: <code>.github/</code> (no CODEOWNERS file exists)</p>
 <p><strong>Evidence:</strong> Re-audit #2 flagged this as PARTIAL fix. The govulncheck-weekly job moved to <code>macos-14</code> (good), but the CODEOWNERS file was never added. Dependabot auto-merge can still land changes to <code>internal/keystore</code>, <code>internal/proton</code>, <code>internal/approval</code>, <code>internal/policy</code> with no reviewer.</p>
 <p><strong>Impact:</strong> A supply-chain compromise that finds a typosquat against any non-Proton dep could PR a change to a security-impacting path, get auto-merged on a quiet Monday.</p>
@@ -381,7 +381,7 @@ Pending Phase-6 envelope encryption.</p>
 <p><strong>Remediation:</strong> Change <code>SearchMessages</code> to use <code>LIMIT ?</code> binding for consistency, even though <code>int</code> is safe. Or delete <code>SearchMessages</code> if <code>Search</code> has subsumed its use cases.</p>
 <p class="meta"><strong>Related:</strong> C-8 (FIXED partially — one path remains inconsistent)</p>
 
-<h3><span class="id">D29</span><code>mail_read_thread</code> returns raw decryption error in message body <span class="tag open">open</span> <span class="tag low">low</span></h3>
+<h3><span class="id">D29</span><code>mail_read_thread</code> returns raw decryption error in message body <span class="tag fixed">fixed in PR 5.5/D</span> <span class="tag low">low</span></h3>
 <p><strong>Reported:</strong> 2026-05-22 (security re-audit) · Surface: <code>internal/mcptools/mail_read_thread.go:89-96</code></p>
 <p><strong>Evidence:</strong> <code>out.Messages = append(out.Messages, readResult{ ..., Text: "(failed to decrypt: " + rerr.Error() + ")"})</code>. <code>rerr</code> can wrap a gopenpgp error — those have historically embedded key fingerprints and ciphertext snippets (the M-4 concern). Returned as MCP <code>Text</code> content, persisted in the LLM transcript, possibly persisted in the audit <code>error_msg</code> if the whole tool fails.</p>
 <p><strong>Impact:</strong> A low-probability info-leak; the strings gopenpgp produces are mostly opaque, but the precedent of "raw library error into LLM context" is exactly what M-4's sentinel-error plan was meant to prevent.</p>

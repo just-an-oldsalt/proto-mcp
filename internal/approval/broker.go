@@ -181,7 +181,10 @@ func (b *Broker) runHelper(ctx context.Context, r Request) (string, error) {
 	}
 
 	// Context timeout / non-exit error.
-	if subCtx.Err() == context.DeadlineExceeded {
+	// SECURITY D15: errors.Is(), not ==, so a future wrapper around
+	// the context error doesn't quietly misclassify a Touch ID
+	// timeout as ErrAuthFailed.
+	if errors.Is(subCtx.Err(), context.DeadlineExceeded) {
 		b.logger.Warn("approval helper timed out",
 			"tool", r.Tool, "timeout", b.helperTimeout)
 		return "", mcperrors.ErrUserCanceled

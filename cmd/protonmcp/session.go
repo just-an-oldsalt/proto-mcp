@@ -111,6 +111,10 @@ func tryResume(ctx context.Context) (*sessionBundle, error) {
 	if err != nil {
 		return nil, err
 	}
+	// SECURITY D10 / B-3: zero the salted-key-material slice on
+	// return. Resume() copies what it needs into the Session before
+	// the function returns, so wiping the local is safe.
+	defer stored.Zero()
 
 	jar := protonclient.NewCookieJar()
 	protonclient.PreloadJar(jar, stored.Cookies)
