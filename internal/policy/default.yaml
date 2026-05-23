@@ -48,12 +48,26 @@ tools:
     decision: prompt
     ttl: 5m
     description: "Delete a draft"
+  # D35 fix — mail_draft_list was missing from this stub list so it
+  # fell through to the default-deny fallback, while the equivalent
+  # `mail_list folder=drafts` worked fine. Same data, two paths,
+  # contradictory gating. Both are envelope listings (no body
+  # decrypt); mail_list is allow, so mail_draft_list matches.
+  mail_draft_list:
+    decision: allow
+    description: "List drafts (envelope-only, same data as mail_list folder=drafts)"
   mail_send:
     decision: prompt
     confirm: true
     ttl: 0
     allowed_recipients: []
     description: "Send a message via Proton"
+  mail_send_draft:
+    decision: prompt
+    confirm: true
+    ttl: 0
+    allowed_recipients: []
+    description: "Send an existing draft (recipients come from the draft)"
   mail_reply:
     decision: prompt
     confirm: true

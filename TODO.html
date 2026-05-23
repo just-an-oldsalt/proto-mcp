@@ -98,44 +98,71 @@
 <h2>Status at a glance</h2>
 <ul>
   <li><span class="check done">[x]</span> Phase 0 — repo skeleton, Go toolchain, pinned deps, auth smoke test</li>
-  <li><span class="check done">[x]</span> Phase 1 — SQLite + full backfill of message metadata <em>(spot-checked 100 msgs in 781ms; full 64k drain in progress)</em></li>
-  <li><span class="check done">[x]</span> Phase 1.5 — Security foundations (A/B/C/D/E/F all merged; see <code>SECURITY.md</code> for the audit they came from)</li>
-  <li><span class="check done">[x]</span> Phase 2 — sanitize / body-fetch / search / sync (A/B/C/D all merged; SECURITY re-audit follow-ups B-1/2/3/4/9/10/12 folded in)</li>
-  <li><span class="check done">[x]</span> Phase 3 — MCP server (A/B/C all merged; SECURITY C-8 + C-9 folded in; Foundational #3 enforced via trustguard.go)</li>
-  <li><span class="check done">[x]</span> Phase 4 — policy + audit + Touch ID + middleware (A/B/C/D all merged; closes Foundational #4 default-deny, B-15 SIGHUP, M-4/M-5 sentinels, B-4 shared redactor)</li>
-  <li><span class="check done">[x]</span> Phase 5 — write tools (A/B/C/D all merged; C-2 closed; rate-limit + allowed_recipients middleware live)</li>
-  <li><span class="check">[ ]</span> Phase 6 — Unix socket daemon, shim, launchd, Keychain, lock/unlock</li>
-  <li><span class="check">[ ]</span> Phase 7 — polish (rate limit, log rotation, signing/notarization, docs)</li>
+  <li><span class="check done">[x]</span> Phase 1 — SQLite + full backfill of message metadata (64k+ messages, full label/folder seed)</li>
+  <li><span class="check done">[x]</span> Phase 1.5 — Security foundations (A/B/C/D/E/F all merged)</li>
+  <li><span class="check done">[x]</span> Phase 2 — sanitize / body-fetch / search / sync (A/B/C/D merged)</li>
+  <li><span class="check done">[x]</span> Phase 3 — MCP server, 9 read tools (A/B/C merged)</li>
+  <li><span class="check done">[x]</span> Phase 4 — policy + audit + Touch ID + middleware (A/B/C/D merged)</li>
+  <li><span class="check done">[x]</span> Phase 5 — write tools, 20 added (A/B/C/D merged, 29 total tools live)</li>
+  <li><span class="check done">[x]</span> Phase 5.5 — security cleanup (A/B/C/D merged; 21 audit findings closed)</li>
+  <li><span class="check done">[x]</span> <strong>v1.0.0-alpha tagged</strong> 2026-05-22 — public-shareable build with LICENSE, README, AppVersion scoping (PR #48)</li>
+  <li><span class="check">[ ]</span> Phase 6 — daemon + shim + launchd + Keychain ACL + lock/unlock <em>(A/B/C/D done; 6/E remaining)</em></li>
+  <li><span class="check">[ ]</span> Phase 7 — polish (log rotation, Developer ID signing + notarization, Homebrew formula, Proton AppVersion registration)</li>
 </ul>
 
 <h2>Quickstart for whoever picks this up</h2>
-<pre><code># build
-go build -o bin/protonmcp ./cmd/protonmcp
+<pre><code># build everything: protonmcp + protonmcpd + protonmcp-shim + Touch ID helper
+make all
 
-# fully interactive — prompts for whatever it needs, passwords are
-# echo-off via /dev/tty, TOTP and mailbox password are asked only if
-# the server actually requires them
-./bin/protonmcp whoami
+# first-run: SRP login + TOTP + key unlock; persists to macOS Keychain
+./bin/protonmcp login
 
-# scripted — env vars override interactive prompts
-PROTONMCP_EMAIL=you@proton.me \
-PROTONMCP_PASSWORD='...' \
-PROTONMCP_TOTP=123456 \
-  ./bin/protonmcp whoami
+# one-time backfill: drains every message envelope + label/folder
+./bin/protonmcp backfill
+
+# === current default (v1.0.0-alpha): each Claude client spawns serve-stdio ===
+./bin/protonmcp install   # registers serve-stdio with Claude Desktop + Claude Code
+
+# === alternative (Phase 6 — recommended once 6/E lands): persistent daemon ===
+./bin/protonmcp daemon install       # writes ~/Library/LaunchAgents plist, bootstraps via launchctl
+./bin/protonmcp daemon status        # plist + launchctl + socket reachability
+./bin/protonmcp install --transport shim   # Claude clients route through the shim
 </code></pre>
-<p>Successful output prints user ID, primary address, address count, password
-mode, 2FA mode, storage used, and login+unlock duration.</p>
+<p>After install, restart Claude Desktop / Claude Code and the 29 tools appear under
+<code>protonmcp</code> in <code>/mcp</code>. Audit log: <code>tail -f ~/Library/Application
+Support/protonmcp/audit.log</code>. Policy override:
+<code>~/Library/Application Support/protonmcp/policy.yaml</code> +
+<code>protonmcp policy reload</code>.</p>
 
 <h2>Repo layout</h2>
 <pre><code>cmd/
-  protonmcp/        # CLI entry point — currently only `whoami`
+  protonmcp/        # CLI: login, backfill, sync, read, search, install,
+                    #      uninstall, policy, purge, daemon, serve-stdio
+  protonmcpd/       # Long-running daemon (Phase 6/A): Unix-socket server
+  protonmcp-shim/   # Phase 6/B: stdio↔socket forwarder Claude clients spawn
 internal/
   cli/              # /dev/tty prompt helpers (echo off for secrets)
   proton/           # go-proton-api wrapper: Login, Session, key unlock
-  config/           # (empty — placeholder for policy.yaml loading)
+  session/          # Phase 6/A: resume-from-Keychain shared by serve-stdio + daemon
+  serve/            # Phase 6/A: Runtime — Store + Session + Policy + Audit
+                    #            + Broker + Resolver + mcp.Server
+  store/            # SQLite mirror + migrations + search + body cache
+  sync/             # Event-loop incremental sync
+  mcp/              # JSON-RPC 2.0 server + middleware + per-conn state
+  mcptools/         # 29 tool handlers
+  policy/           # YAML loader + Decide + default.yaml + PID file
+  audit/            # SQLite + JSONL writer with detached-ctx writes
+  approval/         # Touch ID broker + cache + path resolver
+  caller/           # PID/UID/binary resolver + per-conn context (D20)
+  keystore/         # macOS Keychain wrapper (keybase/go-keychain)
+  redact/           # Shared secret scrubber for logging + audit
+  sanitize/         # Inbound + outbound HTML allowlist (bluemonday)
+  mcperrors/        # Sentinel error set
+  secret/           # Secret type with Zero() + redact-on-format
+  logging/          # slog ReplaceAttr wired to redact.Attr
 helpers/
-  touchid/          # (empty — Swift Touch ID helper goes here in Phase 4)
-docs/               # (empty — threat model + tool reference land here)
+  touchid/          # Swift Touch ID helper (helpers/touchid/main.swift)
+                    # built by `swiftc -O` via Makefile
 </code></pre>
 
 <h2>Phase 0 — Foundation <span class="tag">done</span></h2>
@@ -159,7 +186,7 @@ docs/               # (empty — threat model + tool reference land here)
     any public release.</li>
 </ul>
 
-<h2>Phase 1 — Local SQLite mirror <span class="tag">in progress</span></h2>
+<h2>Phase 1 — Local SQLite mirror <span class="tag">done</span></h2>
 <p>Goal: cold backfill of message metadata into a local SQLite store so reads
 and search can be answered offline.</p>
 <ul>
@@ -203,7 +230,7 @@ and search can be answered offline.</p>
     that scans the whole mailbox.</li>
 </ul>
 
-<h2>Phase 1.5 — Security foundations <span class="tag">blocks Phase 2</span></h2>
+<h2>Phase 1.5 — Security foundations <span class="tag">done</span></h2>
 <p>External audit (see <code>SECURITY.md</code> in repo root) flagged invariants
 that get exponentially more expensive to retrofit later. The agreed
 approach: split into focused branches landing in dependency order. Most
@@ -576,7 +603,7 @@ B-10 folded in) &rarr; 2/D &rarr; 2/C (with B-9 folded in).</p>
     <code>In-Reply-To</code> / <code>References</code> headers is in 2/B.</li>
 </ul>
 
-<h2>Phase 3 — MCP server (read tools only) <span class="tag">planning</span></h2>
+<h2>Phase 3 — MCP server (read tools only) <span class="tag">done</span></h2>
 <p>Hand-rolled JSON-RPC 2.0 over stdio per the
 <a href="https://modelcontextprotocol.io/specification/2025-06-18/basic/transports">MCP 2025-06-18 spec</a>.
 Same shape as Phase 2 planning: focused sub-branches with explicit
@@ -1080,7 +1107,7 @@ Decomposed into four branches A/B/C/D, sequenced in increasing risk.</p>
     users complain.</li>
 </ul>
 
-<h2>Phase 6 — Daemon, IPC, multi-client <span class="tag">planning</span></h2>
+<h2>Phase 6 — Daemon, IPC, multi-client <span class="tag">4/5 done — 6/E remaining</span></h2>
 <p>The architecture flip from "each Claude client spawns its own
 <code>serve-stdio</code>" to "one persistent <code>protonmcpd</code> daemon, multiple
 thin shims connect over a Unix socket." Closes the residual auth UX
@@ -1109,7 +1136,7 @@ subcommand.</p>
 
 <h3>Branches in this phase</h3>
 
-<p><strong>6/A — <code>phase-6/daemon-skeleton</code></strong>. No deps.</p>
+<p><strong>6/A — <code>phase-6/daemon-skeleton</code></strong> <span class="tag">done (PR #51)</span>. No deps.</p>
 <ul>
   <li><span class="check">[ ]</span> New <code>cmd/protonmcpd</code> binary.
     Listens on <code>~/Library/Application Support/protonmcp/protonmcp.sock</code>
@@ -1130,7 +1157,7 @@ subcommand.</p>
     satisfies both. Should be a near-trivial swap.</li>
 </ul>
 
-<p><strong>6/B — <code>phase-6/shim</code></strong>. Depends on 6/A.</p>
+<p><strong>6/B — <code>phase-6/shim</code></strong> <span class="tag">done (PR #52)</span>. Depends on 6/A.</p>
 <ul>
   <li><span class="check">[ ]</span> New <code>cmd/protonmcp-shim</code> binary
     (~50 LOC). What Claude Desktop / Claude Code spawn.</li>
@@ -1150,7 +1177,7 @@ subcommand.</p>
     re-runs install if they want the daemon).</li>
 </ul>
 
-<p><strong>6/C — <code>phase-6/launchd</code></strong>. Depends on 6/A.</p>
+<p><strong>6/C — <code>phase-6/launchd</code></strong> <span class="tag">done (PR #54)</span>. Depends on 6/A.</p>
 <ul>
   <li><span class="check">[ ]</span> <code>~/Library/LaunchAgents/zone.dort.protonmcpd.plist</code>
     written by <code>protonmcp daemon install</code>. <code>KeepAlive=true</code>
@@ -1166,7 +1193,7 @@ subcommand.</p>
     when it was started.</li>
 </ul>
 
-<p><strong>6/D — <code>phase-6/peer-credentials</code></strong>. Depends on 6/A.</p>
+<p><strong>6/D — <code>phase-6/peer-credentials</code></strong> <span class="tag">done (PR #53)</span>. Depends on 6/A.</p>
 <ul>
   <li><span class="check">[ ]</span> Per-connection
     <code>SO_PEERCRED</code> (LOCAL_PEERCRED on macOS) lookup. Each
@@ -1184,7 +1211,7 @@ subcommand.</p>
     after this they bucket by real client PID).</li>
 </ul>
 
-<p><strong>6/E — <code>phase-6/keychain-acl-lock-unlock</code></strong>.
+<p><strong>6/E — <code>phase-6/keychain-acl-lock-unlock</code></strong> <span class="tag">pending</span>.
 Depends on 6/A + 6/D. The biggest single piece.</p>
 <ul>
   <li><span class="check">[ ]</span> <code>internal/keystore</code> creates

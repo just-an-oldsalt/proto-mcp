@@ -7,6 +7,9 @@
 /protonmcpd
 /protonmcp-shim
 /protonmcp-touchid
+# Phase 4/C — built by `make touchid`. Lives next to the source
+# under helpers/touchid/ but is a real binary product, not source.
+helpers/touchid/protonmcp-touchid
 
 # Local config / data
 *.db
