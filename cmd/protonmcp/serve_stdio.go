@@ -91,6 +91,17 @@ func runServeStdio(ctx context.Context, args []string) error {
 	}
 	defer st.Close()
 
+	// SECURITY D13 / C-1 — sweep stale cached bodies at startup.
+	// Default retention is store.DefaultBodyRetention (30 days);
+	// `protonmcp purge --older-than 7d` tightens it explicitly.
+	// Failure here logs but doesn't block serving — the sweep is
+	// best-effort hygiene, not a load-bearing security feature.
+	if n, err := sweepBodiesAtStartup(ctx, st); err != nil {
+		slog.Warn("body purge sweep failed at startup", "err", err.Error())
+	} else if n > 0 {
+		slog.Info("purged stale cached bodies at startup", "rows", n)
+	}
+
 	// Q4 decision: acquire the session EAGERLY at initialize time —
 	// AND in resume-only mode, since Claude Desktop spawns us with
 	// no controlling TTY. Any failure here surfaces as "MCP server

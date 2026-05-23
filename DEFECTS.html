@@ -162,9 +162,9 @@
 
 <h2>Status at a glance</h2>
 <div class="stats">
-  <div class="stat"><div class="stat-num">19</div><div class="stat-label">Open defects</div></div>
+  <div class="stat"><div class="stat-num">18</div><div class="stat-label">Open defects</div></div>
   <div class="stat"><div class="stat-num">0</div><div class="stat-label">Investigating</div></div>
-  <div class="stat"><div class="stat-num">12</div><div class="stat-label">Resolved</div></div>
+  <div class="stat"><div class="stat-num">13</div><div class="stat-label">Resolved</div></div>
   <div class="stat"><div class="stat-num">0</div><div class="stat-label"><span class="tag critical">critical</span></div></div>
   <div class="stat"><div class="stat-num">4</div><div class="stat-label"><span class="tag high">high</span></div></div>
   <div class="stat"><div class="stat-num">13</div><div class="stat-label"><span class="tag medium">medium</span></div></div>
@@ -256,7 +256,20 @@ messages backfill still proceeds and a stderr warning surfaces.</p>
 <p><strong>Remediation:</strong> Build the DSN via <code>url.URL{Scheme: "file", Opaque: path, RawQuery: v.Encode()}.String()</code> or <code>url.PathEscape(path)</code>. Reject paths containing <code>?</code> outright. Test added in <code>store_test.go</code>.</p>
 <p class="meta"><strong>Related:</strong> B-6 (still open after two cycles)</p>
 
-<h3><span class="id">D13</span>Plaintext bodies persisted indefinitely — no eviction, no <code>purge</code> command <span class="tag open">open</span> <span class="tag medium">medium</span></h3>
+<h3><span class="id">D13</span>Plaintext bodies persisted indefinitely — no eviction, no <code>purge</code> command <span class="tag fixed">fixed in PR 5.5/B</span> <span class="tag medium">medium</span></h3>
+<p><strong>Fix (PR 5.5/B):</strong> Two layers.
+(1) New <code>protonmcp purge [--older-than D] [--dry-run] [--vacuum]</code>
+subcommand hard-deletes <code>body_text</code> / <code>body_html</code> / <code>body_cached_at</code>
+on rows whose body cached-at is past the cutoff. The
+<code>messages_fts_update</code> trigger fires on the same UPDATE so the
+FTS index drops the purged content too; combined with the
+<code>secure_delete=on</code> pragma already set in <code>store.go</code>, freed cells
+are zeroed on the next page write rather than left as recoverable
+slack space. <code>--vacuum</code> forces it immediately.
+(2) <code>serve-stdio</code> sweeps at startup with the default 30-day
+retention (<code>store.DefaultBodyRetention</code>); failures log Warn but
+don't block the daemon. Closes the audit cycle's biggest residual.
+Pending Phase-6 envelope encryption.</p>
 <p><strong>Reported:</strong> 2026-05-22 (security re-audit) · Surface: <code>internal/store/messages.go:286-357</code>, <code>internal/proton/body.go:38-88</code></p>
 <p><strong>Evidence:</strong> Re-audit #2's C-1 — the single largest residual risk — is unchanged. <code>BodyTTL = 24h</code> (line 286) gates only <code>GetCachedBody</code> reads; stale rows return <code>ErrNotFound</code> but the <code>body_text</code>/<code>body_html</code> columns are not deleted. <code>InvalidateBodyCache</code> (line 272) only nulls <code>body_cached_at</code>, leaving the plaintext columns intact. No startup sweeper, no scheduled deletion, no <code>protonmcp purge</code>. Phase 5 added draft bodies to the same persistence path, so the surface grew.</p>
 <p><strong>Impact:</strong> Every message the user has ever opened is recoverable in cleartext from <code>store.db</code> indefinitely, without the Keychain. Time Machine, iCloud Documents sync, Spotlight indexing, support-image disposal all bypass the 0600 perms. Drafts (containing the user's outgoing prose) are now included. <code>secure_delete=on</code> (B-10) is in place but never triggered because no DELETE ever runs.</p>
