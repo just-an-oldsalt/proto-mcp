@@ -116,7 +116,19 @@ func (m *Middleware) runTool(ctx context.Context, t Tool, args json.RawMessage, 
 		started        = time.Now()
 	)
 
-	if m.resolver != nil {
+	// SECURITY D20 — per-connection caller takes precedence over
+	// the process-wide Resolver. The daemon's accept loop stashes
+	// the peer's PID/UID/binary via caller.WithCaller(ctx, peer)
+	// after LOCAL_PEERCRED / LOCAL_PEERPID lookups, so each
+	// connection's audit row records the real connecting client
+	// rather than the daemon's own PID.
+	//
+	// Resolver remains as the fallback for serve-stdio, where
+	// there's exactly one parent (the spawning Claude client)
+	// and the process-lifetime cache is the right semantics.
+	if c := caller.FromContext(ctx); c.PID != 0 {
+		callerInfo = c
+	} else if m.resolver != nil {
 		callerInfo = m.resolver.Resolve()
 	}
 

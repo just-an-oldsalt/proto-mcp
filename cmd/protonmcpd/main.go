@@ -35,6 +35,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/just-an-oldsalt/proto-mcp/internal/caller"
 	"github.com/just-an-oldsalt/proto-mcp/internal/logging"
 	"github.com/just-an-oldsalt/proto-mcp/internal/serve"
 	"github.com/just-an-oldsalt/proto-mcp/internal/session"
@@ -207,7 +208,32 @@ func acceptLoop(ctx context.Context, l *net.UnixListener, rt *serve.Runtime) err
 		go func(c net.Conn) {
 			defer wg.Done()
 			defer c.Close()
-			serveConn(ctx, c, rt)
+			// SECURITY D20 — look up the peer's PID/UID via
+			// LOCAL_PEERCRED + LOCAL_PEERPID. The MCP middleware
+			// reads caller.FromContext(ctx) before falling back
+			// to the process-wide Resolver, so each connection's
+			// audit row gets its real connecting-client identity.
+			//
+			// Defense in depth: also refuse cross-UID connections.
+			// The socket lives in 0700 Application Support so
+			// reaching it from another UID is already blocked at
+			// the filesystem level, but a same-user-but-different-UID
+			// scenario could theoretically happen (su, etc.).
+			peer, perr := caller.PeerCred(c)
+			if perr != nil {
+				slog.Warn("peer cred lookup failed; refusing connection",
+					"err", perr.Error())
+				return
+			}
+			if peer.UID != os.Getuid() {
+				slog.Warn("rejecting cross-UID connection",
+					"peer_pid", peer.PID,
+					"peer_uid", peer.UID,
+					"our_uid", os.Getuid())
+				return
+			}
+			connCtx := caller.WithCaller(ctx, peer)
+			serveConn(connCtx, c, rt)
 		}(conn)
 	}
 
