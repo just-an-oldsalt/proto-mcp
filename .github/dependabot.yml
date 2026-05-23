@@ -20,6 +20,15 @@ updates:
         exclude-patterns:
           - "github.com/ProtonMail/*"
           - "github.com/go-resty/resty/v2"
+    # `exclude-patterns` only prevents GROUPING — Dependabot would still
+    # open individual PRs for the excluded packages. `ignore` actually
+    # suppresses them. The ProtonMail packages and the resty fork are
+    # pinned to whatever proton-bridge ships (see go.mod's `replace`
+    # directive); bumping past that breaks the crypto path. See PR #16
+    # (closed) for the prior version that almost shipped.
+    ignore:
+      - dependency-name: "github.com/ProtonMail/*"
+      - dependency-name: "github.com/go-resty/resty/v2"
 
   - package-ecosystem: github-actions
     directory: "/"
