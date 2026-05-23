@@ -105,6 +105,14 @@ func Save(l Live) error {
 	if l.Email == "" || l.UID == "" || l.RefreshToken == "" {
 		return errors.New("keystore: refusing to save incomplete session (need email, uid, refresh_token)")
 	}
+	// SECURITY D16 / B-14: refuse to write a blob whose
+	// SaltedKeyPass got zeroed mid-flight. Without this guard, a
+	// Close-vs-OnAuthUpdate race silently corrupts the Keychain
+	// entry — next Resume fails at the key-unlock step with no
+	// diagnostic clue. Pair with C-4 (OnAuthUpdate guard).
+	if len(l.SaltedKeyPass.Bytes()) == 0 {
+		return errors.New("keystore: refusing to save empty SaltedKeyPass (D16: likely Close/OnAuthUpdate race)")
+	}
 	blob := savedBlob{
 		Email:         l.Email,
 		UID:           l.UID,

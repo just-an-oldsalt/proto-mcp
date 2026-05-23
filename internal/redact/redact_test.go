@@ -238,3 +238,49 @@ func TestBodyReturnsHexAndBytes(t *testing.T) {
 		t.Errorf("sha mismatch:\ngot  %s\nwant %s", sha, want)
 	}
 }
+
+// SECURITY D19 — embedded-token scrubber catches credentials hidden
+// in surrounding prose (library error messages, quoted JSON
+// snippets) that looksLikeToken intentionally rejects.
+
+func TestAttr_ScrubsJWTEmbeddedInError(t *testing.T) {
+	var buf bytes.Buffer
+	l := captureLogger(&buf)
+	// JWT-shaped value embedded in an error message — the kind of
+	// thing go-proton-api can produce.
+	l.Warn("auth refused", "err",
+		"POST /auth/v4/refresh: token=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0.signature_part_abc invalid")
+	out := buf.String()
+	if strings.Contains(out, "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0.signature_part_abc") {
+		t.Errorf("JWT leaked through value heuristic: %s", out)
+	}
+	if !strings.Contains(out, "REDACTED-JWT") {
+		t.Errorf("missing REDACTED-JWT marker: %s", out)
+	}
+}
+
+func TestAttr_ScrubsLongBase64InError(t *testing.T) {
+	var buf bytes.Buffer
+	l := captureLogger(&buf)
+	// 40+ base64url chars embedded in a quoted JSON snippet.
+	l.Warn("upstream error",
+		"err", `unknown auth response: {"refreshToken":"k2fkzwv4sczy2zp7uozazbvwi3xiaabvkkzhDEADBEEF"}`)
+	out := buf.String()
+	if strings.Contains(out, "k2fkzwv4sczy2zp7uozazbvwi3xiaabvkkzhDEADBEEF") {
+		t.Errorf("long base64 token leaked: %s", out)
+	}
+	if !strings.Contains(out, "REDACTED-TOKEN") {
+		t.Errorf("missing REDACTED-TOKEN marker: %s", out)
+	}
+}
+
+func TestAttr_PreservesBenignProse(t *testing.T) {
+	// Defensive check: don't over-redact ordinary error messages.
+	var buf bytes.Buffer
+	l := captureLogger(&buf)
+	l.Warn("benign", "msg", "connection refused: read tcp 192.168.1.5:443: i/o timeout")
+	out := buf.String()
+	if strings.Contains(out, "REDACTED") {
+		t.Errorf("over-redacted a benign error: %s", out)
+	}
+}

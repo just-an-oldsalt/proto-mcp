@@ -1,0 +1,39 @@
+# Code ownership for required reviewers on sensitive paths.
+#
+# SECURITY B-5 (closes D27): without this file, Dependabot's
+# auto-merge and any future maintainer-with-write-access can
+# land changes to security-load-bearing code unreviewed. The
+# patterns below require an explicit review from the listed
+# owner before merge — even an admin merge will surface the
+# missing approval on the PR.
+#
+# Granularity: the same single owner today (it's a one-person
+# project), but the structure is set so adding co-maintainers
+# later is just an inline edit.
+
+# Default — everything that doesn't match a more specific rule
+# below.
+*                                @just-an-oldsalt
+
+# Crypto / session / Keychain — every change here directly
+# touches confidentiality and refresh-token persistence.
+/internal/proton/                @just-an-oldsalt
+/internal/keystore/              @just-an-oldsalt
+/internal/secret/                @just-an-oldsalt
+
+# Sanitizer / redactor — every change affects the prompt-
+# injection mitigation and the audit-log redaction guarantees.
+/internal/sanitize/              @just-an-oldsalt
+/internal/redact/                @just-an-oldsalt
+
+# Policy / approval / audit — the Phase 4 gating layer.
+/internal/policy/                @just-an-oldsalt
+/internal/approval/              @just-an-oldsalt
+/internal/audit/                 @just-an-oldsalt
+/internal/mcp/                   @just-an-oldsalt
+
+# Swift Touch ID helper.
+/helpers/touchid/                @just-an-oldsalt
+
+# CI / Dependabot config — locks the auto-merge boundary.
+/.github/                        @just-an-oldsalt

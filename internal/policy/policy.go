@@ -70,13 +70,26 @@ type ToolPolicy struct {
 
 // TTLDuration parses TTL into a time.Duration. Empty / "0" → zero.
 // Anything else goes through time.ParseDuration (e.g., "5m", "30s").
-// A malformed value returns 0 with no error — the policy validator
-// surfaces parse errors at load time so callers don't have to.
+//
+// SECURITY D25: parseDocument validates TTL at LOAD time and refuses
+// malformed values, so reaching the parse-error branch here means a
+// caller skipped the validator (manual construction of ToolPolicy
+// in test code, future package-internal construction). Panicking
+// surfaces the bug rather than silently caching a zero — a silent
+// zero would bypass the cache and cause performance issues, not
+// security ones, but the principle is "fail loud on impossible
+// states."
 func (p ToolPolicy) TTLDuration() time.Duration {
 	if p.TTL == "" || p.TTL == "0" {
 		return 0
 	}
-	d, _ := time.ParseDuration(p.TTL)
+	d, err := time.ParseDuration(p.TTL)
+	if err != nil {
+		panic(fmt.Sprintf(
+			"policy: ToolPolicy.TTL %q invalid at use-site (must be caught by parseDocument at load): %v",
+			p.TTL, err,
+		))
+	}
 	return d
 }
 
