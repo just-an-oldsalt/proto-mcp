@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -109,6 +112,18 @@ func runDaemonInstall(_ context.Context, args []string) error {
 		}
 	}
 
+	// D24 (Phase 7/C): record SHA-256 of the daemon binary at
+	// install time. The daemon reads this on startup and refuses
+	// to launch if its own hash doesn't match — catches a swap
+	// attack where someone replaces protonmcpd at the recorded
+	// path with a different binary. Update protocol: re-run
+	// `protonmcp daemon install` after upgrading the binary.
+	if err := writeBinaryIntegrityFile(bin); err != nil {
+		// Non-fatal — log a warning, the daemon falls back to
+		// "no integrity file → degrade with warning" semantics.
+		fmt.Fprintf(os.Stderr, "warning: could not write binary integrity file: %v\n", err)
+	}
+
 	if err := launchctl("bootstrap", "gui/"+uidString(), plistPath); err != nil {
 		return fmt.Errorf("bootstrap: %w", err)
 	}
@@ -119,6 +134,53 @@ func runDaemonInstall(_ context.Context, args []string) error {
 	fmt.Println("  Daemon should now be running. `protonmcp daemon status` to verify.")
 	fmt.Println("  Restart Claude Desktop / Claude Code to connect via the shim.")
 	return nil
+}
+
+// writeBinaryIntegrityFile records the SHA-256 of binPath into
+// ~/Library/Application Support/protonmcp/expected_sha256. The
+// daemon reads this on startup (cmd/protonmcpd/integrity.go) and
+// refuses to launch if its current hash doesn't match.
+//
+// D24 / Phase 7/C. Re-running `protonmcp daemon install` re-records
+// the hash; that's the upgrade protocol.
+func writeBinaryIntegrityFile(binPath string) error {
+	hash, err := sha256File(binPath)
+	if err != nil {
+		return fmt.Errorf("hash %s: %w", binPath, err)
+	}
+	dir, err := appSupportDir()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	path := filepath.Join(dir, "expected_sha256")
+	// One line: "<hex>  <abs path>\n" — matches the shape of `shasum`
+	// output so operators can sanity-check with the standard tool.
+	line := hash + "  " + binPath + "\n"
+	return os.WriteFile(path, []byte(line), 0o600)
+}
+
+func sha256File(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func appSupportDir() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, "Library", "Application Support", "protonmcp"), nil
 }
 
 func runDaemonUninstall(_ context.Context, args []string) error {

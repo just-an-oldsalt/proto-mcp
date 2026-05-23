@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  proto-mcp hardened-runtime entitlements.
+
+  Phase 7/C. Applied during codesign:
+    codesign --options=runtime --entitlements scripts/protonmcp.entitlements ...
+
+  Each entitlement here has a specific justification — keep the list
+  minimal. Anything we don't need shouldn't appear.
+
+  Currently enabled:
+
+  * com.apple.security.cs.allow-unsigned-executable-memory
+    Required by the Go runtime — Go binaries map executable memory
+    pages at runtime for the goroutine scheduler / cgo stubs and
+    macOS's hardened runtime otherwise refuses to load them. This
+    is a well-known requirement for ALL Go binaries shipped with
+    hardened runtime (Bridge, Docker Desktop, every Go CLI in
+    Homebrew uses it).
+
+  Deliberately NOT enabled:
+
+  * com.apple.security.network.client (we open outbound HTTPS to
+    Proton — but this entitlement only matters under the App
+    Sandbox, which we do NOT enable. Without app-sandbox, network
+    is unrestricted by default.)
+
+  * com.apple.security.app-sandbox — would prevent us from opening
+    a Unix socket in ~/Library/Application Support, reading the
+    Keychain blob via the standard API, and spawning the Touch ID /
+    lockwatch helpers. Phase 7 is not a sandboxed app.
+
+  * com.apple.security.cs.disable-library-validation — we sign all
+    our helpers (Touch ID, lockwatch) with the same Team ID, so
+    library validation works in our favor. Don't disable it.
+
+  * com.apple.security.cs.allow-dyld-environment-variables — DYLD_*
+    overrides are a classic exfiltration vector; we never need them.
+
+  Re-check this file every Phase that adds a new helper or runtime
+  feature. Adding entitlements is one-way: once shipped, removing
+  them silently breaks the user's signed binary on next launch.
+-->
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+</dict>
+</plist>

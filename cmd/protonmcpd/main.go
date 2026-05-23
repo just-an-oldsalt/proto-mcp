@@ -66,6 +66,15 @@ func main() {
 		defer func() { _ = logWriter.Close() }()
 	}
 
+	// D24 (Phase 7/C) — binary integrity check before any setup
+	// runs. If the daemon binary's SHA-256 doesn't match what was
+	// recorded at install time, refuse to start. Missing record
+	// → log + continue (older installs predate this feature).
+	if err := VerifyBinaryIntegrity(slog.Default()); err != nil {
+		slog.Error("refusing to start", "err", err.Error())
+		os.Exit(1)
+	}
+
 	if err := run(); err != nil {
 		slog.Error("protonmcpd exited with error", "err", err.Error())
 		os.Exit(1)
