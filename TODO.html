@@ -1233,6 +1233,21 @@ LocalAuthentication / AuthenticationServices.</p>
     trigger in <code>-- +goose StatementBegin</code> / <code>-- +goose StatementEnd</code>.</li>
 </ul>
 
+<h2>Backlog (post-1.0)</h2>
+<ul>
+  <li><span class="check">[ ]</span> <strong>Contacts tools</strong>. <code>go-proton-api</code>
+    already exposes full CRUD: <code>GetContact</code>, <code>GetContacts</code>,
+    <code>GetAllContacts</code>, <code>CreateContacts</code>,
+    <code>UpdateContact</code>, <code>DeleteContacts</code>, plus per-contact
+    email metadata via <code>GetContactEmails</code>. Probably ~5 MCP tools
+    (<code>contacts_list</code> / <code>_get</code> / <code>_create</code> /
+    <code>_update</code> / <code>_delete</code>) with the same policy +
+    Touch ID gating shape as the mail family. ~250 LOC. Plan when
+    Phase 6 / 7 are done — no need to plan now.</li>
+  <li>Calendar (events) and Drive — flagged but bigger work; revisit
+    after Contacts.</li>
+</ul>
+
 <h2>Done / decided</h2>
 <ul>
   <li>2026-05-21 — Picked hand-rolled JSON-RPC over <code>mark3labs/mcp-go</code>.</li>
