@@ -76,12 +76,13 @@ func firstDisallowedRecipient(extracted, allowed []string) string {
 // no options is unchanged) while letting serve-stdio inject the
 // full pipeline.
 type Middleware struct {
-	policy    *policy.Engine
-	audit     *audit.Writer
-	broker    *approval.Broker
-	resolver  *caller.Resolver
-	rate      *rateLimiter
-	lockState func() (bool, string) // Phase 6/E — nil = unlockable
+	policy           *policy.Engine
+	audit            *audit.Writer
+	broker           *approval.Broker
+	resolver         *caller.Resolver
+	rate             *rateLimiter
+	lockState        func() (bool, string) // Phase 6/E — nil = unlockable
+	onToolCallObserv func()                // Phase 7/A — idle activity bump
 }
 
 func (m *Middleware) ensureRate() {
@@ -147,6 +148,14 @@ func (m *Middleware) runTool(ctx context.Context, t Tool, args json.RawMessage, 
 				"caller_pid", callerInfo.PID)
 			return ErrorResult("daemon is locked (%s); run `protonmcp unlock` to resume", reason), nil
 		}
+	}
+
+	// Phase 7/A — idle-lock activity bump. Fired AFTER the lock-
+	// state check so a locked daemon's refused calls don't keep
+	// the idle timer alive. The observer is non-blocking by
+	// contract; runtime's implementation is a single atomic store.
+	if m.onToolCallObserv != nil {
+		m.onToolCallObserv()
 	}
 
 	if m.audit != nil {

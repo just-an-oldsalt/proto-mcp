@@ -55,19 +55,26 @@ if req.confirm == true {
     }
 }
 
+// D30 (Phase 7/A): use .deviceOwnerAuthentication instead of
+// .deviceOwnerAuthenticationWithBiometrics so the system falls back
+// to the user's login password when biometric hardware is missing
+// or disabled (Mac Mini, a Mac with a broken Touch ID sensor, Screen
+// Sharing). Without this fallback, every prompted tool was simply
+// inoperable on those Macs. Touch ID still runs FIRST on hardware
+// that has it.
 let ctx = LAContext()
 var laError: NSError?
-guard ctx.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &laError) else {
-    // No biometric hardware / Touch ID disabled in System Settings /
-    // running under Screen Sharing → treat as deny. Phase 6 may fall
-    // through to a password prompt; v1 doesn't.
-    FileHandle.standardError.write(Data("biometric not available: \(laError?.localizedDescription ?? "unknown")\n".utf8))
+guard ctx.canEvaluatePolicy(.deviceOwnerAuthentication, error: &laError) else {
+    // Neither biometric NOR password available — extremely rare
+    // (only happens with no user account configured for the local
+    // session). Treat as deny.
+    FileHandle.standardError.write(Data("authentication not available: \(laError?.localizedDescription ?? "unknown")\n".utf8))
     exit(1)
 }
 
 let sem = DispatchSemaphore(value: 0)
 var ok = false
-ctx.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, localizedReason: req.body) { success, evalErr in
+ctx.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: req.body) { success, evalErr in
     ok = success
     if !success, let e = evalErr {
         FileHandle.standardError.write(Data("evaluatePolicy: \(e.localizedDescription)\n".utf8))

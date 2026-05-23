@@ -67,6 +67,14 @@ type Runtime struct {
 	lockReason     string
 	acquireSession func(context.Context) (SessionBundle, error)
 
+	// Phase 7/A — auto-lock infrastructure. idleTracker bumps on
+	// every tool call via the mcp.WithToolCallObserver hook.
+	// lockwatchCancel terminates the Swift lockwatch helper on
+	// runtime Close (the helper inherits our SIGTERM via its own
+	// process group but we cancel explicitly for cleanliness).
+	idleTracker     *idleTracker
+	lockwatchCancel func()
+
 	hupStop   chan struct{}
 	pidUnlink func()
 }
@@ -341,12 +349,14 @@ func Setup(ctx context.Context, cfg SetupConfig) (*Runtime, error) {
 	// rt is built post-srv so the lock-state callback closes over
 	// it. Done in two steps so the closure has a stable target.
 	rt := &Runtime{}
+	rt.idleTracker = newIdleTracker()
 	opts := []mcp.Option{
 		mcp.WithPolicy(engine),
 		mcp.WithAudit(auditWriter),
 		mcp.WithCallerResolver(resolver),
 		mcp.WithRateLimitPersister(newRateLimitStoreAdapter(st)),
 		mcp.WithLockState(rt.Locked),
+		mcp.WithToolCallObserver(rt.idleTracker.bumpActivity),
 	}
 	if broker != nil {
 		opts = append(opts, mcp.WithApproval(broker))
@@ -392,6 +402,27 @@ func Setup(ctx context.Context, cfg SetupConfig) (*Runtime, error) {
 		}
 	}()
 
+	// Phase 7/A — idle-lock + lockwatch helper.
+	//
+	// Idle lock: goroutine ticks every 30s, checks the engine's
+	// IdleLockMinutes() (policy reload picks up new values), locks
+	// the runtime when threshold exceeded.
+	//
+	// Lockwatch: spawn the Swift helper as a managed subprocess if
+	// the binary is on disk. The helper writes "screen_locked" /
+	// "sleep" lines to stdout when macOS broadcasts the
+	// corresponding distributed notifications; we read those and
+	// call Lock with the reason. If the helper isn't built, fall
+	// through silently — the daemon still works, just without the
+	// auto-lock triggers.
+	go rt.idleTracker.run(context.Background(), engine.IdleLockMinutes, rt.Lock, logger)
+	if lockwatchPath, found := resolveLockwatchPath(); found {
+		rt.lockwatchCancel = startLockwatch(lockwatchPath, rt.Lock, logger)
+	} else {
+		logger.Info("lockwatch helper not found; screen-lock and sleep auto-lock disabled",
+			"hint", "run `make lockwatch` from the repo root")
+	}
+
 	return rt, nil
 }
 
@@ -400,6 +431,12 @@ func Setup(ctx context.Context, cfg SetupConfig) (*Runtime, error) {
 func (r *Runtime) Close() {
 	if r == nil {
 		return
+	}
+	if r.lockwatchCancel != nil {
+		r.lockwatchCancel()
+	}
+	if r.idleTracker != nil {
+		r.idleTracker.close()
 	}
 	if r.hupStop != nil {
 		close(r.hupStop)

@@ -81,6 +81,38 @@ var bodyKeys = map[string]struct{}{
 	"plaintext": {},
 }
 
+// opaqueIDKeys are JSON field names whose values are Proton-side
+// identifiers that LOOK like tokens to the heuristic (long base64url
+// strings) but are NOT secrets — they appear in Proton URLs, are
+// shareable, and are exactly the thing the user wants to SEE in a
+// Touch ID prompt to verify what they're approving.
+//
+// D36 fix (2026-05-23): without this carve-out, mail_move's
+// destination + message_id arguments came out as [REDACTED-VALUE]
+// in the prompt body, turning the dialog into a meaningless yes/no
+// toggle. Operator + user-visible identifiers belong to a different
+// trust class than access_token / refresh_token / cookies.
+//
+// Keep this list narrow. A field name here means "the value is safe
+// to display verbatim" — adding the wrong key is a small information
+// leak. Audit-log and prompt-body alike route through this carve-out.
+var opaqueIDKeys = map[string]struct{}{
+	"message_id":  {},
+	"messageid":   {},
+	"thread_id":   {},
+	"threadid":    {},
+	"label_id":    {},
+	"labelid":     {},
+	"folder_id":   {},
+	"folderid":    {},
+	"parent_id":   {},
+	"parentid":    {},
+	"destination": {}, // mail_move target folder/label ID
+	"in_reply_to": {},
+	"inreplyto":   {},
+	"id":          {}, // generic; Proton APIs use "id" for the same opaque type
+}
+
 // Attr is the slog.HandlerOptions.ReplaceAttr hook. Two passes:
 //
 //  1. Key-based: any Attr whose Key matches sensitiveKeys becomes
@@ -238,6 +270,16 @@ func redactValue(v any) any {
 					// it alone and let the recursive walk handle it.
 					out[k] = redactValue(val)
 				}
+				continue
+			}
+			// D36 carve-out: opaque identifiers (message_id,
+			// destination, label_id, etc.) pass through verbatim
+			// even though their values look token-shaped to the
+			// heuristic. They're already visible in any Proton
+			// URL; the whole point of the Touch ID prompt is so
+			// the user can SEE what they're approving.
+			if _, hit := opaqueIDKeys[lower]; hit {
+				out[k] = val
 				continue
 			}
 			out[k] = redactValue(val)

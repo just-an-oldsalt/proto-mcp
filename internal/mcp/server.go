@@ -157,6 +157,27 @@ func WithLockState(fn func() (bool, string)) Option {
 	}
 }
 
+// WithToolCallObserver registers a no-arg, non-blocking callback the
+// middleware fires at the start of every tool call (after the
+// lock-state check, before any audit / policy work). Phase 7/A —
+// runtime uses this as the activity-bump signal for the idle-lock
+// goroutine. Multiple observers are NOT supported; calling twice
+// overwrites.
+//
+// Implementations MUST NOT block — the call sits on the request's
+// hot path. An atomic store of time.Now() is the intended shape.
+func WithToolCallObserver(fn func()) Option {
+	return func(s *Server) {
+		if fn == nil {
+			return
+		}
+		if s.middleware == nil {
+			s.middleware = &Middleware{}
+		}
+		s.middleware.onToolCallObserv = fn
+	}
+}
+
 // New returns a Server with the given logger and any number of
 // functional options. nil logger uses slog.Default(); no options →
 // the Phase-3 baseline (no audit, no policy, no approval — every

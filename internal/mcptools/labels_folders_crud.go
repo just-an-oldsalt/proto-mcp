@@ -56,6 +56,7 @@ func labelsCreate(deps Deps) mcp.Tool {
 		Description:  "Create a user label (color-coded tag a message can have many of). For mutually-exclusive locations use folders_create.",
 		InputSchema:  json.RawMessage(crudCreateSchema),
 		OutputSchema: json.RawMessage(crudResultSchema),
+		PromptBody:   crudCreatePromptBody("labels_create", "label"),
 		Handler:      makeCreateHandler(deps, "labels_create", gpa.LabelTypeLabel, labelTypeUserLabel),
 	}
 }
@@ -66,6 +67,7 @@ func foldersCreate(deps Deps) mcp.Tool {
 		Description:  "Create a user folder (a message lives in exactly one folder; the system folders inbox/sent/drafts/archive/trash/spam are immutable). For non-exclusive tags use labels_create.",
 		InputSchema:  json.RawMessage(crudCreateSchema),
 		OutputSchema: json.RawMessage(crudResultSchema),
+		PromptBody:   crudCreatePromptBody("folders_create", "folder"),
 		Handler:      makeCreateHandler(deps, "folders_create", gpa.LabelTypeFolder, labelTypeUserFolder),
 	}
 }
@@ -76,6 +78,7 @@ func labelsUpdate(deps Deps) mcp.Tool {
 		Description:  "Rename / recolor / reparent a user label.",
 		InputSchema:  json.RawMessage(crudUpdateSchema),
 		OutputSchema: json.RawMessage(crudResultSchema),
+		PromptBody:   crudUpdatePromptBody(deps, "labels_update", "label"),
 		Handler:      makeUpdateHandler(deps, "labels_update", labelTypeUserLabel),
 	}
 }
@@ -86,6 +89,7 @@ func foldersUpdate(deps Deps) mcp.Tool {
 		Description:  "Rename / recolor / reparent a user folder.",
 		InputSchema:  json.RawMessage(crudUpdateSchema),
 		OutputSchema: json.RawMessage(crudResultSchema),
+		PromptBody:   crudUpdatePromptBody(deps, "folders_update", "folder"),
 		Handler:      makeUpdateHandler(deps, "folders_update", labelTypeUserFolder),
 	}
 }
@@ -96,6 +100,7 @@ func labelsDelete(deps Deps) mcp.Tool {
 		Description:  "Delete a user label. Messages keep existing — they just lose this label from their classification.",
 		InputSchema:  json.RawMessage(crudDeleteSchema),
 		OutputSchema: json.RawMessage(crudDeleteResultSchema),
+		PromptBody:   crudDeletePromptBody(deps, "labels_delete", "label"),
 		Handler:      makeDeleteHandler(deps, "labels_delete"),
 	}
 }
@@ -106,8 +111,87 @@ func foldersDelete(deps Deps) mcp.Tool {
 		Description:  "Delete a user folder. Proton may refuse if the folder still contains messages; surface that as the tool result.",
 		InputSchema:  json.RawMessage(crudDeleteSchema),
 		OutputSchema: json.RawMessage(crudDeleteResultSchema),
+		PromptBody:   crudDeletePromptBody(deps, "folders_delete", "folder"),
 		Handler:      makeDeleteHandler(deps, "folders_delete"),
 	}
+}
+
+// crudCreatePromptBody — "create label 'Important' (color #00ff00)".
+// Doesn't take deps because the create input already carries the
+// human-readable name; nothing to look up.
+func crudCreatePromptBody(toolName, kind string) func(json.RawMessage) (string, string) {
+	return func(raw json.RawMessage) (string, string) {
+		var in crudLabelInput
+		_ = json.Unmarshal(raw, &in)
+		body := "create " + kind + " " + quote(in.Name)
+		if in.Color != "" {
+			body += " (color " + in.Color + ")"
+		}
+		if in.ParentID != "" {
+			body += " under parent " + shortID(in.ParentID)
+		}
+		title := mcp.SanitizePromptText("Approve "+toolName+"?", 120)
+		return title, mcp.SanitizePromptText(body, 4000)
+	}
+}
+
+// crudUpdatePromptBody — "rename label 'Important' to 'Critical'".
+// Captures deps to look up the current Name from the local mirror,
+// because the input only carries the id + the new value.
+func crudUpdatePromptBody(deps Deps, toolName, kind string) func(json.RawMessage) (string, string) {
+	return func(raw json.RawMessage) (string, string) {
+		var in crudLabelUpdateInput
+		_ = json.Unmarshal(raw, &in)
+		oldName := lookupLabelName(deps, in.ID)
+		var changes []string
+		if in.Name != "" {
+			changes = append(changes, "name → "+quote(in.Name))
+		}
+		if in.Color != "" {
+			changes = append(changes, "color → "+in.Color)
+		}
+		if in.ParentID != "" {
+			changes = append(changes, "parent → "+shortID(in.ParentID))
+		}
+		body := "update " + kind + " " + oldName
+		if len(changes) > 0 {
+			body += " (" + joinComma(changes) + ")"
+		}
+		title := mcp.SanitizePromptText("Approve "+toolName+"?", 120)
+		return title, mcp.SanitizePromptText(body, 4000)
+	}
+}
+
+// crudDeletePromptBody — "delete label 'Important'". Captures deps
+// to resolve the id to a name.
+func crudDeletePromptBody(deps Deps, toolName, kind string) func(json.RawMessage) (string, string) {
+	return func(raw json.RawMessage) (string, string) {
+		var in crudLabelDeleteInput
+		_ = json.Unmarshal(raw, &in)
+		name := lookupLabelName(deps, in.ID)
+		body := "delete " + kind + " " + name
+		if kind == "label" {
+			body += " (messages stay; classification removed)"
+		} else {
+			body += " (Proton refuses if folder still contains messages)"
+		}
+		title := mcp.SanitizePromptText("Approve "+toolName+"?", 120)
+		return title, mcp.SanitizePromptText(body, 4000)
+	}
+}
+
+func joinComma(parts []string) string {
+	switch len(parts) {
+	case 0:
+		return ""
+	case 1:
+		return parts[0]
+	}
+	out := parts[0]
+	for _, p := range parts[1:] {
+		out += ", " + p
+	}
+	return out
 }
 
 func makeCreateHandler(deps Deps, toolName string, lt gpa.LabelType, _ int) mcp.Handler {

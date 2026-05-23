@@ -162,13 +162,13 @@
 
 <h2>Status at a glance</h2>
 <div class="stats">
-  <div class="stat"><div class="stat-num">6</div><div class="stat-label">Open defects</div></div>
+  <div class="stat"><div class="stat-num">4</div><div class="stat-label">Open defects</div></div>
   <div class="stat"><div class="stat-num">0</div><div class="stat-label">Investigating</div></div>
-  <div class="stat"><div class="stat-num">31</div><div class="stat-label">Resolved</div></div>
+  <div class="stat"><div class="stat-num">33</div><div class="stat-label">Resolved</div></div>
   <div class="stat"><div class="stat-num">0</div><div class="stat-label"><span class="tag critical">critical</span></div></div>
   <div class="stat"><div class="stat-num">0</div><div class="stat-label"><span class="tag high">high</span></div></div>
-  <div class="stat"><div class="stat-num">4</div><div class="stat-label"><span class="tag medium">medium</span></div></div>
-  <div class="stat"><div class="stat-num">2</div><div class="stat-label"><span class="tag low">low</span></div></div>
+  <div class="stat"><div class="stat-num">3</div><div class="stat-label"><span class="tag medium">medium</span></div></div>
+  <div class="stat"><div class="stat-num">1</div><div class="stat-label"><span class="tag low">low</span></div></div>
 </div>
 
 <h2>Open</h2>
@@ -219,7 +219,10 @@ sensor.</p>
 <p class="meta"><strong>Related:</strong> Foundational #5 (deferred); Phase 7 packaging</p>
 
 
-<h3><span class="id">D36</span>Touch ID prompt is grammatically broken and over-redacted — user can't read what they're approving <span class="tag open">open</span> <span class="tag medium">medium</span></h3>
+<h3><span class="id">D36</span>Touch ID prompt is grammatically broken and over-redacted — user can't read what they're approving <span class="tag fixed">fixed in PR 7/A</span> <span class="tag medium">medium</span></h3>
+<p><strong>Fix:</strong> Two parts. (1) Per-tool <code>PromptBody</code> closures added to mail_move, mail_label, mail_trash, mail_draft_delete, labels_create/update/delete, folders_create/update/delete. Each closure looks up the message Subject (and folder name, where relevant) from the local SQLite mirror and renders a verb-phrase that completes the macOS-prepended subject ("move 'Re: gear list' from Inbox to Archive"). Helper functions in <code>internal/mcptools/prompt_helpers.go</code>. (2) New <code>opaqueIDKeys</code> carve-out in <code>internal/redact/redact.go</code> — message_id, destination, label_id, folder_id, thread_id, parent_id, in_reply_to, and id pass through verbatim instead of getting flattened to [REDACTED-VALUE]. Refresh tokens / cookies / passwords still redact. Regression guarded by <code>TestJSONOpaqueIDsSurvive</code>.</p>
+<p class="meta">Original report retained below for context.</p>
+<details><summary>Original evidence (2026-05-23)</summary>
 <p><strong>Reported:</strong> 2026-05-23 from live screenshot · Surface:
 <code>internal/mcp/middleware.go:defaultPromptBody</code>,
 <code>internal/redact/redact.go:looksLikeToken</code>, every prompted
@@ -268,6 +271,7 @@ Defensive: even if a PromptBody falls back to default, raw IDs
 should pass through unredacted — they're not secrets.</p>
 <p><strong>Tracking:</strong> See TODO.html Backlog section "Touch ID
 prompt readability" for the implementation sketch.</p>
+</details>
 
 <h3><span class="id">D11</span><code>raw_json</code> truncation produces invalid JSON <span class="tag fixed">fixed in PR 7/B</span> <span class="tag high">high</span></h3>
 <p><strong>Reported:</strong> 2026-05-22 (security re-audit) · Surface: <code>internal/proton/messages.go:108-110</code></p>
@@ -311,12 +315,9 @@ prompt readability" for the implementation sketch.</p>
 <p><strong>Remediation:</strong> Change <code>SearchMessages</code> to use <code>LIMIT ?</code> binding for consistency, even though <code>int</code> is safe. Or delete <code>SearchMessages</code> if <code>Search</code> has subsumed its use cases.</p>
 <p class="meta"><strong>Related:</strong> C-8 (FIXED partially — one path remains inconsistent)</p>
 
-<h3><span class="id">D30</span>Touch ID helper has no biometric-fallback path — Macs without Touch ID can't use prompted tools <span class="tag open">open</span> <span class="tag low">low</span></h3>
+<h3><span class="id">D30</span>Touch ID helper has no biometric-fallback path — Macs without Touch ID can't use prompted tools <span class="tag fixed">fixed in PR 7/A</span> <span class="tag low">low</span></h3>
 <p><strong>Reported:</strong> 2026-05-22 (security re-audit) · Surface: <code>helpers/touchid/main.swift:58-66</code></p>
-<p><strong>Evidence:</strong> Comment at line 62 acknowledges: "Phase 6 may fall through to a password prompt; v1 doesn't." For a Mac without Touch ID hardware (Mac Mini without an attached keyboard, MBP with damaged sensor) every prompt-decision tool fails closed with <code>ErrAuthFailed</code>. The Swift helper is the ONLY path for prompt-gated tools.</p>
-<p><strong>Impact:</strong> An entire class of macOS hardware can't use prompt-gated MCP tools at all — the broker reports <code>ErrAuthFailed</code> and the middleware writes <code>outcome=denied</code>. From a security standpoint, fail-closed is the right direction; from a usability standpoint, it means write tools are silently unusable.</p>
-<p><strong>Remediation:</strong> Change <code>.deviceOwnerAuthenticationWithBiometrics</code> to <code>.deviceOwnerAuthentication</code> (LAPolicy allows password fallback). Document in README.</p>
-<p class="meta"><strong>Related:</strong> new (Phase 4/C)</p>
+<p><strong>Fix:</strong> Swapped <code>.deviceOwnerAuthenticationWithBiometrics</code> for <code>.deviceOwnerAuthentication</code> in both the <code>canEvaluatePolicy</code> guard and the <code>evaluatePolicy</code> call. macOS now falls back to the user's login password when biometric hardware is missing or unavailable. Touch ID still runs first on hardware that has it.</p>
 
 <h2>Audit coverage</h2>
 <p>
