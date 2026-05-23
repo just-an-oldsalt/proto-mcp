@@ -105,6 +105,10 @@ func main() {
 		err = runPurge(ctx, args)
 	case "daemon":
 		err = runDaemon(ctx, args)
+	case "lock":
+		err = runLock(ctx, args)
+	case "unlock":
+		err = runUnlock(ctx, args)
 	case "help", "-h", "--help":
 		usage()
 		return
@@ -173,6 +177,14 @@ Commands:
                show                    Print the currently-effective policy.
                validate <path>         Parse a candidate policy file without
                                        touching the live daemon.
+  lock       Signal every running protonmcp serve-stdio or daemon to
+             drop its in-memory Proton session and refuse further tool
+             calls until unlocked. Touch ID is NOT re-prompted on lock —
+             only on the unlock side. (Phase 6/E.)
+  unlock     Signal every running daemon to prompt Touch ID and re-
+             acquire the session from the saved Keychain blob. Failure
+             (denied biometric, missing Keychain entry) leaves the
+             daemon locked; check audit log for the outcome.
   daemon     Manage the launchd LaunchAgent that runs protonmcpd.
              Subcommands:
                install                 Write the plist + bootstrap. Idempotent.

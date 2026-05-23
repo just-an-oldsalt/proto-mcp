@@ -130,6 +130,40 @@ tools:
 	}
 }
 
+// TestMiddlewareLockedRefusesCall — Phase 6/E: when the lock-state
+// callback returns true, the middleware short-circuits before any
+// policy / approval work and returns an ErrorResult mentioning
+// `protonmcp unlock`.
+func TestMiddlewareLockedRefusesCall(t *testing.T) {
+	called := false
+	srv := New(nil, WithLockState(func() (bool, string) { return true, "SIGUSR1" }))
+	srv.Register(Tool{
+		Name:        "echo",
+		Description: "echo",
+		InputSchema: json.RawMessage(`{"type":"object"}`),
+		Handler: func(ctx Context, _ json.RawMessage) (*ToolResult, error) {
+			called = true
+			return StructuredResult(map[string]string{"ok": "yes"})
+		},
+	})
+	resps := roundtrip(t, srv,
+		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}`,
+		`{"jsonrpc":"2.0","method":"notifications/initialized"}`,
+		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"echo","arguments":{}}}`,
+	)
+	if called {
+		t.Fatal("handler ran while runtime was locked")
+	}
+	result := resps[1]["result"].(map[string]any)
+	if result["isError"] != true {
+		t.Errorf("expected isError; got %+v", result)
+	}
+	text := result["content"].([]any)[0].(map[string]any)["text"].(string)
+	if !strings.Contains(text, "locked") || !strings.Contains(text, "protonmcp unlock") {
+		t.Errorf("locked-daemon text missing expected hints: %s", text)
+	}
+}
+
 // TestMiddlewarePromptWithoutBrokerFallsToDeny — policy says prompt
 // but no broker is configured → safe fallback is deny, not silent
 // allow.

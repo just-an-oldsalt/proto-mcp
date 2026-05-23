@@ -17,6 +17,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -47,8 +48,87 @@ type Runtime struct {
 	Resolver  *caller.Resolver
 	MCPServer *mcp.Server
 
+	// Phase 6/E — lock/unlock state. The lock signal (SIGUSR1 or
+	// `protonmcp lock`) zeroes Session and flips Locked=true; the
+	// MCP middleware checks Locked before running any tool and
+	// returns a structured "daemon_locked" error. Unlock (SIGUSR2
+	// or `protonmcp unlock`) prompts Touch ID via the existing
+	// approval broker, then re-runs the session-acquire callback.
+	//
+	// The Locked flag is intentionally readable without a lock
+	// (via Locked() method). Concurrent reads from middleware vs
+	// writes from the signal handler are race-safe via the mu
+	// mutex on the write path; the worst-case race lets one
+	// in-flight tool call get through during the lock signal,
+	// which is acceptable (lock is best-effort hygiene, not a
+	// hard wall).
+	mu             sync.RWMutex
+	locked         bool
+	lockReason     string
+	acquireSession func(context.Context) (SessionBundle, error)
+
 	hupStop   chan struct{}
 	pidUnlink func()
+}
+
+// Locked reports whether the runtime is currently in the locked
+// state. Middleware checks this on every tool call.
+func (r *Runtime) Locked() (bool, string) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.locked, r.lockReason
+}
+
+// Lock zeroes the in-memory session and flips Locked=true. Idempotent
+// (re-lock from an already-locked state is a no-op). Reason is shown
+// to the LLM in the structured error response so it knows whether
+// the lock was manual, idle, or signal-driven.
+func (r *Runtime) Lock(reason string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.locked {
+		return
+	}
+	r.locked = true
+	r.lockReason = reason
+	if r.Session != nil {
+		// Session.Close() zeros the in-memory keyring + drops
+		// the access/refresh tokens from the wrapped client. The
+		// Keychain blob is untouched; unlock re-loads from there.
+		r.Session.Close()
+	}
+	// Drop every cached approval — a locked-then-unlocked daemon
+	// shouldn't honor pre-lock prompts (the user may have wanted
+	// to revoke them by locking).
+	if r.Broker != nil {
+		r.Broker.Invalidate()
+	}
+	slog.Info("daemon locked", "reason", reason)
+}
+
+// Unlock re-acquires the session by calling the same callback that
+// Setup used at startup. Caller-supplied (typically Touch ID gated
+// via the approval broker). Returns the error from session acquire
+// so the CLI / signal handler can report it.
+func (r *Runtime) Unlock(ctx context.Context) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.locked {
+		return nil
+	}
+	if r.acquireSession == nil {
+		return errors.New("runtime: no acquireSession callback registered for unlock")
+	}
+	bundle, err := r.acquireSession(ctx)
+	if err != nil {
+		return err
+	}
+	r.Bundle = bundle
+	r.Session = bundle.GetSession()
+	r.locked = false
+	r.lockReason = ""
+	slog.Info("daemon unlocked")
+	return nil
 }
 
 // SessionBundle is the cmd-side wrapper around a Proton session.
@@ -128,12 +208,31 @@ func Setup(ctx context.Context, cfg SetupConfig) (*Runtime, error) {
 		}
 	}
 
-	// 3. Session (eager-acquire).
+	// 3. Session (eager-acquire). Phase 6/E — wrapped in a
+	// Touch-ID-at-startup gate via the approval broker if one is
+	// available. This is the application-layer substitute for the
+	// Keychain ACL we deferred: even though the keychain blob is
+	// readable without biometric (keybase/go-keychain doesn't
+	// expose SecAccessControl), every session-acquire — both
+	// initial startup and SIGUSR2-driven unlock — prompts Touch
+	// ID before the keychain is touched. Same net UX.
 	if cfg.AcquireSession == nil {
 		_ = st.Close()
 		return nil, errors.New("serve.Setup: AcquireSession is required")
 	}
-	bundle, err := cfg.AcquireSession(ctx)
+
+	// Resolve helper now so we know up-front whether to install
+	// the startup gate. Missing helper is non-fatal: we degrade
+	// to the Phase-5 behavior (acquire-without-prompt at startup),
+	// and the same warning fires later when the broker construction
+	// would have happened.
+	startupHelperPath, helperResolveErr := approval.ResolveHelperPath(os.Args[0])
+	gatedAcquire := cfg.AcquireSession
+	if helperResolveErr == nil {
+		gatedAcquire = newStartupGatedAcquire(startupHelperPath, cfg.AcquireSession, logger)
+	}
+
+	bundle, err := gatedAcquire(ctx)
 	if err != nil {
 		_ = st.Close()
 		return nil, fmt.Errorf("acquire session: %w", err)
@@ -191,14 +290,15 @@ func Setup(ctx context.Context, cfg SetupConfig) (*Runtime, error) {
 	}
 
 	// 7. Approval broker — missing helper is non-fatal.
-	helperPath, herr := approval.ResolveHelperPath(os.Args[0])
+	// Reuse the path resolution result from the Touch-ID-at-startup
+	// gate above so we only pgrep + stat once.
 	var broker *approval.Broker
-	if herr != nil {
+	if helperResolveErr != nil {
 		logger.Warn("touchid helper not found; prompted tools will be denied",
 			"hint", "run `make touchid` from the repo root",
-			"err", herr.Error())
+			"err", helperResolveErr.Error())
 	} else {
-		broker, err = approval.New(helperPath, logger)
+		broker, err = approval.New(startupHelperPath, logger)
 		if err != nil {
 			_ = auditWriter.Close()
 			pidCleanup()
@@ -237,10 +337,16 @@ func Setup(ctx context.Context, cfg SetupConfig) (*Runtime, error) {
 	}()
 
 	// 10. MCP server with full middleware stack.
+	//
+	// rt is built post-srv so the lock-state callback closes over
+	// it. Done in two steps so the closure has a stable target.
+	rt := &Runtime{}
 	opts := []mcp.Option{
 		mcp.WithPolicy(engine),
 		mcp.WithAudit(auditWriter),
 		mcp.WithCallerResolver(resolver),
+		mcp.WithRateLimitPersister(newRateLimitStoreAdapter(st)),
+		mcp.WithLockState(rt.Locked),
 	}
 	if broker != nil {
 		opts = append(opts, mcp.WithApproval(broker))
@@ -254,18 +360,39 @@ func Setup(ctx context.Context, cfg SetupConfig) (*Runtime, error) {
 		srv.Register(tl)
 	}
 
-	return &Runtime{
-		Store:     st,
-		Session:   sess,
-		Bundle:    bundle,
-		Policy:    engine,
-		Audit:     auditWriter,
-		Broker:    broker,
-		Resolver:  resolver,
-		MCPServer: srv,
-		hupStop:   hupStop,
-		pidUnlink: pidCleanup,
-	}, nil
+	rt.Store = st
+	rt.Session = sess
+	rt.Bundle = bundle
+	rt.Policy = engine
+	rt.Audit = auditWriter
+	rt.Broker = broker
+	rt.Resolver = resolver
+	rt.MCPServer = srv
+	rt.hupStop = hupStop
+	rt.pidUnlink = pidCleanup
+	rt.acquireSession = gatedAcquire
+
+	// Phase 6/E — install SIGUSR1 / SIGUSR2 handlers for lock /
+	// unlock. The signals are documented in the protonmcp lock /
+	// unlock CLI subcommands; the daemon binary's main signal
+	// loop is separate (SIGTERM-as-shutdown), so these two are
+	// handled here.
+	usrCh := make(chan os.Signal, 2)
+	signal.Notify(usrCh, syscall.SIGUSR1, syscall.SIGUSR2)
+	go func() {
+		for sig := range usrCh {
+			switch sig {
+			case syscall.SIGUSR1:
+				rt.Lock("SIGUSR1")
+			case syscall.SIGUSR2:
+				if err := rt.Unlock(context.Background()); err != nil {
+					logger.Warn("unlock failed", "err", err.Error())
+				}
+			}
+		}
+	}()
+
+	return rt, nil
 }
 
 // Close tears down the runtime in reverse setup order. Safe to call

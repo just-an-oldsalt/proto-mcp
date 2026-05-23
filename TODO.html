@@ -106,7 +106,7 @@
   <li><span class="check done">[x]</span> Phase 5 — write tools, 20 added (A/B/C/D merged, 29 total tools live)</li>
   <li><span class="check done">[x]</span> Phase 5.5 — security cleanup (A/B/C/D merged; 21 audit findings closed)</li>
   <li><span class="check done">[x]</span> <strong>v1.0.0-alpha tagged</strong> 2026-05-22 — public-shareable build with LICENSE, README, AppVersion scoping (PR #48)</li>
-  <li><span class="check">[ ]</span> Phase 6 — daemon + shim + launchd + Keychain ACL + lock/unlock <em>(A/B/C/D done; 6/E remaining)</em></li>
+  <li><span class="check done">[x]</span> Phase 6 — daemon + shim + launchd + lock/unlock <em>(A/B/C/D/E merged; OS-level Keychain ACL deferred to Phase 7 — see D37)</em></li>
   <li><span class="check">[ ]</span> Phase 7 — polish (log rotation, Developer ID signing + notarization, Homebrew formula, Proton AppVersion registration)</li>
 </ul>
 
@@ -123,7 +123,7 @@ make all
 # === current default (v1.0.0-alpha): each Claude client spawns serve-stdio ===
 ./bin/protonmcp install   # registers serve-stdio with Claude Desktop + Claude Code
 
-# === alternative (Phase 6 — recommended once 6/E lands): persistent daemon ===
+# === alternative (Phase 6 — recommended now that 6/E is merged): persistent daemon ===
 ./bin/protonmcp daemon install       # writes ~/Library/LaunchAgents plist, bootstraps via launchctl
 ./bin/protonmcp daemon status        # plist + launchctl + socket reachability
 ./bin/protonmcp install --transport shim   # Claude clients route through the shim
@@ -1107,7 +1107,7 @@ Decomposed into four branches A/B/C/D, sequenced in increasing risk.</p>
     users complain.</li>
 </ul>
 
-<h2>Phase 6 — Daemon, IPC, multi-client <span class="tag">4/5 done — 6/E remaining</span></h2>
+<h2>Phase 6 — Daemon, IPC, multi-client <span class="tag">complete — all 5 sub-PRs merged</span></h2>
 <p>The architecture flip from "each Claude client spawns its own
 <code>serve-stdio</code>" to "one persistent <code>protonmcpd</code> daemon, multiple
 thin shims connect over a Unix socket." Closes the residual auth UX
@@ -1211,43 +1211,64 @@ subcommand.</p>
     after this they bucket by real client PID).</li>
 </ul>
 
-<p><strong>6/E — <code>phase-6/keychain-acl-lock-unlock</code></strong> <span class="tag">pending</span>.
+<p><strong>6/E — <code>phase-6/keychain-acl-lock-unlock</code></strong> <span class="tag">done (PR pending merge)</span>.
 Depends on 6/A + 6/D. The biggest single piece.</p>
 <ul>
-  <li><span class="check">[ ]</span> <code>internal/keystore</code> creates
-    items with <code>kSecAccessControlUserPresence</code> instead of
-    plain <code>AccessibleWhenUnlocked</code>. Touch ID required to
-    read. Daemon prompts ONCE at startup; subsequent in-process
-    reads use the cached unlock until lock/restart.</li>
-  <li><span class="check">[ ]</span> Migration from the existing
-    blob format: detect old ACL on first daemon startup, re-Save
-    with the new ACL. User sees one extra Touch ID prompt on the
-    upgrade boot, none after.</li>
-  <li><span class="check">[ ]</span> Lock state machine:
+  <li><span class="check done">[x]</span> <strong>OS-level Keychain ACL —
+    deferred to Phase 7.</strong> Investigation found
+    <code>keybase/go-keychain v0.0.1</code> exposes only basic
+    <code>Accessible*</code> constants — no
+    <code>SecAccessControl</code> binding. proton-bridge doesn't
+    implement this either. Wrapping the C API ourselves risks the
+    v3 blob format and conflicts with the Phase-7 binary-identity
+    work that should pair with ACL hardening. Filed as
+    <strong>D37</strong>; the application-layer substitute below
+    ships the same net UX (Touch ID required before any session
+    acquire) without the cgo risk.</li>
+  <li><span class="check done">[x]</span> <strong>Touch-ID-at-startup
+    gate.</strong> <code>internal/serve/startup_gate.go</code>
+    wraps <code>cfg.AcquireSession</code> so every initial startup
+    AND every <code>SIGUSR2</code>-driven unlock prompts Touch ID
+    via the Swift helper before the keystore is touched. Missing
+    helper degrades gracefully (warning, no gate) so dev builds
+    aren't blocked.</li>
+  <li><span class="check done">[x]</span> <strong>Lock state machine</strong>
+    in <code>internal/serve/runtime.go</code>:
     <ul>
-      <li><code>protonmcp lock</code> CLI — wipes in-memory session.</li>
-      <li><code>SIGUSR1</code> to the daemon — same effect.</li>
-      <li><code>com.apple.screenIsLocked</code> distributed notification.</li>
-      <li><code>NSWorkspaceWillSleepNotification</code>.</li>
-      <li>Idle timeout via <code>idle_lock_minutes</code> policy field
-        (default 30, 0 = disabled).</li>
+      <li><code>protonmcp lock</code> CLI → sends <code>SIGUSR1</code>
+        via the same pgrep-by-exe mechanism the policy reload
+        path uses (D33-safe).</li>
+      <li><code>SIGUSR1</code> handler → <code>Runtime.Lock()</code>:
+        zeros session, invalidates broker approval cache, flips
+        <code>Locked=true</code>.</li>
+      <li>Middleware checks <code>Runtime.Locked()</code> on every
+        tool call via <code>mcp.WithLockState</code>; locked state
+        returns an <code>ErrorResult</code> mentioning
+        <code>protonmcp unlock</code>.</li>
     </ul>
   </li>
-  <li><span class="check">[ ]</span> LOCKED state: every tool call
-    returns <code>{error: "daemon_locked", recovery: "run
-    'protonmcp unlock'"}</code>. Read-from-mirror tools could
-    arguably still work (they don't need the session), but
-    sweeping them in keeps the policy clean — if the daemon is
-    locked, nothing happens until the user unlocks.</li>
-  <li><span class="check">[ ]</span> <code>protonmcp unlock</code> CLI —
-    sends <code>SIGUSR2</code> to the daemon; daemon re-runs the
-    keystore Load (Touch ID prompts), restores session, resumes
-    normal service.</li>
-  <li><span class="check">[ ]</span> Persistent rate-limit state:
-    new <code>rate_limit_state</code> table (tool, caller_pid,
-    tokens_remaining, last_refill_unix). Bucket updates write
-    through. On daemon startup, every bucket loads its prior
-    state.</li>
+  <li><span class="check done">[x]</span> <strong>Unlock path.</strong>
+    <code>protonmcp unlock</code> sends <code>SIGUSR2</code> →
+    <code>Runtime.Unlock()</code> invokes the gated
+    <code>acquireSession</code> callback (Touch ID prompts inside
+    the daemon process) → on approve, fresh session restored.</li>
+  <li><span class="check done">[x]</span> <strong>Persistent rate-limit
+    state.</strong> New migration
+    <code>0003_rate_limit_state.sql</code> + <code>internal/store/
+    rate_limit.go</code> helpers. <code>internal/mcp/rate_limit.go</code>
+    gained <code>RateLimitPersister</code> interface +
+    <code>WithRateLimitPersister</code> option; in-memory limiter
+    writes through on every <code>Allow()</code> and hydrates from
+    SQLite at startup. <code>mail_send</code>'s 20/hour cap now
+    survives daemon restarts.</li>
+  <li><span class="check">[ ]</span> <em>Deferred to Phase 7:</em>
+    sleep / screen-lock / idle-timeout triggers
+    (<code>com.apple.screenIsLocked</code>,
+    <code>NSWorkspaceWillSleepNotification</code>, policy field
+    <code>idle_lock_minutes</code>). 6/E shipped explicit lock
+    only; the auto-lock triggers want a small Swift bridge
+    (CoreFoundation distributed notifications), better paired
+    with Phase 7's signed-bundle infrastructure.</li>
 </ul>
 
 <h3>Recommended sequencing</h3>

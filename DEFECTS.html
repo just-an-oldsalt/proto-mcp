@@ -162,24 +162,62 @@
 
 <h2>Status at a glance</h2>
 <div class="stats">
-  <div class="stat"><div class="stat-num">8</div><div class="stat-label">Open defects</div></div>
+  <div class="stat"><div class="stat-num">9</div><div class="stat-label">Open defects</div></div>
   <div class="stat"><div class="stat-num">0</div><div class="stat-label">Investigating</div></div>
   <div class="stat"><div class="stat-num">28</div><div class="stat-label">Resolved</div></div>
   <div class="stat"><div class="stat-num">0</div><div class="stat-label"><span class="tag critical">critical</span></div></div>
   <div class="stat"><div class="stat-num">1</div><div class="stat-label"><span class="tag high">high</span></div></div>
   <div class="stat"><div class="stat-num">4</div><div class="stat-label"><span class="tag medium">medium</span></div></div>
-  <div class="stat"><div class="stat-num">3</div><div class="stat-label"><span class="tag low">low</span></div></div>
+  <div class="stat"><div class="stat-num">4</div><div class="stat-label"><span class="tag low">low</span></div></div>
 </div>
 
 <h2>Open</h2>
 <p class="meta">
   Seven residual defects from the 2026-05-22 security re-audit + one
-  UX defect surfaced from live testing on 2026-05-23. The audit
-  findings landed in PRs #43–#47 + #51–#54 — see <em>Resolved</em> below
-  for what shipped and where. The carry-overs here are either prior-
-  audit-cycle items (B-6, B-9, M-4) or Low / Phase-6-adjacent hygiene
-  the fix batch deliberately skipped.
+  UX defect surfaced from live testing on 2026-05-23 + one deliberate
+  deferral filed alongside PR 6/E. The audit findings landed in PRs
+  #43–#47 + #51–#54 — see <em>Resolved</em> below for what shipped
+  and where. The carry-overs here are either prior-audit-cycle items
+  (B-6, B-9, M-4) or Low / Phase-6-adjacent hygiene the fix batch
+  deliberately skipped.
 </p>
+
+<h3><span class="id">D37</span>Keychain blob lacks SecAccessControl Touch ID requirement — daemon-layer gate is the substitute <span class="tag open">open</span> <span class="tag low">low</span></h3>
+<p><strong>Reported:</strong> 2026-05-23 (Phase 6/E sign-off) ·
+Surface: <code>internal/keystore/keystore.go</code> (saves blob with
+plain <code>AccessibleWhenUnlocked</code>); upstream limit in
+<code>keybase/go-keychain v0.0.1</code>.</p>
+<p><strong>Evidence:</strong> Foundational #5 from the Phase 6
+planning doc asked for the Keychain item to require Touch ID at
+the OS level via <code>kSecAttrAccessControl</code> +
+<code>kSecAccessControlUserPresence</code>. The Go wrapper we use
+(<code>keybase/go-keychain v0.0.1</code>) only exposes the basic
+<code>Accessible*</code> constants — there's no
+<code>SecAccessControl</code> binding. Confirmed by reading the
+library source + an Explore sweep of proton-bridge, which also
+doesn't implement this. Wrapping <code>SecAccessControl</code>
+ourselves would require new cgo and risks the existing v3 blob
+format.</p>
+<p><strong>Impact:</strong> Any process running as the user that
+discovers the Keychain item and has the user's login keychain
+unlocked can read the saved Proton token blob without a fresh
+biometric prompt. Mitigated today by macOS's per-app keychain ACL
+(only signed-as-<code>protonmcp</code> binaries can decrypt the
+item without a per-call prompt) and by the application-layer
+substitute shipped in PR 6/E (Touch-ID-at-startup + lock/unlock
+state machine — every session-acquire prompts Touch ID before
+touching the Keychain).</p>
+<p><strong>Remediation:</strong> Phase 7 binary-identity work
+(signed bundle, hardened runtime) is the natural pairing for OS-
+level ACL hardening. At that point either upstream a
+<code>SecAccessControl</code> binding to <code>keybase/go-keychain</code>
+or write a thin cgo wrapper in <code>internal/keystore</code> that
+sets <code>kSecAttrAccessControl</code> on save. Until then the
+Phase 6/E gate covers the practical UX: an attacker with code-exec
+as our UID still cannot get a fresh session without touching the
+sensor.</p>
+<p class="meta"><strong>Related:</strong> Foundational #5 (deferred); Phase 7 packaging</p>
+
 
 <h3><span class="id">D36</span>Touch ID prompt is grammatically broken and over-redacted — user can't read what they're approving <span class="tag open">open</span> <span class="tag medium">medium</span></h3>
 <p><strong>Reported:</strong> 2026-05-23 from live screenshot · Surface:

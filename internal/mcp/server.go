@@ -115,6 +115,48 @@ func WithCallerResolver(r *caller.Resolver) Option {
 	}
 }
 
+// WithRateLimitPersister wires the in-memory rate-limit token
+// buckets to a persistent store. Phase 6/E — without this, daemon
+// restarts grant fresh budgets (a misbehaving client could trigger
+// restart-loops to bypass mail_send 20/hour). The persister is
+// loaded eagerly: every persisted bucket is hydrated into memory at
+// option-apply time.
+//
+// nil persister is a no-op (in-memory-only, the Phase-5/D shape).
+func WithRateLimitPersister(p RateLimitPersister) Option {
+	return func(s *Server) {
+		if p == nil {
+			return
+		}
+		if s.middleware == nil {
+			s.middleware = &Middleware{}
+		}
+		s.middleware.ensureRate()
+		_ = s.middleware.rate.setPersister(p)
+	}
+}
+
+// WithLockState wires a callback the middleware checks before every
+// tool call. Returning (true, reason) makes the middleware short-
+// circuit with ErrorResult "daemon_locked: <reason>"; no audit row
+// for handler execution is written (the deny is recorded with
+// outcome=denied + error_msg=daemon_locked).
+//
+// Phase 6/E. The serve.Runtime hands its Locked() method here so
+// SIGUSR1 / `protonmcp lock` immediately gates every connected
+// client without tearing down the listening socket.
+func WithLockState(fn func() (bool, string)) Option {
+	return func(s *Server) {
+		if fn == nil {
+			return
+		}
+		if s.middleware == nil {
+			s.middleware = &Middleware{}
+		}
+		s.middleware.lockState = fn
+	}
+}
+
 // New returns a Server with the given logger and any number of
 // functional options. nil logger uses slog.Default(); no options →
 // the Phase-3 baseline (no audit, no policy, no approval — every
