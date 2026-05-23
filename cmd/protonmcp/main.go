@@ -103,6 +103,8 @@ func main() {
 		err = runPolicy(ctx, args)
 	case "purge":
 		err = runPurge(ctx, args)
+	case "daemon":
+		err = runDaemon(ctx, args)
 	case "help", "-h", "--help":
 		usage()
 		return
@@ -171,6 +173,14 @@ Commands:
                show                    Print the currently-effective policy.
                validate <path>         Parse a candidate policy file without
                                        touching the live daemon.
+  daemon     Manage the launchd LaunchAgent that runs protonmcpd.
+             Subcommands:
+               install                 Write the plist + bootstrap. Idempotent.
+               uninstall               Bootout + remove the plist.
+               start                   Kickstart the daemon.
+               stop                    SIGTERM the running instance.
+               restart                 stop + start.
+               status                  Report plist / launchctl / socket state.
   help       Show this help.
 
 The session is persisted in the macOS Keychain (service
