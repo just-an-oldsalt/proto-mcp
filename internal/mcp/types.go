@@ -109,6 +109,26 @@ type Tool struct {
 	InputSchema  json.RawMessage `json:"inputSchema"`
 	OutputSchema json.RawMessage `json:"outputSchema,omitempty"`
 	Handler      Handler         `json:"-"`
+
+	// Phase 5/D extensions. Both are optional; nil → middleware
+	// uses generic fallbacks. Both kept here on Tool (not on a
+	// separate map) so tool authors register everything they need
+	// in one place.
+
+	// Recipients extracts the email-address list from the args of
+	// THIS tool call. Used by the allowed_recipients middleware
+	// stage. Returning an empty slice means "no recipient
+	// restriction applies" — the stage skips. Send-family tools
+	// populate this; everything else leaves it nil.
+	Recipients func(args json.RawMessage) []string `json:"-"`
+
+	// PromptBody builds the NSAlert title + body shown to the user
+	// when policy says prompt + confirm. Send-family tools should
+	// populate this with literal recipients + subject so the user
+	// reads exactly what they're approving. nil → middleware uses
+	// the generic "tool was requested with these (redacted) args"
+	// body.
+	PromptBody func(args json.RawMessage) (title, body string) `json:"-"`
 }
 
 // Handler is the tool's actual implementation. params is the raw
