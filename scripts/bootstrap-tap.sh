@@ -54,7 +54,7 @@ if gh repo view "$TAP_FULL" >/dev/null 2>&1; then
     echo "Tap repo $TAP_FULL already exists; will update."
     gh repo clone "$TAP_FULL" "$WORKDIR/$TAP_NAME"
 else
-    echo "Creating $TAP_FULL ($TAP_VISIBILITY)…"
+    echo "Creating $TAP_FULL ($TAP_VISIBILITY)..."
     gh repo create "$TAP_FULL" \
         "--$TAP_VISIBILITY" \
         --description "Homebrew tap for proto-mcp" \
@@ -76,7 +76,7 @@ mkdir -p Casks
 # inject them; otherwise keep the placeholder values from the
 # source cask.
 if [ -n "$VERSION" ] && [ -n "$SHA256" ]; then
-    echo "Updating cask to version $VERSION + sha256 $SHA256…"
+    echo "Updating cask to version $VERSION + sha256 $SHA256..."
     # macOS sed needs -i ''; we write to a temp + mv to avoid
     # platform sed flags drifting.
     sed -e "s|version \"0\.0\.0\"|version \"$VERSION\"|" \
@@ -86,7 +86,7 @@ elif [ -n "$VERSION" ] || [ -n "$SHA256" ]; then
     echo "error: provide BOTH version and sha256, or neither (for placeholder bootstrap)." >&2
     exit 1
 else
-    echo "Copying cask with placeholder version/sha256 (bootstrap mode)…"
+    echo "Copying cask with placeholder version/sha256 (bootstrap mode)..."
     cp "$SOURCE_CASK" Casks/proto-mcp.rb
 fi
 
