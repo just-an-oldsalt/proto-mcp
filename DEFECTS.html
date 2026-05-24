@@ -162,25 +162,49 @@
 
 <h2>Status at a glance</h2>
 <div class="stats">
-  <div class="stat"><div class="stat-num">3</div><div class="stat-label">Open defects</div></div>
+  <div class="stat"><div class="stat-num">5</div><div class="stat-label">Open defects</div></div>
   <div class="stat"><div class="stat-num">0</div><div class="stat-label">Investigating</div></div>
   <div class="stat"><div class="stat-num">34</div><div class="stat-label">Resolved</div></div>
   <div class="stat"><div class="stat-num">0</div><div class="stat-label"><span class="tag critical">critical</span></div></div>
   <div class="stat"><div class="stat-num">0</div><div class="stat-label"><span class="tag high">high</span></div></div>
   <div class="stat"><div class="stat-num">2</div><div class="stat-label"><span class="tag medium">medium</span></div></div>
-  <div class="stat"><div class="stat-num">1</div><div class="stat-label"><span class="tag low">low</span></div></div>
+  <div class="stat"><div class="stat-num">3</div><div class="stat-label"><span class="tag low">low</span></div></div>
 </div>
 
 <h2>Open</h2>
 <p class="meta">
   Seven residual defects from the 2026-05-22 security re-audit + one
   UX defect surfaced from live testing on 2026-05-23 + one deliberate
-  deferral filed alongside PR 6/E. The audit findings landed in PRs
-  #43–#47 + #51–#54 — see <em>Resolved</em> below for what shipped
-  and where. The carry-overs here are either prior-audit-cycle items
-  (B-6, B-9, M-4) or Low / Phase-6-adjacent hygiene the fix batch
-  deliberately skipped.
+  deferral filed alongside PR 6/E + two paper cuts surfaced from
+  Phase 7/C live signing/notarization. The audit findings landed in
+  PRs #43–#47 + #51–#54 — see <em>Resolved</em> below for what
+  shipped and where. The carry-overs here are either prior-audit-cycle
+  items (B-6, B-9, M-4) or Low / Phase-6-adjacent hygiene the fix
+  batch deliberately skipped.
 </p>
+
+<h3><span class="id">D39</span><code>launchctl bootstrap</code> race after bootout in <code>protonmcp daemon install</code> <span class="tag open">open</span> <span class="tag low">low</span></h3>
+<p><strong>Reported:</strong> 2026-05-23 (Phase 7/C smoke test) · Surface: <code>cmd/protonmcp/daemon.go:runDaemonInstall</code> (the bootout → bootstrap sequence).</p>
+<p><strong>Evidence:</strong> Live test re-installing the daemon to record <code>expected_sha256</code> returned <code>Bootstrap failed: 5: Input/output error</code> from <code>launchctl</code>. The bootout that preceded it had already succeeded (verified via <code>launchctl print "gui/$UID/zone.dort.protonmcpd"</code> → "Could not find service"), the <code>expected_sha256</code> file was written, and a manual <code>launchctl bootstrap gui/$UID ~/Library/LaunchAgents/zone.dort.protonmcpd.plist</code> a few seconds later succeeded. Looks like launchd needs a brief settle window after bootout before it'll accept a fresh bootstrap of the same label.</p>
+<p><strong>Impact:</strong> User running <code>protonmcp daemon install</code> against an already-installed daemon sees a confusing error and has to re-run manually. The plist + integrity file are correctly written, so a second invocation (or the manual bootstrap) recovers — but the failure mode is alarming and undermines confidence in the install flow.</p>
+<p><strong>Remediation:</strong> Wrap the <code>bootstrap</code> call in a small retry loop with backoff (100ms, 250ms, 500ms, give up after ~1s total). Treat the first I/O error as expected during the bootout-to-bootstrap transition. Same pattern as <code>runDaemonRestart</code>'s 500ms settle window between stop and start.</p>
+<p class="meta"><strong>Related:</strong> new (Phase 7/C smoke test)</p>
+
+<h3><span class="id">D38</span>Redacting slog handler over-redacts operator-facing diagnostics in <code>protonmcpd</code> integrity-check errors <span class="tag open">open</span> <span class="tag low">low</span></h3>
+<p><strong>Reported:</strong> 2026-05-23 (Phase 7/C swap-attack smoke test) · Surface: <code>internal/redact/redact.go:looksLikeToken</code>, the error path in <code>cmd/protonmcpd/integrity.go:VerifyBinaryIntegrity</code>.</p>
+<p><strong>Evidence:</strong> Live integrity-check failure produced this log line:</p>
+<pre><code>level=ERROR msg="refusing to start" err="binary integrity check FAILED
+  running:   /[REDACTED-TOKEN]
+  running sha256:    [REDACTED-TOKEN]
+  expected (from install): [REDACTED-TOKEN]
+  expected path: /[REDACTED-TOKEN]
+  This indicates the binary was replaced after install. Either restore
+  the original binary or re-run `protonmcp daemon install` to record
+  the new hash"</code></pre>
+<p>SHA-256 hex strings (64 chars of alphanumeric) and absolute filesystem paths (32+ chars containing slashes) both trip <code>looksLikeToken</code> via the <code>scrubEmbeddedTokens</code> path on the wrapped error string. The user-actionable instruction survives ("re-run protonmcp daemon install"), but the diagnostic detail (which hash mismatched, which path the daemon was running from) is gone. Same class of over-redaction as D36 (Touch ID prompt opaque IDs), just in a different output channel.</p>
+<p><strong>Impact:</strong> Low. Operator can still tell what to do but can't tell what changed without running <code>shasum -a 256</code> manually against both the running binary and the recorded path. Hampers root-cause analysis during a real swap-attack response.</p>
+<p><strong>Remediation:</strong> Either route the integrity-check error around the redacting handler entirely (it's pre-startup, pre-PII; no body content yet) OR extend the <code>opaqueIDKeys</code> carve-out (added in 7/A) so SHA-256 hex and absolute paths attached to known-safe keys pass through. The cleaner option is the first: <code>VerifyBinaryIntegrity</code> can <code>fmt.Fprintln</code> directly to <code>os.Stderr</code> for the failure message, bypassing slog. Pre-daemon code has no need for redaction.</p>
+<p class="meta"><strong>Related:</strong> [[D36]] (same over-redaction shape, different surface); new (Phase 7/C smoke test)</p>
 
 <h3><span class="id">D37</span>Keychain blob lacks SecAccessControl Touch ID requirement — daemon-layer gate is the substitute <span class="tag open">open</span> <span class="tag low">low</span></h3>
 <p><strong>Reported:</strong> 2026-05-23 (Phase 6/E sign-off) ·
