@@ -48,14 +48,18 @@ func runLogin(ctx context.Context, _ []string) error {
 	primary, _ := sess.PrimaryAddress()
 	fmt.Printf("Logged in as %s (%s). Session stored in Keychain.\n",
 		sess.Email, coalesce(primary.Email, "no primary address"))
-	// SECURITY B-7. The Keychain item uses AccessibleWhenUnlocked, which
-	// only gates device state — not which process reads it. Until this
-	// binary is code-signed (Phase 7), any other process running as the
-	// same user can read the refresh token + salted mailbox pass. Make
-	// this loud at login time so it isn't a surprise.
-	fmt.Println("Warning: until protonmcp is code-signed, any process running as your user can read")
-	fmt.Println("the stored session (refresh token + salted mailbox pass). Code-signing is tracked")
-	fmt.Println("in Phase 7. Run `protonmcp logout` before installing untrusted software.")
+	// SECURITY B-7 (residual). Phase 7/C ships Developer-ID signing
+	// and notarization, which closes the "any binary at this path
+	// can launch and impersonate us" half of the threat. Phase 7/D's
+	// SecAccessControl path would close the "any same-UID process can
+	// read the saved blob" half but is blocked on a provisioning
+	// profile (D37, deferred to Phase 7/E .app-bundle work). Until
+	// then, the application-layer Touch ID gate (Phase 6/E + 7/A)
+	// is the practical guarantee: every session-acquire prompts the
+	// user before the keychain is touched.
+	fmt.Println("Note: a same-UID process with the login keychain unlocked can still read this")
+	fmt.Println("session blob directly. The Touch ID startup gate is the active mitigation;")
+	fmt.Println("OS-level keychain ACL hardening is tracked as D37 (Phase 7/E packaging).")
 	return nil
 }
 
