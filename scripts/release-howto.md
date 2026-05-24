@@ -77,17 +77,29 @@ lets you write release notes before flipping the visibility.
    (or run `gh release view v1.0.0`). Edit notes in the GitHub UI.
 2. **Publish.** Click the green Publish button (or
    `gh release edit v1.0.0 --draft=false`).
-3. **Update the Homebrew cask.** Copy `Formula/proto-mcp.rb` from
-   this repo into your `homebrew-proto-mcp` tap repo. Update:
-   ```ruby
-   version "1.0.0"
-   sha256 "<the sha from dist/proto-mcp-1.0.0.tar.gz.sha256>"
+3. **Update the Homebrew cask.** Run the bootstrap script with
+   the new version and sha256:
+   ```sh
+   SHA=$(awk '{print $1}' dist/proto-mcp-1.0.0.tar.gz.sha256)
+   ./scripts/bootstrap-tap.sh 1.0.0 "$SHA"
+   # OR: make bootstrap-tap VERSION=1.0.0 SHA256=$SHA
    ```
-   Commit + push the tap. Users then run:
+   The script clones the tap repo
+   (`github.com/just-an-oldsalt/homebrew-proto-mcp`), updates
+   `Casks/proto-mcp.rb` with the new version + sha256, commits,
+   and pushes. Users then run:
    ```sh
    brew tap just-an-oldsalt/proto-mcp
    brew install --cask proto-mcp
    ```
+
+   **First-time only.** If the tap repo doesn't exist yet, run
+   the bootstrap script with no args first to create it with a
+   placeholder cask:
+   ```sh
+   ./scripts/bootstrap-tap.sh    # creates the GitHub repo + initial cask
+   ```
+   Then run the version-bump form once a real release lands.
 
 ## What if I tagged but the build failed?
 
