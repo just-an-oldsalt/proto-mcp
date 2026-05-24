@@ -1,24 +1,28 @@
 package mcp
 
 import (
+	"context"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
-// rateLimiter is a tiny token-bucket store keyed by (tool, pid).
-// Per Phase-5 Q3: simple in-memory; loses state on restart, which
-// is acceptable for the single-user, single-process serve-stdio
-// today. Phase 6's daemon model gives us persistence.
+// rateLimiter is a token-bucket store keyed by (tool, pid).
+//
+// Phase 5/D shipped the in-memory version (one bucket per key, lost
+// on restart). Phase 6/E adds persistence via a pluggable
+// rateLimitPersister so daemon restarts don't grant fresh budgets
+// — closes the "restart to bypass mail_send 20/hour" hole.
 //
 // Limits are parsed lazily from policy's "20/hour" string the first
 // time a tool with a non-empty rate_limit is invoked. The parser
 // recognises N/{second,minute,hour,day}.
 type rateLimiter struct {
-	mu      sync.Mutex
-	buckets map[string]*bucket
-	now     func() time.Time // injectable for tests
+	mu        sync.Mutex
+	buckets   map[string]*bucket
+	now       func() time.Time // injectable for tests
+	persister RateLimitPersister
 }
 
 type bucket struct {
@@ -26,6 +30,28 @@ type bucket struct {
 	refillRate float64 // tokens per second
 	tokens     float64
 	lastRefill time.Time
+	limitSpec  string // raw policy string, persisted alongside the bucket
+}
+
+// RateLimitPersister is the seam between the in-memory limiter and
+// the SQLite store. internal/serve implements this against
+// store.Store. Tests use a no-op or a fake.
+//
+// The interface and PersistedBucket are exported so external
+// implementations (the serve package adapter, tests) can satisfy
+// them; the rateLimiter field on Middleware stays unexported.
+type RateLimitPersister interface {
+	LoadAll(ctx context.Context) (map[string]PersistedBucket, error)
+	Save(ctx context.Context, key string, b PersistedBucket) error
+}
+
+// PersistedBucket is the wire shape between rateLimiter and the
+// persister. Mirrors store.RateLimitState; lives here so internal/
+// mcp's interface stays free of store imports.
+type PersistedBucket struct {
+	LimitSpec  string
+	Tokens     float64
+	LastRefill time.Time
 }
 
 func newRateLimiter() *rateLimiter {
@@ -33,6 +59,40 @@ func newRateLimiter() *rateLimiter {
 		buckets: map[string]*bucket{},
 		now:     time.Now,
 	}
+}
+
+// setPersister wires the in-memory limiter to a SQLite-backed
+// store. Optional — nil persister means in-memory-only (used by
+// tests + the no-options Phase-3 mcp.New() path).
+//
+// On first call, eagerly loads every persisted bucket so the
+// in-memory map matches the on-disk state. A subsequent Allow()
+// for one of the persisted keys finds the bucket already populated.
+func (r *rateLimiter) setPersister(p RateLimitPersister) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.persister = p
+	if p == nil {
+		return nil
+	}
+	persisted, err := p.LoadAll(context.Background())
+	if err != nil {
+		return err
+	}
+	for key, pb := range persisted {
+		capacity, perSec, ok := parseLimitSpec(pb.LimitSpec)
+		if !ok {
+			continue
+		}
+		r.buckets[key] = &bucket{
+			capacity:   capacity,
+			refillRate: perSec,
+			tokens:     pb.Tokens,
+			lastRefill: pb.LastRefill,
+			limitSpec:  pb.LimitSpec,
+		}
+	}
+	return nil
 }
 
 // Allow returns (true, "") if the call is within budget, or
@@ -70,8 +130,20 @@ func (r *rateLimiter) Allow(key, limitSpec string) (bool, string) {
 			refillRate: perSec,
 			tokens:     float64(capacity),
 			lastRefill: now,
+			limitSpec:  limitSpec,
 		}
 		r.buckets[key] = b
+	} else if b.limitSpec != limitSpec {
+		// Policy reload changed the rate. Reset capacity + refill
+		// rate; do NOT reset tokens (would be a free budget on
+		// every reload). The next Allow refills against the new
+		// rate and the cap clamps if appropriate.
+		b.capacity = capacity
+		b.refillRate = perSec
+		b.limitSpec = limitSpec
+		if b.tokens > float64(capacity) {
+			b.tokens = float64(capacity)
+		}
 	}
 	// Refill.
 	elapsed := now.Sub(b.lastRefill).Seconds()
@@ -81,10 +153,27 @@ func (r *rateLimiter) Allow(key, limitSpec string) (bool, string) {
 	}
 	b.lastRefill = now
 
-	if b.tokens < 1.0 {
+	denied := b.tokens < 1.0
+	if !denied {
+		b.tokens -= 1.0
+	}
+
+	// Persist the post-update state. Best-effort: a transient
+	// SQLite error doesn't fail the rate-limit decision — the
+	// in-memory bucket is the source of truth for the current
+	// process, persistence is just so the NEXT daemon-startup
+	// inherits the state.
+	if r.persister != nil {
+		_ = r.persister.Save(context.Background(), key, PersistedBucket{
+			LimitSpec:  limitSpec,
+			Tokens:     b.tokens,
+			LastRefill: b.lastRefill,
+		})
+	}
+
+	if denied {
 		return false, "rate limit " + limitSpec + " exceeded"
 	}
-	b.tokens -= 1.0
 	return true, ""
 }
 

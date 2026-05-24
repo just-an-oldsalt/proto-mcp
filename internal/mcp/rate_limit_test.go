@@ -1,9 +1,37 @@
 package mcp
 
 import (
+	"context"
+	"sync"
 	"testing"
 	"time"
 )
+
+// fakePersister is an in-memory rateLimitPersister for tests. The
+// real one lives in internal/serve as a *store.Store adapter.
+type fakePersister struct {
+	mu      sync.Mutex
+	saved   map[string]PersistedBucket
+	preload map[string]PersistedBucket
+}
+
+func (f *fakePersister) LoadAll(_ context.Context) (map[string]PersistedBucket, error) {
+	out := map[string]PersistedBucket{}
+	for k, v := range f.preload {
+		out[k] = v
+	}
+	return out, nil
+}
+
+func (f *fakePersister) Save(_ context.Context, key string, b PersistedBucket) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.saved == nil {
+		f.saved = map[string]PersistedBucket{}
+	}
+	f.saved[key] = b
+	return nil
+}
 
 func TestParseLimitSpec(t *testing.T) {
 	cases := []struct {
@@ -92,5 +120,48 @@ func TestRateLimiterMalformedSpecAllows(t *testing.T) {
 	ok, _ := r.Allow("x", "twenty/hour")
 	if !ok {
 		t.Error("malformed spec should not deny — fail open")
+	}
+}
+
+// TestRateLimiterPersisterRoundTrip — Phase 6/E: buckets persist
+// across rateLimiter instances. Simulates a daemon restart: limiter
+// A drains its budget, then limiter B (sharing the persister) sees
+// the drained state on first Allow.
+func TestRateLimiterPersisterRoundTrip(t *testing.T) {
+	persister := &fakePersister{}
+	frozen := time.Unix(1_000_000, 0)
+
+	// First limiter drains the 3/hour budget.
+	a := newRateLimiter()
+	a.now = func() time.Time { return frozen }
+	if err := a.setPersister(persister); err != nil {
+		t.Fatalf("setPersister: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		ok, _ := a.Allow("mail_send|42", "3/hour")
+		if !ok {
+			t.Fatalf("call %d on limiter A unexpectedly denied", i+1)
+		}
+	}
+
+	// Persister now has a row with tokens=0 (or close to it).
+	saved, ok := persister.saved["mail_send|42"]
+	if !ok {
+		t.Fatal("expected persister to have saved mail_send|42")
+	}
+	if saved.Tokens >= 1.0 {
+		t.Fatalf("expected drained bucket, got tokens=%f", saved.Tokens)
+	}
+
+	// Second limiter hydrates from the persister and sees the
+	// drained state on first call (zero-time elapsed → no refill).
+	persister.preload = persister.saved
+	b := newRateLimiter()
+	b.now = func() time.Time { return frozen }
+	if err := b.setPersister(persister); err != nil {
+		t.Fatalf("setPersister B: %v", err)
+	}
+	if got, _ := b.Allow("mail_send|42", "3/hour"); got {
+		t.Fatal("limiter B should have inherited the drained bucket, but allowed the call")
 	}
 }

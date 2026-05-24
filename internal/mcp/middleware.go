@@ -76,11 +76,12 @@ func firstDisallowedRecipient(extracted, allowed []string) string {
 // no options is unchanged) while letting serve-stdio inject the
 // full pipeline.
 type Middleware struct {
-	policy   *policy.Engine
-	audit    *audit.Writer
-	broker   *approval.Broker
-	resolver *caller.Resolver
-	rate     *rateLimiter
+	policy    *policy.Engine
+	audit     *audit.Writer
+	broker    *approval.Broker
+	resolver  *caller.Resolver
+	rate      *rateLimiter
+	lockState func() (bool, string) // Phase 6/E — nil = unlockable
 }
 
 func (m *Middleware) ensureRate() {
@@ -130,6 +131,22 @@ func (m *Middleware) runTool(ctx context.Context, t Tool, args json.RawMessage, 
 		callerInfo = c
 	} else if m.resolver != nil {
 		callerInfo = m.resolver.Resolve()
+	}
+
+	// Phase 6/E — locked daemon refuses every tool call until
+	// `protonmcp unlock` (or SIGUSR2). The check happens BEFORE
+	// the audit row so a locked-daemon flood doesn't write a
+	// row per attempt — only the first attempt per second is
+	// logged (logger.Warn-rate-limited at the caller level if
+	// needed). For now we log every locked call at Warn — the
+	// daemon is presumed to lock infrequently.
+	if m.lockState != nil {
+		if locked, reason := m.lockState(); locked {
+			logger.Warn("tool call refused: daemon locked",
+				"tool", t.Name, "reason", reason,
+				"caller_pid", callerInfo.PID)
+			return ErrorResult("daemon is locked (%s); run `protonmcp unlock` to resume", reason), nil
+		}
 	}
 
 	if m.audit != nil {
