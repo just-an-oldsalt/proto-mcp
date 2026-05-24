@@ -91,13 +91,20 @@ else
 fi
 
 # Step 3: README so the tap repo doesn't look abandoned.
+# Compute display name (without the homebrew- prefix) up front so
+# the heredoc can expand it directly. Earlier versions tried to
+# leave a placeholder and sed-replace it but the heredoc was
+# unquoted (`<<EOF`, not `<<'EOF'`), so bash tried to expand the
+# undefined placeholder variable and aborted under set -u.
+TAP_DISPLAY="$TAP_OWNER/proto-mcp"
+
 cat > README.md <<EOF
 # homebrew-proto-mcp
 
 Homebrew tap for [proto-mcp](https://github.com/$TAP_OWNER/proto-mcp).
 
 \`\`\`sh
-brew tap $TAP_FULL_DISPLAY
+brew tap $TAP_DISPLAY
 brew install --cask proto-mcp
 \`\`\`
 
@@ -109,9 +116,6 @@ main repo, copied here on every release.
 See the main repo for documentation, install steps, and security
 posture.
 EOF
-# substitute the display tap name (without the homebrew- prefix)
-TAP_DISPLAY="$TAP_OWNER/proto-mcp"
-sed -i.bak "s|\$TAP_FULL_DISPLAY|$TAP_DISPLAY|g" README.md && rm README.md.bak
 
 # Step 4: commit + push.
 git add Casks/proto-mcp.rb README.md
