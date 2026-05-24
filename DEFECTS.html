@@ -162,12 +162,12 @@
 
 <h2>Status at a glance</h2>
 <div class="stats">
-  <div class="stat"><div class="stat-num">4</div><div class="stat-label">Open defects</div></div>
+  <div class="stat"><div class="stat-num">3</div><div class="stat-label">Open defects</div></div>
   <div class="stat"><div class="stat-num">0</div><div class="stat-label">Investigating</div></div>
-  <div class="stat"><div class="stat-num">33</div><div class="stat-label">Resolved</div></div>
+  <div class="stat"><div class="stat-num">34</div><div class="stat-label">Resolved</div></div>
   <div class="stat"><div class="stat-num">0</div><div class="stat-label"><span class="tag critical">critical</span></div></div>
   <div class="stat"><div class="stat-num">0</div><div class="stat-label"><span class="tag high">high</span></div></div>
-  <div class="stat"><div class="stat-num">3</div><div class="stat-label"><span class="tag medium">medium</span></div></div>
+  <div class="stat"><div class="stat-num">2</div><div class="stat-label"><span class="tag medium">medium</span></div></div>
   <div class="stat"><div class="stat-num">1</div><div class="stat-label"><span class="tag low">low</span></div></div>
 </div>
 
@@ -298,12 +298,14 @@ prompt readability" for the implementation sketch.</p>
 <p><strong>Remediation:</strong> At minimum, wrap <code>mail_read</code> tool result content with explicit <code>&lt;UNTRUSTED_INPUT&gt;...&lt;/UNTRUSTED_INPUT&gt;</code> tags so downstream prompt-injection detection has structured signal. Consider making <code>mail_read</code> decision <code>prompt</code> (with TTL) for messages from senders not in a known-contacts list. Land the "first-call runtime banner" from Phase 3/C planning that never actually shipped.</p>
 <p class="meta"><strong>Related:</strong> Foundational #7 (partial); TODO open question #5</p>
 
-<h3><span class="id">D24</span>No integrity check on the running protonmcp binary — PATH swap attack <span class="tag open">open</span> <span class="tag medium">medium</span></h3>
-<p><strong>Reported:</strong> 2026-05-22 (security re-audit) · Surface: <code>cmd/protonmcp/serve_stdio.go:32-34</code></p>
-<p><strong>Evidence:</strong> serve-stdio's trust model: "the trust boundary is whoever spawned this process which inherits our UID." Claude Desktop spawns us via <code>claude_desktop_config.json</code> → <code>{"command": "/abs/path/to/protonmcp", "args": ["serve-stdio"]}</code>. <em>But</em> <code>runInstall</code> writes <code>binPath</code> from <code>os.Executable()</code>, which on macOS may resolve through a symlink chain — and if the user's installation later moves the binary, the recorded path may become invalid or, worse, point at a newly-planted binary. There's no integrity check (no path signature, no SHA recorded). Until Phase 7 code signing this is the entirety of the trust chain.</p>
-<p><strong>Impact:</strong> A swap-attack scenario where an attacker who can write to the recorded <code>command</code> path can run as the MCP server with full Keychain access. Defense-in-depth gap that the docs treat as out of scope.</p>
-<p><strong>Remediation:</strong> Short-term, document loudly that <code>claude_desktop_config.json</code> paths must point at signed binaries (chicken-and-egg with Phase 7). Medium-term, on every serve-stdio startup, log the SHA-256 of the running binary and require a <code>~/Library/Application Support/protonmcp/expected_sha</code> file match to proceed.</p>
-<p class="meta"><strong>Related:</strong> new (Phase 6/7-adjacent)</p>
+<h3><span class="id">D24</span>No integrity check on the running protonmcp binary — PATH swap attack <span class="tag fixed">fixed in PR 7/C</span> <span class="tag medium">medium</span></h3>
+<p><strong>Reported:</strong> 2026-05-22 (security re-audit) · Surface: <code>cmd/protonmcp/serve_stdio.go</code>, <code>cmd/protonmcp/install.go</code>.</p>
+<p><strong>Fix (two parts):</strong></p>
+<ol>
+  <li><strong>SHA-256 expected-binary check.</strong> <code>protonmcp daemon install</code> now writes the daemon binary's SHA-256 to <code>~/Library/Application Support/protonmcp/expected_sha256</code>. On every launch, <code>protonmcpd</code> recomputes its own hash via <code>os.Executable()</code> and refuses to start on mismatch. Missing file degrades to a warning (older installs predate this feature). Upgrade protocol: re-run <code>protonmcp daemon install</code> after replacing the binary. Implemented in <code>cmd/protonmcp/daemon.go:writeBinaryIntegrityFile</code> + <code>cmd/protonmcpd/integrity.go:VerifyBinaryIntegrity</code>. Regression tests in <code>integrity_test.go</code>.</li>
+  <li><strong>Developer ID signing infrastructure.</strong> <code>Makefile</code> gets <code>sign</code> / <code>verify-sign</code> / <code>notarize</code> targets (driven by <code>DEVELOPER_ID</code> env var) plus hardened-runtime <code>entitlements</code> in <code>scripts/protonmcp.entitlements</code>. The OS-level half of the trust chain (Gatekeeper accepts only Developer-ID-signed binaries running from approved paths) now stands behind the application-level SHA check. Operator setup in <code>scripts/signing-setup.md</code>.</li>
+</ol>
+<p>Together: even if an attacker who can write to the recorded <code>command</code> path replaces the binary, the SHA check catches it at next launch AND Gatekeeper refuses the unsigned replacement at load time. Phase 7/E will wire the signed/notarized binaries through Homebrew distribution.</p>
 
 <h3><span class="id">D26</span><code>audit.Writer.Begin</code> binds <code>args_json</code> as string — extra allocation, unclear semantics <span class="tag fixed">fixed in PR 7/B</span> <span class="tag low">low</span></h3>
 <p><strong>Reported:</strong> 2026-05-22 (security re-audit) · Surface: <code>internal/audit/audit.go:111-121</code></p>
