@@ -193,3 +193,12 @@ release:
 		exit 1; \
 	fi
 	./scripts/release.sh "$$VERSION"
+
+# Bootstrap or update the Homebrew tap repo
+# (github.com/just-an-oldsalt/homebrew-proto-mcp). Without args,
+# creates the tap repo (if missing) and pushes a placeholder cask
+# so `brew tap` succeeds. With VERSION + SHA256, updates the cask
+# to point at a real release. See scripts/bootstrap-tap.sh.
+.PHONY: bootstrap-tap
+bootstrap-tap:
+	./scripts/bootstrap-tap.sh $$VERSION $$SHA256
