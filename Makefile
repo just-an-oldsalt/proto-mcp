@@ -11,9 +11,11 @@ PROTONMCPD    := $(BINDIR)/protonmcpd
 SHIM          := $(BINDIR)/protonmcp-shim
 TOUCHID_DIR   := helpers/touchid
 TOUCHID       := $(TOUCHID_DIR)/protonmcp-touchid
+LOCKWATCH_DIR := helpers/lockwatch
+LOCKWATCH     := $(LOCKWATCH_DIR)/protonmcp-lockwatch
 
 .PHONY: all
-all: $(PROTONMCP) $(PROTONMCPD) $(SHIM) $(TOUCHID)
+all: $(PROTONMCP) $(PROTONMCPD) $(SHIM) $(TOUCHID) $(LOCKWATCH)
 
 .PHONY: protonmcp
 protonmcp: $(PROTONMCP)
@@ -50,6 +52,15 @@ $(TOUCHID): $(TOUCHID_DIR)/main.swift
 .PHONY: touchid
 touchid: $(TOUCHID)
 
+# Phase 7/A — screen-lock / sleep watcher. CFRunLoop-based; uses
+# AppKit's NSWorkspace and DistributedNotificationCenter. Linked
+# against AppKit + Foundation.
+$(LOCKWATCH): $(LOCKWATCH_DIR)/main.swift
+	swiftc -O -o $@ $<
+
+.PHONY: lockwatch
+lockwatch: $(LOCKWATCH)
+
 .PHONY: test
 test:
 	go test ./...
@@ -60,4 +71,4 @@ race:
 
 .PHONY: clean
 clean:
-	rm -f $(PROTONMCP) $(PROTONMCPD) $(SHIM) $(TOUCHID)
+	rm -f $(PROTONMCP) $(PROTONMCPD) $(SHIM) $(TOUCHID) $(LOCKWATCH)

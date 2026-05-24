@@ -98,6 +98,10 @@ func (p ToolPolicy) TTLDuration() time.Duration {
 type document struct {
 	Defaults ToolPolicy            `yaml:"defaults"`
 	Tools    map[string]ToolPolicy `yaml:"tools"`
+	// IdleLockMinutes: lock the daemon after this many minutes
+	// without a tool call. 0 (or missing) disables the idle timer.
+	// Range-checked in parseDocument: must be 0–1440 (one day).
+	IdleLockMinutes int `yaml:"idle_lock_minutes,omitempty"`
 }
 
 // Engine holds the current policy. Reload swaps in a new document
@@ -282,5 +286,22 @@ func parseDocument(data []byte) (document, error) {
 			}
 		}
 	}
+	// Phase 7/A: idle_lock_minutes range-check. Negative means
+	// misconfiguration; >24h is almost certainly a typo (10080 was
+	// "I meant a week"). Reject early so the daemon doesn't start
+	// with a misleading value.
+	if doc.IdleLockMinutes < 0 || doc.IdleLockMinutes > 1440 {
+		return document{}, fmt.Errorf("idle_lock_minutes must be in [0, 1440]; got %d", doc.IdleLockMinutes)
+	}
 	return doc, nil
+}
+
+// IdleLockMinutes returns the configured idle-timer duration, or 0
+// if disabled. Phase 7/A — the runtime's idle-lock goroutine polls
+// this via the engine so policy reload picks up new values without
+// a daemon restart.
+func (e *Engine) IdleLockMinutes() int {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.doc.IdleLockMinutes
 }

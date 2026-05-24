@@ -194,6 +194,48 @@ func TestJSONRecipientAddressesSurvive(t *testing.T) {
 	}
 }
 
+// TestJSONOpaqueIDsSurvive — D36 carve-out: Proton-style opaque
+// identifiers (message_id, destination, label_id, parent_id, etc.)
+// look token-shaped to looksLikeToken but they're NOT secrets, and
+// over-redacting them turns the Touch ID prompt into a meaningless
+// yes/no toggle. They must pass through.
+func TestJSONOpaqueIDsSurvive(t *testing.T) {
+	// All values are real-shape Proton identifiers (≥32 chars, base64url).
+	in := json.RawMessage(`{
+		"message_id":"k2fkzwv4sczy2zp7uozazbvwi3xiaabvkkzh01abcdef",
+		"destination":"abcd1234ABCD5678efghIJKLmnopQRST==",
+		"label_id":"folder-uuid-aaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"thread_id":"thr-zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+		"folder_id":"fld-XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+		"parent_id":"par-YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY",
+		"in_reply_to":"<abcdefghijklmnopqrstuvwxyz0123456@proton.me>",
+		"refresh_token":"eyJhbGciOiJIUzI1NiJ9.SHOULDREDACTREDACTREDACT.signature1"
+	}`)
+	out := JSON(in)
+	s := string(out)
+
+	// Opaque IDs survive verbatim.
+	for _, want := range []string{
+		"k2fkzwv4sczy2zp7uozazbvwi3xiaabvkkzh01abcdef",
+		"abcd1234ABCD5678efghIJKLmnopQRST==",
+		"folder-uuid-aaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"thr-zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+		"fld-XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+		"par-YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("opaque ID %q got redacted: %s", want, s)
+		}
+	}
+
+	// Real secret in the same payload still gets redacted —
+	// confirms the carve-out is scoped to the listed keys, not a
+	// blanket bypass.
+	if strings.Contains(s, "SHOULDREDACTREDACTREDACT") {
+		t.Errorf("refresh_token slipped through carve-out: %s", s)
+	}
+}
+
 func TestJSONNestedSensitiveKey(t *testing.T) {
 	in := json.RawMessage(`{"outer":{"inner":{"password":"hunter2","email":"user@example.com"}}}`)
 	out := JSON(in)

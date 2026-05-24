@@ -216,6 +216,14 @@ func mailDraftDelete(deps Deps) mcp.Tool {
 			},
 			"required": ["draft_id", "deleted"]
 		}`),
+		PromptBody: func(raw json.RawMessage) (string, string) {
+			var in input
+			_ = json.Unmarshal(raw, &in)
+			subj := lookupSubject(deps, in.DraftID)
+			title := mcp.SanitizePromptText("Approve mail_draft_delete?", 120)
+			body := "delete draft " + subj + " (moves to Trash; recoverable)"
+			return title, mcp.SanitizePromptText(body, 4000)
+		},
 		Handler: func(ctx mcp.Context, raw json.RawMessage) (*mcp.ToolResult, error) {
 			var in input
 			if err := json.Unmarshal(raw, &in); err != nil {

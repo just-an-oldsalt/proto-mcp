@@ -126,6 +126,19 @@ func mailMove(deps Deps) mcp.Tool {
 			"additionalProperties": false
 		}`),
 		OutputSchema: json.RawMessage(stateActionSchema),
+		PromptBody: func(raw json.RawMessage) (string, string) {
+			var in input
+			_ = json.Unmarshal(raw, &in)
+			subj, fromFolder := lookupSubjectAndFolder(deps, in.MessageID)
+			toName := destinationName(deps, in.Destination)
+			title := mcp.SanitizePromptText("Approve mail_move?", 120)
+			body := "move message " + subj
+			if fromFolder != "" {
+				body += " from " + fromFolder
+			}
+			body += " to " + toName
+			return title, mcp.SanitizePromptText(body, 4000)
+		},
 		Handler: func(ctx mcp.Context, raw json.RawMessage) (*mcp.ToolResult, error) {
 			var in input
 			if err := json.Unmarshal(raw, &in); err != nil {
@@ -205,6 +218,21 @@ func mailLabel(deps Deps) mcp.Tool {
 			"additionalProperties": false
 		}`),
 		OutputSchema: json.RawMessage(stateActionSchema),
+		PromptBody: func(raw json.RawMessage) (string, string) {
+			var in input
+			_ = json.Unmarshal(raw, &in)
+			subj := lookupSubject(deps, in.MessageID)
+			label := lookupLabelName(deps, in.LabelID)
+			verb := "apply label"
+			prep := "to"
+			if in.Action == "remove" {
+				verb = "remove label"
+				prep = "from"
+			}
+			title := mcp.SanitizePromptText("Approve mail_label?", 120)
+			body := verb + " " + label + " " + prep + " " + subj
+			return title, mcp.SanitizePromptText(body, 4000)
+		},
 		Handler: func(ctx mcp.Context, raw json.RawMessage) (*mcp.ToolResult, error) {
 			var in input
 			if err := json.Unmarshal(raw, &in); err != nil {
@@ -252,6 +280,18 @@ func mailTrash(deps Deps) mcp.Tool {
 			"additionalProperties": false
 		}`),
 		OutputSchema: json.RawMessage(stateActionSchema),
+		PromptBody: func(raw json.RawMessage) (string, string) {
+			var in input
+			_ = json.Unmarshal(raw, &in)
+			subj, fromFolder := lookupSubjectAndFolder(deps, in.MessageID)
+			title := mcp.SanitizePromptText("Approve mail_trash?", 120)
+			body := "move message " + subj
+			if fromFolder != "" {
+				body += " from " + fromFolder
+			}
+			body += " to Trash (reversible via mail_move)"
+			return title, mcp.SanitizePromptText(body, 4000)
+		},
 		Handler: func(ctx mcp.Context, raw json.RawMessage) (*mcp.ToolResult, error) {
 			var in input
 			if err := decodeMessageIDInput(raw, &in, &in.MessageID, "mail_trash"); err != nil {
