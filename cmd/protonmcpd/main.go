@@ -70,8 +70,15 @@ func main() {
 	// runs. If the daemon binary's SHA-256 doesn't match what was
 	// recorded at install time, refuse to start. Missing record
 	// → log + continue (older installs predate this feature).
+	//
+	// D38: integrity-check failures go directly to stderr (NOT
+	// through slog) so the redacting handler doesn't mangle SHA-256
+	// hex strings and absolute paths in the diagnostic. Pre-startup
+	// failures carry no PII; the operator needs the literal hashes
+	// + paths to figure out what was replaced. Success still routes
+	// through slog because that's normal daemon telemetry.
 	if err := VerifyBinaryIntegrity(slog.Default()); err != nil {
-		slog.Error("refusing to start", "err", err.Error())
+		fmt.Fprintln(os.Stderr, "refusing to start:", err.Error())
 		os.Exit(1)
 	}
 

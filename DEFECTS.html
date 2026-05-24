@@ -162,21 +162,23 @@
 
 <h2>Status at a glance</h2>
 <div class="stats">
-  <div class="stat"><div class="stat-num">5</div><div class="stat-label">Open defects</div></div>
+  <div class="stat"><div class="stat-num">7</div><div class="stat-label">Open defects</div></div>
   <div class="stat"><div class="stat-num">0</div><div class="stat-label">Investigating</div></div>
   <div class="stat"><div class="stat-num">35</div><div class="stat-label">Resolved</div></div>
   <div class="stat"><div class="stat-num">0</div><div class="stat-label"><span class="tag critical">critical</span></div></div>
   <div class="stat"><div class="stat-num">0</div><div class="stat-label"><span class="tag high">high</span></div></div>
   <div class="stat"><div class="stat-num">2</div><div class="stat-label"><span class="tag medium">medium</span></div></div>
-  <div class="stat"><div class="stat-num">3</div><div class="stat-label"><span class="tag low">low</span></div></div>
+  <div class="stat"><div class="stat-num">5</div><div class="stat-label"><span class="tag low">low</span></div></div>
 </div>
 
 <h2>Open</h2>
 <p class="meta">
-  Five residual defects. Two are real design work from the
+  Seven residual defects. Two are real design work from the
   2026-05-22 re-audit (D12 DSN injection, D22 <code>mail_read</code>
-  prompt-injection); the other three are Phase-7-cycle paper cuts.
-  D37 + D40 were briefly closed in 7/D but the entitlement
+  prompt-injection); the other five are paper cuts — three from the
+  Phase-7 cycle (D37 / D40 / D38) and two from the 2026-05-24 live
+  MCP smoke test (D41 colour-palette passthrough, D42 plaintext CSS
+  leakage). D37 + D40 were briefly closed in 7/D but the entitlement
   requirement for <code>keychain-access-groups</code> on Developer-ID-
   signed CLI binaries can't be met without an Apple-provisioned
   profile (.app bundle territory) — both reopened and deferred to
@@ -212,6 +214,20 @@
 <p><strong>Impact:</strong> Low. Operator can still tell what to do but can't tell what changed without running <code>shasum -a 256</code> manually against both the running binary and the recorded path. Hampers root-cause analysis during a real swap-attack response.</p>
 <p><strong>Remediation:</strong> Either route the integrity-check error around the redacting handler entirely (it's pre-startup, pre-PII; no body content yet) OR extend the <code>opaqueIDKeys</code> carve-out (added in 7/A) so SHA-256 hex and absolute paths attached to known-safe keys pass through. The cleaner option is the first: <code>VerifyBinaryIntegrity</code> can <code>fmt.Fprintln</code> directly to <code>os.Stderr</code> for the failure message, bypassing slog. Pre-daemon code has no need for redaction.</p>
 <p class="meta"><strong>Related:</strong> [[D36]] (same over-redaction shape, different surface); new (Phase 7/C smoke test)</p>
+
+<h3><span class="id">D41</span><code>labels_create</code> / <code>folders_create</code> / <code>*_update</code> forward arbitrary hex colour — Proton rejects non-palette values with a raw 422 <span class="tag open">open</span> <span class="tag low">low</span></h3>
+<p><strong>Reported:</strong> 2026-05-24 (live MCP smoke test) · Surface: <code>internal/mcptools/labels_folders_crud.go:301</code> (colour schema), <code>makeCreateHandler</code> (line 197, passthrough); update path shares the param at lines 313 / 334.</p>
+<p><strong>Evidence:</strong> <code>labels_create</code> with <code>color:"#FF6B6B"</code> and <code>folders_create</code> with <code>color:"#4ECDC4"</code> both return <code>422 POST https://mail-api.proton.me/core/v4/labels: Invalid color (Code=2001, Status=422)</code>. Retrying with a palette colour observed in the user's existing labels (<code>#8080FF</code>, <code>#258723</code>) succeeds immediately. <code>makeCreateHandler</code> unmarshals <code>in.Color</code> and passes it straight into <code>gpa.CreateLabelReq</code> with no validation, so any non-palette hex round-trips to the Proton API and fails there. <code>labels_update</code> / <code>folders_update</code> share the same unvalidated colour param.</p>
+<p><strong>Impact:</strong> Low. No data risk — the create/update simply fails closed. But the caller gets an opaque upstream 422 instead of an actionable "pick from this palette" message, and the schema hint <code>"Hex color like #aabbcc"</code> actively misleads by implying arbitrary hex is accepted. Costs a wasted round-trip (and an LLM retry) per guess.</p>
+<p><strong>Remediation:</strong> Validate <code>Color</code> against Proton's fixed palette client-side before the API call — reject with a message listing the accepted values, or snap to the nearest. Update the schema <code>description</code> on all four tools to name the palette rather than <code>"Hex color like #aabbcc"</code>. Factor the palette into a shared constant so create + update + a future <code>colors_list</code> stay in sync.</p>
+<p class="meta"><strong>Related:</strong> new (2026-05-24 live MCP smoke test)</p>
+
+<h3><span class="id">D42</span><code>sanitize.Text</code> leaves <code>&lt;style&gt;</code> / <code>&lt;script&gt;</code> element content in extracted plaintext — <code>mail_read</code> <code>body_format="text"</code> returns raw CSS <span class="tag open">open</span> <span class="tag low">low</span></h3>
+<p><strong>Reported:</strong> 2026-05-24 (live MCP smoke test) · Surface: <code>internal/sanitize/sanitize.go:128</code> (<code>Text</code>) + <code>htmlTagStripper</code> regex at line 105; consumed by <code>internal/proton/body.go:74,84</code>; surfaced via <code>internal/mcptools/mail_read.go</code>.</p>
+<p><strong>Evidence:</strong> <code>mail_read</code> with <code>body_format="text"</code> on an HTML-only marketing email (Audible) returned the message's entire <code>&lt;style&gt;</code> block — <code>.lhfix{…}</code>, dozens of <code>@font-face{…}</code> rules, <code>@media</code> queries — as the <code>text</code> field. Root cause: <code>Text()</code> strips only tag <em>delimiters</em> via <code>htmlTagStripper</code> (<code>(?s)&lt;[^&gt;]+&gt;</code>), so the content <em>between</em> <code>&lt;style&gt;…&lt;/style&gt;</code> (and <code>&lt;script&gt;…&lt;/script&gt;</code>) survives. <code>body.go</code> runs <code>sanitize.Text</code> on the raw decrypted body; the bluemonday-backed <code>sanitize.HTML</code> (used for the <code>html</code> field) drops those elements wholesale, but <code>Text()</code> never sees that sanitized output.</p>
+<p><strong>Impact:</strong> Low. No security issue — the CSS is inert text and scripts aren't executed. But it pollutes the plaintext returned to the LLM, the snippet shown in <code>mail_list</code>, and the FTS5 index (<code>Text()</code> also feeds indexing), bloating it with CSS / font-face tokens and degrading snippet quality for any HTML-only mail with a large <code>&lt;style&gt;</code> head.</p>
+<p><strong>Remediation:</strong> In <code>Text()</code>, drop <code>&lt;style&gt;…&lt;/style&gt;</code> and <code>&lt;script&gt;…&lt;/script&gt;</code> element contents before the tag-stripping pass (e.g. a <code>(?is)&lt;(style|script)\b.*?&lt;/\1&gt;</code> removal), or run <code>Text()</code> over the already-sanitized <code>sanitize.HTML</code> output instead of the raw body. Add a regression test with a <code>&lt;style&gt;</code>-heavy fixture asserting the CSS does not appear in the output.</p>
+<p class="meta"><strong>Related:</strong> [[D22]] (same <code>mail_read</code> surface); [[D29]] (same "raw content into LLM context" family)</p>
 
 <h3><span class="id">D22</span><code>mail_read</code>/<code>mail_read_thread</code> allow-by-default — prompt-injection mitigation only in description text <span class="tag open">open</span> <span class="tag medium">medium</span></h3>
 <p><strong>Reported:</strong> 2026-05-22 (security re-audit) · Surface: <code>internal/policy/default.yaml:31-32</code>, <code>internal/mcptools/mail_read.go:38-41</code></p>

@@ -11,8 +11,11 @@ literal recipients and subject before the message goes out. Every
 call writes a redacted row to a local audit log. Nothing leaves
 your laptop except the mail itself.
 
-> **Status:** `v1.0.0-alpha`. Phase 1–6 merged; Phase 7 (signing +
-> notarization + Homebrew + Keychain ACL) shipping in PRs #58–#62.
+> **Status:** `v1.0.0-alpha`. Phase 1–6 merged; Phase 7/A (UX),
+> 7/B (log rotation + polish), 7/C (signing + notarization +
+> binary integrity) all merged. 7/D (OS-level Keychain ACL) is
+> blocked on a provisioning profile and deferred to 7/E (.app
+> bundle). 7/E (Homebrew + AppVersion + release CI) in progress.
 > Personal-use, technical-audience early access. Read the caveats
 > below before installing.
 
@@ -71,10 +74,11 @@ The Keychain item that holds your Proton session is sealed behind
 2. **Touch ID at session-acquire time** — the daemon prompts for
    biometric (or password fallback per Apple's
    `.deviceOwnerAuthentication`) on every startup AND every
-   `protonmcp unlock` after a manual or auto-lock. Touch-ID-at-
-   startup runs inside the daemon process; SecAccessControl on the
-   keychain item (Phase 7/D) means the OS issues its own prompt for
-   any read attempt.
+   `protonmcp unlock` after a manual or auto-lock. The prompt is
+   application-issued via the Swift helper. An OS-level
+   SecAccessControl on the keychain item was prototyped in 7/D but
+   reverted (needs an Apple-provisioned profile / .app bundle —
+   tracked as D37, deferred to 7/E).
 3. **Per-call approval** — every `prompt`-gated tool (everything
    that writes) fires a custom NSAlert + Touch ID prompt showing
    the literal recipients and subject. Cached approvals expire per
@@ -265,10 +269,13 @@ we're using Bridge's header.
 ### macOS only
 
 `internal/keystore` uses `keybase/go-keychain` + cgo against
-`Security.framework` (Phase 7/D adds a `SecAccessControl`
-wrapper). The Swift helpers need LAContext + AppKit + workspace
-notifications. Linux builds compile (testing only) but the auth
-flow won't work.
+`Security.framework`. (A `SecAccessControl` cgo wrapper sits
+dormant in `internal/keystore/access_control_darwin.{h,c,go}`,
+ready to re-enable once Phase 7/E lands the .app bundle + a
+provisioning profile that authorizes the required
+`keychain-access-groups` entitlement.) The Swift helpers need
+LAContext + AppKit + workspace notifications. Linux builds
+compile (testing only) but the auth flow won't work.
 
 ### License
 
@@ -300,7 +307,7 @@ make verify-sign  # codesign --verify each binary (after make sign)
 | 5 | 20 write tools + rate limit + allowed_recipients | Merged |
 | 5.5 | Security audit follow-up (21 findings closed) | Merged |
 | 6 | Daemon + shim + launchd + lock/unlock + persistent rate-limit | All sub-PRs in flight |
-| 7 | Signing, notarization, Keychain ACL, Homebrew, AppVersion | Sub-PRs 7/0–7/D shipped; 7/E pending Proton |
+| 7 | Signing, notarization, Keychain ACL, Homebrew, AppVersion | 7/A + 7/B + 7/C merged; 7/D reverted (provisioning-profile gap); 7/E in progress |
 | 8 | SQLCipher / envelope encryption at rest | Planning |
 
 [`TODO.html`](./TODO.html) has the full per-phase plan and the

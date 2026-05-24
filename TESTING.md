@@ -258,9 +258,10 @@ the `zone.dort.protonmcp` service).
 **Expected.** Account summary (email, addresses, plan) printed
 within 2 seconds. No interactive prompts.
 
-**On failure.** If the OS-level Touch ID prompt fires here, that's
-expected post-7/D — Touch ID and the printed summary should both
-succeed.
+**On failure.** A Touch ID prompt firing here would mean D37's
+OS-level keychain ACL is active again (currently deferred to
+Phase 7/E; see DEFECTS.html). Not a defect by itself, but file
+a note so we know the Phase 7/E re-enable shipped.
 
 ### 3.3 — Backfill mirror
 
@@ -400,41 +401,21 @@ sensor prompt). Entering the user password returns exit 0.
 available," D30 has regressed — the LAContext policy got reverted
 to `.deviceOwnerAuthenticationWithBiometrics`.
 
-### 4.3 — Keychain ACL v3→v4 migration (7/D, D37)
+### 4.3 — Keychain ACL (D37 — deferred to Phase 7/E)
 
-**Goal.** A first-launch after upgrade triggers the v3-to-v4 ACL
-upgrade. Subsequent loads trigger OS-issued Touch ID.
+**Status.** Currently NOT active. Phase 7/D briefly shipped a
+SecAccessControl-based ACL but the required
+`keychain-access-groups` entitlement is restricted (needs an
+Apple-provisioned profile) and was reverted. The application-
+layer Touch ID startup gate from Phase 6/E / 7/A is the active
+Touch ID source on every session-acquire.
 
-**Setup.** You need a v3 blob (an older login predating 7/D). If
-your current install is already v4, do `protonmcp logout` then a
-fresh `protonmcp login` and manually downgrade the Keychain item to
-v3 (advanced; skip this section if not feasible).
-
-**Steps.** Start the daemon fresh and watch the log:
-```sh
-launchctl kickstart -k "gui/$(id -u)/zone.dort.protonmcpd"
-sleep 3
-tail -20 ~/Library/Logs/protonmcp/daemon.log | grep keystore
-```
-
-**Expected.** A line:
-```
-keystore: upgraded blob from v3 to v4 (SecAccessControl now requires Touch ID on next load)
-```
-
-### 4.4 — Subsequent loads trigger OS-issued Touch ID
-
-Once the blob is v4, every Load triggers a Touch ID prompt issued
-by macOS itself (system-styled, says "protonmcpd wants to use
-your confidential information stored in 'Proton MCP session' in
-your keychain").
-
-```sh
-./bin/protonmcp whoami
-```
-
-**Expected.** Touch ID prompt appears BEFORE the account summary
-prints.
+Skip this section. Re-add once Phase 7/E (.app bundle + provisioning
+profile) lands the re-enable. Expected behavior at that point:
+every `keystore.Load` triggers an OS-issued Touch ID prompt
+("protonmcpd wants to use your confidential information stored in
+'Proton MCP session' in your keychain") in addition to (or instead
+of, after D40's re-fix) the application-layer gate.
 
 ---
 
@@ -701,7 +682,7 @@ might touch the relevant surface.
 | **D33** | pgrep-by-exe for policy reload | `protonmcp policy reload` only signals real daemons, not editors / greps |
 | **D35** | All tools have a non-deny policy default | `go test ./internal/policy/ -run TestEveryToolHasNonDenyPolicyDefault` |
 | **D36** | Touch ID prompt readability | See section 6.2 |
-| **D37** | Keychain ACL via SecAccessControl | See section 4.3 + 4.4 |
+| **D37** | (reopened — deferred to Phase 7/E) | n/a |
 
 For open defects:
 - **D12** (DSN injection): try `protonmcp whoami --db
@@ -709,8 +690,15 @@ For open defects:
   still open); confirm the fix once it lands.
 - **D22** (mail_read prompt injection): no automated test — review
   the description string + consider runtime banner.
-- **D38, D39, D40** (Phase 7/C smoke-test paper cuts + 7/D
-  double-prompt UX): see DEFECTS.html for one-line repro recipes.
+- **D37** (Keychain ACL, reopened): re-enable once Phase 7/E ships
+  the .app bundle + provisioning profile. See DEFECTS.html for
+  the revert story and operator setup notes.
+- **D38** (over-redacted integrity errors): trigger a SHA mismatch
+  (corrupt `~/Library/Application Support/protonmcp/expected_sha256`),
+  kickstart the daemon, confirm the stderr message contains the
+  literal SHA-256 hashes + paths (not `[REDACTED-TOKEN]`).
+- **D40** (double Touch ID prompt, re-deferred): only meaningful
+  once D37 re-fires. Currently a no-op.
 
 ---
 
@@ -737,7 +725,7 @@ Host:      macOS <version>, <chip> <chip-model>
   <One-paragraph description matching DEFECTS.html entry shape.>
 
 ### Confirmed-still-fixed
-- D11, D24, D26, D28, D30, D35, D36, D37
+- D11, D24, D26, D28, D30, D35, D36, D39
 
 ### Notes
 - <Any surprises, perf observations, UX friction not rising to a
