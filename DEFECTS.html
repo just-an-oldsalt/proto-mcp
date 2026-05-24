@@ -162,31 +162,62 @@
 
 <h2>Status at a glance</h2>
 <div class="stats">
-  <div class="stat"><div class="stat-num">3</div><div class="stat-label">Open defects</div></div>
+  <div class="stat"><div class="stat-num">5</div><div class="stat-label">Open defects</div></div>
   <div class="stat"><div class="stat-num">0</div><div class="stat-label">Investigating</div></div>
-  <div class="stat"><div class="stat-num">34</div><div class="stat-label">Resolved</div></div>
+  <div class="stat"><div class="stat-num">35</div><div class="stat-label">Resolved</div></div>
   <div class="stat"><div class="stat-num">0</div><div class="stat-label"><span class="tag critical">critical</span></div></div>
   <div class="stat"><div class="stat-num">0</div><div class="stat-label"><span class="tag high">high</span></div></div>
   <div class="stat"><div class="stat-num">2</div><div class="stat-label"><span class="tag medium">medium</span></div></div>
-  <div class="stat"><div class="stat-num">1</div><div class="stat-label"><span class="tag low">low</span></div></div>
+  <div class="stat"><div class="stat-num">3</div><div class="stat-label"><span class="tag low">low</span></div></div>
 </div>
 
 <h2>Open</h2>
 <p class="meta">
   Seven residual defects from the 2026-05-22 security re-audit + one
   UX defect surfaced from live testing on 2026-05-23 + one deliberate
-  deferral filed alongside PR 6/E. The audit findings landed in PRs
-  #43–#47 + #51–#54 — see <em>Resolved</em> below for what shipped
-  and where. The carry-overs here are either prior-audit-cycle items
-  (B-6, B-9, M-4) or Low / Phase-6-adjacent hygiene the fix batch
-  deliberately skipped.
+  deferral filed alongside PR 6/E + two paper cuts surfaced from
+  Phase 7/C live signing/notarization. The audit findings landed in
+  PRs #43–#47 + #51–#54 — see <em>Resolved</em> below for what
+  shipped and where. The carry-overs here are either prior-audit-cycle
+  items (B-6, B-9, M-4) or Low / Phase-6-adjacent hygiene the fix
+  batch deliberately skipped.
 </p>
 
-<h3><span class="id">D37</span>Keychain blob lacks SecAccessControl Touch ID requirement — daemon-layer gate is the substitute <span class="tag open">open</span> <span class="tag low">low</span></h3>
-<p><strong>Reported:</strong> 2026-05-23 (Phase 6/E sign-off) ·
-Surface: <code>internal/keystore/keystore.go</code> (saves blob with
-plain <code>AccessibleWhenUnlocked</code>); upstream limit in
-<code>keybase/go-keychain v0.0.1</code>.</p>
+<h3><span class="id">D39</span><code>launchctl bootstrap</code> race after bootout in <code>protonmcp daemon install</code> <span class="tag open">open</span> <span class="tag low">low</span></h3>
+<p><strong>Reported:</strong> 2026-05-23 (Phase 7/C smoke test) · Surface: <code>cmd/protonmcp/daemon.go:runDaemonInstall</code> (the bootout → bootstrap sequence).</p>
+<p><strong>Evidence:</strong> Live test re-installing the daemon to record <code>expected_sha256</code> returned <code>Bootstrap failed: 5: Input/output error</code> from <code>launchctl</code>. The bootout that preceded it had already succeeded (verified via <code>launchctl print "gui/$UID/zone.dort.protonmcpd"</code> → "Could not find service"), the <code>expected_sha256</code> file was written, and a manual <code>launchctl bootstrap gui/$UID ~/Library/LaunchAgents/zone.dort.protonmcpd.plist</code> a few seconds later succeeded. Looks like launchd needs a brief settle window after bootout before it'll accept a fresh bootstrap of the same label.</p>
+<p><strong>Impact:</strong> User running <code>protonmcp daemon install</code> against an already-installed daemon sees a confusing error and has to re-run manually. The plist + integrity file are correctly written, so a second invocation (or the manual bootstrap) recovers — but the failure mode is alarming and undermines confidence in the install flow.</p>
+<p><strong>Remediation:</strong> Wrap the <code>bootstrap</code> call in a small retry loop with backoff (100ms, 250ms, 500ms, give up after ~1s total). Treat the first I/O error as expected during the bootout-to-bootstrap transition. Same pattern as <code>runDaemonRestart</code>'s 500ms settle window between stop and start.</p>
+<p class="meta"><strong>Related:</strong> new (Phase 7/C smoke test)</p>
+
+<h3><span class="id">D38</span>Redacting slog handler over-redacts operator-facing diagnostics in <code>protonmcpd</code> integrity-check errors <span class="tag open">open</span> <span class="tag low">low</span></h3>
+<p><strong>Reported:</strong> 2026-05-23 (Phase 7/C swap-attack smoke test) · Surface: <code>internal/redact/redact.go:looksLikeToken</code>, the error path in <code>cmd/protonmcpd/integrity.go:VerifyBinaryIntegrity</code>.</p>
+<p><strong>Evidence:</strong> Live integrity-check failure produced this log line:</p>
+<pre><code>level=ERROR msg="refusing to start" err="binary integrity check FAILED
+  running:   /[REDACTED-TOKEN]
+  running sha256:    [REDACTED-TOKEN]
+  expected (from install): [REDACTED-TOKEN]
+  expected path: /[REDACTED-TOKEN]
+  This indicates the binary was replaced after install. Either restore
+  the original binary or re-run `protonmcp daemon install` to record
+  the new hash"</code></pre>
+<p>SHA-256 hex strings (64 chars of alphanumeric) and absolute filesystem paths (32+ chars containing slashes) both trip <code>looksLikeToken</code> via the <code>scrubEmbeddedTokens</code> path on the wrapped error string. The user-actionable instruction survives ("re-run protonmcp daemon install"), but the diagnostic detail (which hash mismatched, which path the daemon was running from) is gone. Same class of over-redaction as D36 (Touch ID prompt opaque IDs), just in a different output channel.</p>
+<p><strong>Impact:</strong> Low. Operator can still tell what to do but can't tell what changed without running <code>shasum -a 256</code> manually against both the running binary and the recorded path. Hampers root-cause analysis during a real swap-attack response.</p>
+<p><strong>Remediation:</strong> Either route the integrity-check error around the redacting handler entirely (it's pre-startup, pre-PII; no body content yet) OR extend the <code>opaqueIDKeys</code> carve-out (added in 7/A) so SHA-256 hex and absolute paths attached to known-safe keys pass through. The cleaner option is the first: <code>VerifyBinaryIntegrity</code> can <code>fmt.Fprintln</code> directly to <code>os.Stderr</code> for the failure message, bypassing slog. Pre-daemon code has no need for redaction.</p>
+<p class="meta"><strong>Related:</strong> [[D36]] (same over-redaction shape, different surface); new (Phase 7/C smoke test)</p>
+
+<h3><span class="id">D40</span>Double Touch ID prompt at daemon startup once <code>SecAccessControl</code> ships (7/A gate + 7/D OS ACL stack up) <span class="tag open">open</span> <span class="tag low">low</span></h3>
+<p><strong>Reported:</strong> 2026-05-23 (Phase 7/D rollout) · Surface: <code>internal/serve/startup_gate.go</code> (application-layer prompt added in 7/A) AND <code>internal/keystore/keystore.go:Load</code> (now triggers an OS-level prompt via <code>kSecAttrAccessControl</code> on v4 items).</p>
+<p><strong>Evidence:</strong> Phase 7/A landed Touch-ID-at-startup as the application-layer substitute for the then-deferred OS ACL. 7/D ships the real thing — every <code>keystore.Load</code> on a v4 item triggers a system-issued Touch ID prompt. The two now fire back-to-back at every daemon startup: the 7/A helper first ("Approve protonmcp startup"), then the OS prompt ("protonmcpd would like to access protonmcp credentials"). Same user, same biometric, two presses.</p>
+<p><strong>Impact:</strong> UX friction at startup. Not a security defect — both prompts gate the same operation; the user gets the right of refusal twice. But the second prompt looks redundant and undermines confidence in the first.</p>
+<p><strong>Remediation:</strong> Make the 7/A application-layer startup gate a no-op when <code>saveProtectedSupported</code> is true (i.e. when the OS-level ACL is in force). The OS-issued prompt becomes the single source of truth. Two-line change in <code>internal/serve/startup_gate.go</code>: skip <code>promptStartupTouchID</code> if the keystore blob version is v4-or-higher. Kept out of 7/D to avoid coupling the cleanup with the ACL rollout itself — easier to revert one or the other if a side effect appears.</p>
+<p class="meta"><strong>Related:</strong> [[D37]] (the OS ACL this is the side effect of); 7/A startup gate; new (Phase 7/D)</p>
+
+<h3><span class="id">D37</span>Keychain blob lacks SecAccessControl Touch ID requirement — daemon-layer gate is the substitute <span class="tag fixed">fixed in PR 7/D</span> <span class="tag low">low</span></h3>
+<p><strong>Reported:</strong> 2026-05-23 (Phase 6/E sign-off) · Surface: <code>internal/keystore/keystore.go</code> (now writes the blob with <code>kSecAttrAccessControl</code> + <code>kSecAccessControlUserPresence</code>).</p>
+<p><strong>Fix:</strong> Wrote a small cgo wrapper around Security.framework's <code>SecAccessControlCreateWithFlags</code> + <code>SecItemAdd</code> / <code>SecItemUpdate</code> in <code>internal/keystore/access_control_darwin.{h,c,go}</code> (~150 LOC C, ~60 LOC Go), preserving the v3 JSON shape on the wire. Bumped <code>blobVersion</code> from 3 to 4 to signal the ACL flag is in place. Load auto-upgrades v2/v3 blobs in place on first read — no user action required. Build-tagged so <code>internal/keystore</code> still compiles on non-darwin (test stub). After the upgrade, every <code>keystore.Load</code> triggers an OS-issued Touch ID prompt; any same-UID process trying to read the item gets the same prompt and can be refused. The application-layer startup gate from 7/A remains in place; the resulting double-prompt UX is filed as D40 with a documented two-line fix.</p>
+<p class="meta"><strong>Original context preserved below.</strong></p>
+<details><summary>Original deferral notes (2026-05-23)</summary>
 <p><strong>Evidence:</strong> Foundational #5 from the Phase 6
 planning doc asked for the Keychain item to require Touch ID at
 the OS level via <code>kSecAttrAccessControl</code> +
@@ -217,6 +248,7 @@ Phase 6/E gate covers the practical UX: an attacker with code-exec
 as our UID still cannot get a fresh session without touching the
 sensor.</p>
 <p class="meta"><strong>Related:</strong> Foundational #5 (deferred); Phase 7 packaging</p>
+</details>
 
 
 <h3><span class="id">D36</span>Touch ID prompt is grammatically broken and over-redacted — user can't read what they're approving <span class="tag fixed">fixed in PR 7/A</span> <span class="tag medium">medium</span></h3>

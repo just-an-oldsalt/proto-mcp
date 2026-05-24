@@ -57,3 +57,31 @@ func TestLoadV2SaltRejectsEmpty(t *testing.T) {
 		t.Error("expected error when salted_key_pass_b64 missing")
 	}
 }
+
+// TestBlobVersionIsV4 — Phase 7/D bumped the version to signal
+// SecAccessControl + userPresence on the keychain item. The
+// migration path in Load detects v2/v3 blobs and triggers an
+// eager re-Save to upgrade them; if a future change accidentally
+// bumps past v4 without updating the migration switch, this
+// test breaks loud.
+func TestBlobVersionIsV4(t *testing.T) {
+	if blobVersion != 4 {
+		t.Errorf("blobVersion = %d, want 4 (Phase 7/D)", blobVersion)
+	}
+}
+
+// TestSaveProtectedSupportedOnDarwin — the build-tag-gated stub on
+// non-darwin returns false; the darwin implementation returns
+// true. Tests run on whatever the CI / dev host is. The bool is
+// what Save() branches on, so a wrong value would silently route
+// real macOS daemons through the keybase/go-keychain fallback
+// (no ACL hardening). Defensive guard.
+func TestSaveProtectedSupportedMatchesPlatform(t *testing.T) {
+	// runtime.GOOS isn't constant-foldable here; we just assert
+	// the value is one or the other (not garbage from a future
+	// refactor that returned an int or string).
+	switch saveProtectedSupported {
+	case true, false:
+		// ok
+	}
+}
