@@ -18,7 +18,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"os"
 
 	keychain "github.com/keybase/go-keychain"
 
@@ -99,25 +98,24 @@ type savedBlob struct {
 //	v1: original {email, uid, access_token, refresh_token, salted_key_pass_b64}
 //	v2: added cookies (required for cold-start refresh — see Live doc)
 //	v3: SaltedKeyPass migrated from base64 string to []byte (SECURITY B-1)
-//	v4: same JSON shape as v3; signals the keychain item was written
-//	    with SecAccessControl + kSecAccessControlUserPresence (Phase
-//	    7/D, D37 fix). Reads of v4 items trigger Touch ID at the OS
-//	    level. v3 blobs are upgraded in place by Load.
-const blobVersion = 4
+//
+// v4 was briefly introduced for Phase 7/D's SecAccessControl-based
+// keychain ACL hardening but rolled back: the cgo path required a
+// `keychain-access-groups` entitlement, which is a "restricted
+// entitlement" on macOS — Developer ID Application signing alone is
+// not authorized for it; you need an Apple-provisioned profile
+// embedded in the binary (Phase 7/E .app-bundle work). Without the
+// profile, the kernel SIGKILLs the binary at launch. D37 is reopened
+// and deferred to Phase 7/E. The cgo wrapper in
+// access_control_darwin.{h,c,go} stays in tree, dormant, ready to
+// re-enable once the bundle work lands.
+const blobVersion = 3
 
 // Save writes (or overwrites) the single session slot.
 //
-// Phase 7/D — on darwin the write routes through saveProtected
-// (cgo wrapper around SecItemAdd / SecItemUpdate) which attaches a
-// SecAccessControl requiring user-presence for subsequent reads.
-// The save itself does NOT prompt; the prompt fires on every Load
-// of the resulting v4 item. On non-darwin (test only — proto-mcp
-// is macOS-only at runtime) Save falls back to the plain
-// keybase/go-keychain path with AccessibleWhenUnlocked.
-//
-// D37 closed by this change: any same-UID process that previously
-// could read the v3 item via the plain Keychain API will now hit
-// the OS-level Touch ID prompt instead.
+// Uses the keybase/go-keychain path with AccessibleWhenUnlocked. The
+// Phase-7/D SecAccessControl path is intentionally NOT called here
+// — see the blobVersion comment for why (restricted-entitlement wall).
 func Save(l Live) error {
 	if l.Email == "" || l.UID == "" || l.RefreshToken == "" {
 		return errors.New("keystore: refusing to save incomplete session (need email, uid, refresh_token)")
@@ -145,13 +143,6 @@ func Save(l Live) error {
 	}
 	defer zero(data)
 
-	if saveProtectedSupported {
-		return saveProtected(Service, Account, Label, data)
-	}
-
-	// Non-darwin fallback. The original keybase/go-keychain path,
-	// kept so tests build on Linux CI. Runtime on macOS always
-	// takes the saveProtected branch above.
 	item := keychain.NewGenericPassword(Service, Account, Label, data, "")
 	item.SetSynchronizable(keychain.SynchronizableNo)
 	item.SetAccessible(keychain.AccessibleWhenUnlocked)
@@ -187,35 +178,27 @@ func Load() (Live, error) {
 		return Live{}, fmt.Errorf("decode blob: %w", err)
 	}
 
-	// Version migrations. v4 is current; older versions read with a
-	// compat decoder + are silently rewritten on the next Save
-	// (typically triggered by the post-Load Resume → token rotation
-	// → OnAuthUpdate → Save chain).
-	//
-	// Phase 7/D — v3→v4 specifically signals "this blob predates
-	// the SecAccessControl hardening; the next Save will upgrade
-	// it." We trigger that Save eagerly below so the upgrade
-	// completes on the first daemon launch after rollout rather
-	// than waiting for a token rotation (which can take days).
-	needsACLUpgrade := false
+	// Version migrations. v3 is current; older versions read with a
+	// compat decoder + are silently rewritten as v3 on the next Save
+	// (the caller of Load is typically about to call Resume → which
+	// triggers a token rotation → which fires OnAuthUpdate → which
+	// re-Saves). No user action required.
 	switch blob.Version {
 	case blobVersion:
-		// happy path — already v4
-	case 3:
-		// Same JSON shape; bump the version so the eager re-Save
-		// writes a v4-flagged blob with SecAccessControl.
-		needsACLUpgrade = true
+		// happy path
+	case 4:
+		// Briefly-shipped v4 (Phase 7/D SecAccessControl). Same JSON
+		// shape, just a different version marker. Treat as v3 — the
+		// next Save will write a v3-flagged blob. No data lost.
 	case 2:
 		// v2 stored the salted key pass as a base64 STRING under the
 		// "salted_key_pass_b64" field. Decode it here, populate the
 		// v3-shaped slice in `blob` so the rest of Load doesn't care.
-		// The eager re-Save below carries the upgrade through to v4.
 		raw, err := loadV2Salt(data)
 		if err != nil {
 			return Live{}, fmt.Errorf("migrate v2 blob: %w", err)
 		}
 		blob.SaltedKeyPass = raw
-		needsACLUpgrade = true
 	default:
 		return Live{}, fmt.Errorf("keystore: unknown blob version %d (expected %d) — run `protonmcp logout && protonmcp login`",
 			blob.Version, blobVersion)
@@ -233,31 +216,7 @@ func Load() (Live, error) {
 	// material now lives inside the Secret. The data buffer at the
 	// top of this function will also be zeroed by its defer.
 	zero(blob.SaltedKeyPass)
-
-	// Phase 7/D — eager ACL upgrade. The write doesn't prompt; the
-	// new ACL takes effect on the NEXT Load. Failure to upgrade is
-	// non-fatal (Load already returned a valid Live); we log via
-	// the package-level logger if one's installed, otherwise stay
-	// silent and the next Save attempt retries.
-	if needsACLUpgrade && saveProtectedSupported {
-		if err := Save(live); err != nil {
-			migrationLogf("keystore: ACL upgrade from v%d to v%d failed: %v (will retry on next save)",
-				blob.Version, blobVersion, err)
-		} else {
-			migrationLogf("keystore: upgraded blob from v%d to v%d (SecAccessControl now requires Touch ID on next load)",
-				blob.Version, blobVersion)
-		}
-	}
-
 	return live, nil
-}
-
-// migrationLogf is a deliberately tiny logger seam — the keystore
-// package historically doesn't take a logger, and we don't want to
-// force one through every call site for a single diagnostic line.
-// Defaults to writing to os.Stderr; tests / dev builds can swap.
-var migrationLogf = func(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, format+"\n", args...)
 }
 
 // v2 used a base64-encoded string for the salted key pass. The bytes

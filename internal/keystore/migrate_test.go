@@ -58,15 +58,16 @@ func TestLoadV2SaltRejectsEmpty(t *testing.T) {
 	}
 }
 
-// TestBlobVersionIsV4 — Phase 7/D bumped the version to signal
-// SecAccessControl + userPresence on the keychain item. The
-// migration path in Load detects v2/v3 blobs and triggers an
-// eager re-Save to upgrade them; if a future change accidentally
-// bumps past v4 without updating the migration switch, this
+// TestBlobVersionIsV3 — Phase 7/D briefly bumped to v4 for the
+// SecAccessControl hardening, but the entitlement requirement
+// couldn't be satisfied with Developer ID signing alone (see
+// [[D37]]), so the bump was reverted. v4 blobs are still
+// understood by Load as a no-op compat path. If a future change
+// re-bumps without re-validating the entitlement story, this
 // test breaks loud.
-func TestBlobVersionIsV4(t *testing.T) {
-	if blobVersion != 4 {
-		t.Errorf("blobVersion = %d, want 4 (Phase 7/D)", blobVersion)
+func TestBlobVersionIsV3(t *testing.T) {
+	if blobVersion != 3 {
+		t.Errorf("blobVersion = %d, want 3 (Phase 7/D reverted; pending 7/E .app bundle)", blobVersion)
 	}
 }
 

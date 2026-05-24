@@ -17,7 +17,6 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
-	"runtime"
 	"sync"
 	"syscall"
 	"time"
@@ -217,27 +216,20 @@ func Setup(ctx context.Context, cfg SetupConfig) (*Runtime, error) {
 		}
 	}
 
-	// 3. Session (eager-acquire). Phase 6/E added an application-
+	// 3. Session (eager-acquire). Phase 6/E added the application-
 	// layer Touch-ID-at-startup gate as a substitute for the then-
-	// deferred OS Keychain ACL. Phase 7/D shipped the real OS-level
-	// ACL via SecAccessControl on the keychain item, so on darwin
-	// the kernel itself prompts on every keystore.Load.
+	// deferred OS Keychain ACL.
 	//
-	// D40: stacking both prompts produces two back-to-back Touch ID
-	// dialogs at every startup ("Approve protonmcp startup" then
-	// "protonmcpd would like to access protonmcp credentials"). We
-	// drop the application-layer gate on darwin and lean on the OS
-	// prompt as the single source of truth.
-	//
-	// Edge case during one-time v3→v4 migration: a pre-7/D blob has
-	// no ACL, so its first Load doesn't prompt. The migration re-
-	// saves immediately as v4; the NEXT Load prompts. Net: one
-	// unprompted session-acquire during the upgrade boot — same risk
-	// posture as 7/D shipping by itself (no worse than before this
-	// branch was here).
-	//
-	// On non-darwin (tests only — runtime targets macOS), keep the
-	// application gate so the test fleet still exercises it.
+	// D40 (and its revert): Phase 7/D briefly shipped the real OS-
+	// level ACL and we dropped this gate on darwin to avoid the
+	// double prompt. But 7/D required a `keychain-access-groups`
+	// entitlement that Developer ID Application signing alone
+	// can't authorize (restricted entitlement; needs a real
+	// provisioning profile), so the kernel SIGKILLs the signed
+	// binary. D37 was reopened and deferred to Phase 7/E (.app
+	// bundle + provisioning); the application-layer gate is back
+	// in unconditionally on every platform. See [[D37]] / [[D40]]
+	// in DEFECTS.html for the full story.
 	if cfg.AcquireSession == nil {
 		_ = st.Close()
 		return nil, errors.New("serve.Setup: AcquireSession is required")
@@ -245,7 +237,7 @@ func Setup(ctx context.Context, cfg SetupConfig) (*Runtime, error) {
 
 	startupHelperPath, helperResolveErr := approval.ResolveHelperPath(os.Args[0])
 	gatedAcquire := cfg.AcquireSession
-	if helperResolveErr == nil && runtime.GOOS != "darwin" {
+	if helperResolveErr == nil {
 		gatedAcquire = newStartupGatedAcquire(startupHelperPath, cfg.AcquireSession, logger)
 	}
 
