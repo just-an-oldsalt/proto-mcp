@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/mail"
 	"time"
 
@@ -102,11 +103,31 @@ func ToStoreMessage(m gpa.MessageMetadata) (store.Message, error) {
 	if err != nil {
 		return store.Message{}, fmt.Errorf("marshal raw metadata: %w", err)
 	}
-	// SECURITY B-9. Cap raw_json to keep a misbehaving server from
-	// blowing up our SQLite. Truncated rows keep the prefix for
-	// debuggability with an explicit marker.
+	// SECURITY B-9 / D11. Cap raw_json so a misbehaving server can't
+	// blow up our SQLite. The replacement must remain VALID JSON so
+	// downstream consumers that do json.Unmarshal(row.RawJSON, ...)
+	// don't panic — the prior "...\"[truncated]\"" suffix produced
+	// syntactically broken bytes. We replace the whole blob with a
+	// structured marker that names the original size + id so the row
+	// stays diagnosable without keeping the toxic prefix on disk.
 	if len(raw) > MaxRawJSONBytes {
-		raw = append(raw[:MaxRawJSONBytes], []byte(`..."[truncated]"`)...)
+		orig := len(raw)
+		marker, mErr := json.Marshal(map[string]any{
+			"truncated":      true,
+			"original_bytes": orig,
+			"id":             m.ID,
+			"reason":         "raw_json exceeded MaxRawJSONBytes",
+		})
+		if mErr != nil {
+			// Marshal of a fixed-shape map should never fail; if it
+			// does, fall back to the safest possible valid JSON.
+			marker = []byte(`{"truncated":true}`)
+		}
+		slog.Warn("raw_json truncated at MessageMetadata cap",
+			"msg_id", m.ID,
+			"original_bytes", orig,
+			"cap", MaxRawJSONBytes)
+		raw = marker
 	}
 
 	toJSON, err := marshalAddressList(m.ToList)

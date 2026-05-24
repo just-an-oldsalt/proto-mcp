@@ -127,7 +127,11 @@ VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		e.Caller.Binary,
 		e.Caller.UID,
 		e.Tool,
-		string(e.ArgsJSON),
+		// D26: bind as []byte, not string. modernc/sqlite treats
+		// them identically at the wire, but []byte avoids the
+		// allocation a string() conversion would do and reads
+		// naturally for "this column holds opaque bytes."
+		[]byte(e.ArgsJSON),
 		e.PolicyDecision,
 	)
 	if err != nil {

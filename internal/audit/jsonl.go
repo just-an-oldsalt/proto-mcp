@@ -4,32 +4,38 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
+	"io"
 	"time"
+
+	"github.com/just-an-oldsalt/proto-mcp/internal/logging"
 )
 
 // jsonlMirror appends one JSON line per completed audit entry to a
 // file the user can `tail -f` for live monitoring of MCP activity.
 // Best-effort — failures here log but don't fail the tool call.
+//
+// Phase 7/B: the underlying writer is a *logging.Rotator (50 MiB ×
+// 10 generations by default) so the audit log file doesn't grow
+// unbounded on a long-lived daemon. Rotation happens synchronously
+// on the first write that crosses the threshold; the rotator
+// retains <name>.1 (most recent rotated copy) through <name>.10.
 type jsonlMirror struct {
-	f *os.File
+	w io.WriteCloser
 }
 
-// openJSONLMirror opens (or creates) the file with O_APPEND so
-// concurrent writes from separate Writer instances would still
-// produce a coherent line stream. Mode 0o600 is the right
-// confidentiality posture — this file CAN contain recipient
-// addresses and tool arg metadata; anyone with read access to the
-// home dir would otherwise see it.
+// openJSONLMirror opens (or creates) the file with append + auto-
+// rotation. Mode 0o600 is the right confidentiality posture — this
+// file CAN contain recipient addresses and tool arg metadata; anyone
+// with read access to the home dir would otherwise see it.
 func openJSONLMirror(path string) (*jsonlMirror, error) {
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	r, err := logging.NewRotator(path, 0, 0) // defaults: 50 MiB × 10 gens
 	if err != nil {
 		return nil, err
 	}
-	return &jsonlMirror{f: f}, nil
+	return &jsonlMirror{w: r}, nil
 }
 
-func (m *jsonlMirror) Close() error { return m.f.Close() }
+func (m *jsonlMirror) Close() error { return m.w.Close() }
 
 // jsonlEntry is the shape one JSONL line takes.
 //
@@ -86,7 +92,7 @@ func (m *jsonlMirror) WriteCompleted(_ context.Context, id int64, outcome, appro
 		return fmt.Errorf("marshal jsonl entry: %w", err)
 	}
 	line = append(line, '\n')
-	if _, err := m.f.Write(line); err != nil {
+	if _, err := m.w.Write(line); err != nil {
 		return fmt.Errorf("write jsonl: %w", err)
 	}
 	return nil

@@ -124,16 +124,22 @@ FROM messages WHERE id = ?
 // SearchMessages runs an FTS5 MATCH against the indexed envelope + body
 // columns and returns message IDs ordered by rank (best match first).
 // limit caps results; 0 means no limit.
+//
+// D28: limit binds via ? rather than fmt.Sprintf so future maintainers
+// don't copy a "Sprintf-LIMIT-is-fine" pattern with a user-supplied
+// integer somewhere it's not.
 func (s *Store) SearchMessages(ctx context.Context, query string, limit int) ([]string, error) {
 	q := `
 SELECT message_id FROM messages_fts
 WHERE messages_fts MATCH ?
 ORDER BY rank
 `
+	queryArgs := []any{query}
 	if limit > 0 {
-		q += fmt.Sprintf(" LIMIT %d", limit)
+		q += " LIMIT ?"
+		queryArgs = append(queryArgs, limit)
 	}
-	rows, err := s.DB.QueryContext(ctx, q, query)
+	rows, err := s.DB.QueryContext(ctx, q, queryArgs...)
 	if err != nil {
 		return nil, fmt.Errorf("fts search: %w", err)
 	}
