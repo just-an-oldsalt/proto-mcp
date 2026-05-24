@@ -429,18 +429,44 @@ func launchctl(args ...string) error {
 }
 
 // launchctlBootstrapWithRetry wraps `launchctl bootstrap` with a
-// short retry loop. D39: launchd can return "Bootstrap failed: 5:
-// Input/output error" if a fresh bootstrap immediately follows a
-// bootout of the same label — the kernel-side service registry
-// needs a moment to clear the old entry. We swallow the EIO once
-// or twice with backoff, then surface any persistent error.
+// generous retry loop. D39: launchd can return "Bootstrap failed:
+// 5: Input/output error" for several seconds after a bootout of
+// the same label — the kernel-side service registry needs time to
+// clear the old entry, and the actual window varies (sometimes
+// hundreds of ms, sometimes >1s observed live).
 //
-// Backoff schedule: 100ms, 250ms, 500ms, give up (~850ms total).
-// Each attempt's stderr is captured but only the final failure's
-// is surfaced; intermediate EIOs are quiet so the success case
-// looks like the EIO never happened.
+// Strategy:
+//   1. Wait up to 5 seconds for `launchctl print` to report the
+//      label is fully gone (the bootout-completion signal).
+//   2. Retry the bootstrap with backoff (100ms / 250ms / 500ms /
+//      1s / 2s / 3s — ~7s ceiling).
+//   3. Only retry on the EIO signature; non-EIO failures fail
+//      fast so real plist / permission errors surface immediately.
+//
+// Successful retries print "succeeded on retry N" so operators
+// know we papered over a race rather than silently hid one.
 func launchctlBootstrapWithRetry(domain, plistPath string) error {
-	delays := []time.Duration{0, 100 * time.Millisecond, 250 * time.Millisecond, 500 * time.Millisecond}
+	// Step 1: wait for launchd to forget the label. Poll every
+	// 100ms for up to 5s. Skip if the label was never loaded.
+	label := domain + "/" + daemonLabel
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if exec.Command("launchctl", "print", label).Run() != nil {
+			break // label is gone, ready to bootstrap
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	// Step 2: bootstrap with backoff.
+	delays := []time.Duration{
+		0,
+		100 * time.Millisecond,
+		250 * time.Millisecond,
+		500 * time.Millisecond,
+		1 * time.Second,
+		2 * time.Second,
+		3 * time.Second,
+	}
 	var lastErr error
 	var lastStderr string
 	for i, d := range delays {
@@ -453,26 +479,17 @@ func launchctlBootstrapWithRetry(domain, plistPath string) error {
 		cmd.Stderr = &stderr
 		if err := cmd.Run(); err == nil {
 			if i > 0 {
-				// One or more retries succeeded; tell the operator
-				// we papered over a race rather than silently
-				// hiding the retry.
 				fmt.Fprintf(os.Stderr, "launchctl bootstrap succeeded on retry %d\n", i)
 			}
 			return nil
 		} else {
 			lastErr = err
 			lastStderr = stderr.String()
-			// Only retry on the specific "Input/output error" exit-5
-			// signature that the bootout race produces. Anything else
-			// (permission denied, plist parse error, etc.) is a real
-			// problem and should fail fast.
 			if !strings.Contains(lastStderr, "Input/output error") {
 				break
 			}
 		}
 	}
-	// Surface the last attempt's stderr alongside the error so the
-	// operator sees the real launchctl message.
 	if lastStderr != "" {
 		fmt.Fprint(os.Stderr, lastStderr)
 	}
