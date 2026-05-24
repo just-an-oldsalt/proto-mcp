@@ -173,18 +173,17 @@
 
 <h2>Open</h2>
 <p class="meta">
-  Seven residual defects. Two are real design work from the
-  2026-05-22 re-audit (D12 DSN injection, D22 <code>mail_read</code>
-  prompt-injection); the other five are paper cuts — three from the
-  Phase-7 cycle (D37 / D40 / D38) and two from the 2026-05-24 live
-  MCP smoke test (D41 colour-palette passthrough, D42 plaintext CSS
-  leakage). D37 + D40 were briefly closed in 7/D but the entitlement
-  requirement for <code>keychain-access-groups</code> on Developer-ID-
-  signed CLI binaries can't be met without an Apple-provisioned
-  profile (.app bundle territory) — both reopened and deferred to
-  Phase 7/E. None block the MVP: the application-layer Touch ID
-  startup gate from Phase 6/E / 7/A is back in force as the single
-  source of biometric proof at startup.
+  Five residual defects after Phase 7/E (PR #70). Two are real design
+  work from the 2026-05-22 re-audit (D12 DSN injection, D22
+  <code>mail_read</code> prompt-injection mitigation). D37 + D40 are
+  the deferred OS-level Keychain ACL story — both are blocked on a
+  proper .app bundle + provisioning profile, tracked as a follow-up
+  to Phase 7/E. D41 is the labels colour-palette passthrough,
+  reproducible and ready for a small palette-validation patch. D38
+  (over-redacted integrity diagnostics) and D42 (CSS / script leak
+  into plaintext) closed in this PR cycle. None block the MVP: the
+  application-layer Touch ID startup gate from Phase 6/E / 7/A is
+  the active biometric source.
 </p>
 
 <h3><span class="id">D37</span>Keychain blob lacks SecAccessControl Touch ID requirement — daemon-layer gate is the substitute <span class="tag open">open</span> <span class="tag low">low</span></h3>
@@ -199,22 +198,6 @@
 <p><strong>Status:</strong> Re-deferred. The "double prompt" only existed when 7/D's OS-level ACL fired alongside the application-layer gate. With D37 reverted (see entry above), only the application-layer gate fires, so there's no double-prompt anymore. The D40 cleanup (skip the application-layer gate on darwin) is now PREMATURE — until D37 actually works end-to-end, removing the application-layer gate would leave us with no Touch ID at all. Bring back in lockstep with D37's Phase 7/E re-enable.</p>
 <p class="meta"><strong>Related:</strong> [[D37]] (the precondition for re-fixing this); 7/A startup gate; Phase 7/E packaging</p>
 
-<h3><span class="id">D38</span>Redacting slog handler over-redacts operator-facing diagnostics in <code>protonmcpd</code> integrity-check errors <span class="tag open">open</span> <span class="tag low">low</span></h3>
-<p><strong>Reported:</strong> 2026-05-23 (Phase 7/C swap-attack smoke test) · Surface: <code>internal/redact/redact.go:looksLikeToken</code>, the error path in <code>cmd/protonmcpd/integrity.go:VerifyBinaryIntegrity</code>.</p>
-<p><strong>Evidence:</strong> Live integrity-check failure produced this log line:</p>
-<pre><code>level=ERROR msg="refusing to start" err="binary integrity check FAILED
-  running:   /[REDACTED-TOKEN]
-  running sha256:    [REDACTED-TOKEN]
-  expected (from install): [REDACTED-TOKEN]
-  expected path: /[REDACTED-TOKEN]
-  This indicates the binary was replaced after install. Either restore
-  the original binary or re-run `protonmcp daemon install` to record
-  the new hash"</code></pre>
-<p>SHA-256 hex strings (64 chars of alphanumeric) and absolute filesystem paths (32+ chars containing slashes) both trip <code>looksLikeToken</code> via the <code>scrubEmbeddedTokens</code> path on the wrapped error string. The user-actionable instruction survives ("re-run protonmcp daemon install"), but the diagnostic detail (which hash mismatched, which path the daemon was running from) is gone. Same class of over-redaction as D36 (Touch ID prompt opaque IDs), just in a different output channel.</p>
-<p><strong>Impact:</strong> Low. Operator can still tell what to do but can't tell what changed without running <code>shasum -a 256</code> manually against both the running binary and the recorded path. Hampers root-cause analysis during a real swap-attack response.</p>
-<p><strong>Remediation:</strong> Either route the integrity-check error around the redacting handler entirely (it's pre-startup, pre-PII; no body content yet) OR extend the <code>opaqueIDKeys</code> carve-out (added in 7/A) so SHA-256 hex and absolute paths attached to known-safe keys pass through. The cleaner option is the first: <code>VerifyBinaryIntegrity</code> can <code>fmt.Fprintln</code> directly to <code>os.Stderr</code> for the failure message, bypassing slog. Pre-daemon code has no need for redaction.</p>
-<p class="meta"><strong>Related:</strong> [[D36]] (same over-redaction shape, different surface); new (Phase 7/C smoke test)</p>
-
 <h3><span class="id">D41</span><code>labels_create</code> / <code>folders_create</code> / <code>*_update</code> forward arbitrary hex colour — Proton rejects non-palette values with a raw 422 <span class="tag open">open</span> <span class="tag low">low</span></h3>
 <p><strong>Reported:</strong> 2026-05-24 (live MCP smoke test) · Surface: <code>internal/mcptools/labels_folders_crud.go:301</code> (colour schema), <code>makeCreateHandler</code> (line 197, passthrough); update path shares the param at lines 313 / 334.</p>
 <p><strong>Evidence:</strong> <code>labels_create</code> with <code>color:"#FF6B6B"</code> and <code>folders_create</code> with <code>color:"#4ECDC4"</code> both return <code>422 POST https://mail-api.proton.me/core/v4/labels: Invalid color (Code=2001, Status=422)</code>. Retrying with a palette colour observed in the user's existing labels (<code>#8080FF</code>, <code>#258723</code>) succeeds immediately. <code>makeCreateHandler</code> unmarshals <code>in.Color</code> and passes it straight into <code>gpa.CreateLabelReq</code> with no validation, so any non-palette hex round-trips to the Proton API and fails there. <code>labels_update</code> / <code>folders_update</code> share the same unvalidated colour param.</p>
@@ -222,12 +205,6 @@
 <p><strong>Remediation:</strong> Validate <code>Color</code> against Proton's fixed palette client-side before the API call — reject with a message listing the accepted values, or snap to the nearest. Update the schema <code>description</code> on all four tools to name the palette rather than <code>"Hex color like #aabbcc"</code>. Factor the palette into a shared constant so create + update + a future <code>colors_list</code> stay in sync.</p>
 <p class="meta"><strong>Related:</strong> new (2026-05-24 live MCP smoke test)</p>
 
-<h3><span class="id">D42</span><code>sanitize.Text</code> leaves <code>&lt;style&gt;</code> / <code>&lt;script&gt;</code> element content in extracted plaintext — <code>mail_read</code> <code>body_format="text"</code> returns raw CSS <span class="tag open">open</span> <span class="tag low">low</span></h3>
-<p><strong>Reported:</strong> 2026-05-24 (live MCP smoke test) · Surface: <code>internal/sanitize/sanitize.go:128</code> (<code>Text</code>) + <code>htmlTagStripper</code> regex at line 105; consumed by <code>internal/proton/body.go:74,84</code>; surfaced via <code>internal/mcptools/mail_read.go</code>.</p>
-<p><strong>Evidence:</strong> <code>mail_read</code> with <code>body_format="text"</code> on an HTML-only marketing email (Audible) returned the message's entire <code>&lt;style&gt;</code> block — <code>.lhfix{…}</code>, dozens of <code>@font-face{…}</code> rules, <code>@media</code> queries — as the <code>text</code> field. Root cause: <code>Text()</code> strips only tag <em>delimiters</em> via <code>htmlTagStripper</code> (<code>(?s)&lt;[^&gt;]+&gt;</code>), so the content <em>between</em> <code>&lt;style&gt;…&lt;/style&gt;</code> (and <code>&lt;script&gt;…&lt;/script&gt;</code>) survives. <code>body.go</code> runs <code>sanitize.Text</code> on the raw decrypted body; the bluemonday-backed <code>sanitize.HTML</code> (used for the <code>html</code> field) drops those elements wholesale, but <code>Text()</code> never sees that sanitized output.</p>
-<p><strong>Impact:</strong> Low. No security issue — the CSS is inert text and scripts aren't executed. But it pollutes the plaintext returned to the LLM, the snippet shown in <code>mail_list</code>, and the FTS5 index (<code>Text()</code> also feeds indexing), bloating it with CSS / font-face tokens and degrading snippet quality for any HTML-only mail with a large <code>&lt;style&gt;</code> head.</p>
-<p><strong>Remediation:</strong> In <code>Text()</code>, drop <code>&lt;style&gt;…&lt;/style&gt;</code> and <code>&lt;script&gt;…&lt;/script&gt;</code> element contents before the tag-stripping pass (e.g. a <code>(?is)&lt;(style|script)\b.*?&lt;/\1&gt;</code> removal), or run <code>Text()</code> over the already-sanitized <code>sanitize.HTML</code> output instead of the raw body. Add a regression test with a <code>&lt;style&gt;</code>-heavy fixture asserting the CSS does not appear in the output.</p>
-<p class="meta"><strong>Related:</strong> [[D22]] (same <code>mail_read</code> surface); [[D29]] (same "raw content into LLM context" family)</p>
 
 <h3><span class="id">D22</span><code>mail_read</code>/<code>mail_read_thread</code> allow-by-default — prompt-injection mitigation only in description text <span class="tag open">open</span> <span class="tag medium">medium</span></h3>
 <p><strong>Reported:</strong> 2026-05-22 (security re-audit) · Surface: <code>internal/policy/default.yaml:31-32</code>, <code>internal/mcptools/mail_read.go:38-41</code></p>
@@ -265,6 +242,14 @@
 <p class="meta"><em>None.</em></p>
 
 <h2>Resolved</h2>
+
+<h3><span class="id">D42</span><code>sanitize.Text</code> leaves <code>&lt;style&gt;</code> / <code>&lt;script&gt;</code> element content in extracted plaintext <span class="tag fixed">fixed in PR #70</span> <span class="tag low">low</span></h3>
+<p><strong>Reported:</strong> 2026-05-24 (live MCP smoke test) · Surface: <code>internal/sanitize/sanitize.go</code></p>
+<p><strong>Fix:</strong> Added <code>styleContentStripper</code> and <code>scriptContentStripper</code> regexes that drop entire <code>&lt;style&gt;…&lt;/style&gt;</code> and <code>&lt;script&gt;…&lt;/script&gt;</code> elements (content + delimiters) before <code>htmlTagStripper</code> runs. RE2 has no backreferences, so one regex per tag. Tests cover the basic case plus mixed-case / spaced-closing-tag variants (<code>TestTextStripsStyleAndScriptContent</code>, <code>TestTextStripsCaseAndSpacedClosingTags</code>). Marketing HTML emails no longer pollute the plaintext or FTS5 index with multi-KB CSS / font-face / media-query blocks.</p>
+
+<h3><span class="id">D38</span>Redacting slog handler over-redacts operator-facing diagnostics in <code>protonmcpd</code> integrity-check errors <span class="tag fixed">fixed in PR #69</span> <span class="tag low">low</span></h3>
+<p><strong>Reported:</strong> 2026-05-23 (Phase 7/C swap-attack smoke test) · Surface: <code>cmd/protonmcpd/main.go</code></p>
+<p><strong>Fix:</strong> Integrity-check failures now go to <code>os.Stderr</code> directly via <code>fmt.Fprintln</code> rather than <code>slog.Error</code>. The redacting handler is bypassed entirely for this pre-startup diagnostic — pre-daemon code has no body content to leak, and the operator needs the literal SHA-256 hashes + paths to figure out what was replaced. Success still routes through slog (normal telemetry).</p>
 
 <h3><span class="id">D39</span><code>launchctl bootstrap</code> race after bootout in <code>protonmcp daemon install</code> <span class="tag fixed">fixed in PR #65</span> <span class="tag low">low</span></h3>
 <p><strong>Reported:</strong> 2026-05-23 (Phase 7/C smoke test) · Surface: <code>cmd/protonmcp/daemon.go:runDaemonInstall</code></p>

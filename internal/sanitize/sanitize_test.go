@@ -93,6 +93,41 @@ func TestTextStripsHTML(t *testing.T) {
 	}
 }
 
+// D42: <style> and <script> element contents must be dropped
+// wholesale, not just have their tag delimiters stripped. Marketing
+// HTML emails ship multi-KB <style> blocks (@font-face, @media)
+// that would otherwise pollute the plaintext returned by mail_read
+// body_format="text" and the FTS5 index.
+func TestTextStripsStyleAndScriptContent(t *testing.T) {
+	in := `<html><head>
+<style>.lhfix{display:block} @font-face{font-family:'X';src:url(...)}</style>
+<script>var t = 'tracker'; doStuff();</script>
+</head>
+<body><p>Hello, real content here.</p></body></html>`
+	got := Text(in)
+	for _, leak := range []string{"@font-face", ".lhfix", "tracker", "doStuff"} {
+		if strings.Contains(got, leak) {
+			t.Errorf("D42 regression: %q leaked into plaintext: %q", leak, got)
+		}
+	}
+	if !strings.Contains(got, "real content here") {
+		t.Errorf("real body content lost: %q", got)
+	}
+}
+
+// D42 edge: mixed-case tags + spaces in closing tag must also be
+// caught.
+func TestTextStripsCaseAndSpacedClosingTags(t *testing.T) {
+	in := `<STYLE>p{color:red}</ Style >hello<Script>x()</  SCRIPT>world`
+	got := Text(in)
+	if strings.Contains(got, "color:red") || strings.Contains(got, "x()") {
+		t.Errorf("D42 case/space variant leaked: %q", got)
+	}
+	if !strings.Contains(got, "hello") || !strings.Contains(got, "world") {
+		t.Errorf("real content lost: %q", got)
+	}
+}
+
 func TestTextStripsQuotedReplies(t *testing.T) {
 	in := "On Tuesday Alice wrote:\n> Original message\n> > Nested\nMy actual reply"
 	got := Text(in)

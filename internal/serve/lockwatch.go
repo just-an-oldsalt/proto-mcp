@@ -113,14 +113,23 @@ func runLockwatchOnce(ctx context.Context, binPath string, lockFn func(reason st
 	return scanner.Err()
 }
 
-// resolveLockwatchPath discovers the helper binary using the same
-// discovery sequence the Touch ID helper uses:
+// resolveLockwatchPath discovers the helper binary across the
+// install layouts proto-mcp supports:
 //
-//  1. Sibling of the running daemon binary:
+//  1. Env override: PROTONMCP_LOCKWATCH (test / dev override).
+//  2. Sibling of the running daemon binary:
 //     <dir(os.Executable())>/helpers/lockwatch/protonmcp-lockwatch
-//  2. Phase-7 packaged app:
-//     /Applications/protonmcp.app/Contents/MacOS/protonmcp-lockwatch
-//  3. Env override: PROTONMCP_LOCKWATCH (test / dev override)
+//     (dev layout: bin/protonmcpd + helpers/lockwatch/...)
+//  3. Same directory as the running binary:
+//     <dir(os.Executable())>/protonmcp-lockwatch
+//     (Phase 7/E Homebrew cask layout: cask `binary` stanzas drop
+//     every product directly into <prefix>/bin/).
+//  4. /Applications/protonmcp.app/Contents/MacOS/protonmcp-lockwatch
+//     (deferred .app-bundle layout; pairs with D37's Phase 7/E
+//     re-enable).
+//  5. Explicit Homebrew prefix paths in case the running binary
+//     was invoked via a PATH symlink and Dir(exe) lands somewhere
+//     other than the actual bin directory.
 //
 // Returns ("", false) if no candidate is executable.
 func resolveLockwatchPath() (string, bool) {
@@ -133,10 +142,13 @@ func resolveLockwatchPath() (string, bool) {
 	if err != nil {
 		return "", false
 	}
+	binDir := filepath.Dir(exe)
 	for _, candidate := range []string{
-		filepath.Join(filepath.Dir(exe), "helpers", "lockwatch", "protonmcp-lockwatch"),
-		filepath.Join(filepath.Dir(exe), "protonmcp-lockwatch"),
+		filepath.Join(binDir, "helpers", "lockwatch", "protonmcp-lockwatch"),
+		filepath.Join(binDir, "protonmcp-lockwatch"),
 		"/Applications/protonmcp.app/Contents/MacOS/protonmcp-lockwatch",
+		"/opt/homebrew/bin/protonmcp-lockwatch",
+		"/usr/local/bin/protonmcp-lockwatch",
 	} {
 		if isExecutable(candidate) {
 			return candidate, true
