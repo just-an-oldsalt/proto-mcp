@@ -104,6 +104,22 @@ var quotedReplyLine = regexp.MustCompile(`^\s*(>+\s?)+`)
 // decodes &amp; → & which can re-introduce noise).
 var htmlTagStripper = regexp.MustCompile(`(?s)<[^>]+>`)
 
+// styleContentStripper / scriptContentStripper remove <style>…</style>
+// and <script>…</script> element CONTENT (not just the delimiters)
+// before the tag-stripper runs. D42: marketing HTML emails commonly
+// carry multi-KB <style> blocks (font-face, media queries) that
+// would otherwise survive htmlTagStripper and land in the plaintext
+// / FTS index.
+//
+// RE2 (Go's regexp engine) doesn't support backreferences, so we
+// use a separate regex per tag rather than one with \1. Case-
+// insensitive + dot-matches-newline so each regex catches the
+// element regardless of formatting / mixed case.
+var (
+	styleContentStripper  = regexp.MustCompile(`(?is)<style\b[^>]*>.*?</\s*style\s*>`)
+	scriptContentStripper = regexp.MustCompile(`(?is)<script\b[^>]*>.*?</\s*script\s*>`)
+)
+
 // whitespaceRun matches any run of two-or-more whitespace chars
 // (including newlines) so Text() can collapse them to one space.
 var whitespaceRun = regexp.MustCompile(`\s+`)
@@ -113,11 +129,13 @@ var whitespaceRun = regexp.MustCompile(`\s+`)
 //
 // Steps:
 //
-//  1. Strip every tag (including allowlist tags — for text output
-//     we want pure content).
-//  2. Drop lines that are entirely quoted-reply markers.
-//  3. Collapse whitespace runs to a single space.
-//  4. Trim leading/trailing space.
+//  1. Strip <style>…</style> and <script>…</script> element content
+//     wholesale (D42 — otherwise CSS / JS leaks into the plaintext).
+//  2. Strip every remaining tag (including allowlist tags — for text
+//     output we want pure content).
+//  3. Drop lines that are entirely quoted-reply markers.
+//  4. Collapse whitespace runs to a single space.
+//  5. Trim leading/trailing space.
 //
 // Note: HTML entities like &amp; are NOT decoded. Decoding adds a
 // dependency on html.UnescapeString and lets clever encodings hide
@@ -129,7 +147,9 @@ func Text(input string) string {
 	if input == "" {
 		return ""
 	}
-	out := htmlTagStripper.ReplaceAllString(input, " ")
+	out := styleContentStripper.ReplaceAllString(input, " ")
+	out = scriptContentStripper.ReplaceAllString(out, " ")
+	out = htmlTagStripper.ReplaceAllString(out, " ")
 	out = stripControlChars(out)
 
 	var lines []string

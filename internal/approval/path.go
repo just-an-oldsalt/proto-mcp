@@ -44,18 +44,29 @@ func resolveHelperPath(argv0 string) (string, error) {
 	if argv0 != "" {
 		abs, err := filepath.Abs(argv0)
 		if err == nil {
-			sib := filepath.Join(filepath.Dir(abs), "helpers", "touchid", "protonmcp-touchid")
+			binDir := filepath.Dir(abs)
+			// Dev layout: <repo>/bin/protonmcp + <repo>/helpers/touchid/
+			sib := filepath.Join(binDir, "helpers", "touchid", "protonmcp-touchid")
 			candidates = append(candidates, sib)
-			// Also check a "two levels up" location for the
-			// common "binary at bin/protonmcp, helper at
-			// helpers/touchid/protonmcp-touchid" dev layout.
-			twoUp := filepath.Join(filepath.Dir(filepath.Dir(abs)), "helpers", "touchid", "protonmcp-touchid")
+			twoUp := filepath.Join(filepath.Dir(binDir), "helpers", "touchid", "protonmcp-touchid")
 			candidates = append(candidates, twoUp)
+			// Phase 7/E Homebrew cask layout: cask `binary`
+			// stanzas drop every product directly into the
+			// prefix's bin/ — protonmcp-touchid sits next to
+			// protonmcp.
+			brewish := filepath.Join(binDir, "protonmcp-touchid")
+			candidates = append(candidates, brewish)
 		}
 	}
 
 	candidates = append(candidates,
-		"/Applications/protonmcp.app/Contents/MacOS/protonmcp-touchid")
+		// Phase 7 packaged app — deferred (paired with D37).
+		"/Applications/protonmcp.app/Contents/MacOS/protonmcp-touchid",
+		// Explicit Homebrew prefixes in case argv0 was invoked
+		// via a PATH symlink and Dir(abs) didn't land in bin/.
+		"/opt/homebrew/bin/protonmcp-touchid",
+		"/usr/local/bin/protonmcp-touchid",
+	)
 
 	for _, c := range candidates {
 		if isExecutable(c) {

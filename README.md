@@ -112,6 +112,29 @@ fix log. [`DEFECTS.html`](./DEFECTS.html) is the open issue list
 
 ## Install
 
+Two paths. **Homebrew** (signed + notarized binaries, recommended)
+once the first tagged release is up; **build from source** for
+contributors and pre-release testing.
+
+### Homebrew (Phase 7/E — pending first tagged release)
+
+```sh
+brew tap just-an-oldsalt/protonmcp
+brew install --cask protonmcp
+protonmcp login                   # interactive: SRP + TOTP + key unlock
+protonmcp backfill                # one-time: drains every message envelope
+protonmcp daemon install          # registers + starts the LaunchAgent
+protonmcp install                 # registers shim with Claude Desktop + Claude Code
+```
+
+The cask installs all five binaries into the Homebrew prefix's
+`bin/` (signed + notarized; no Gatekeeper warning). `brew uninstall
+--cask protonmcp` reverses everything; `--zap` also removes
+`~/Library/Application Support/protonmcp`, `~/Library/Logs/protonmcp`,
+and the LaunchAgent plist.
+
+### Build from source
+
 Requires macOS 13+, [Go 1.26+](https://go.dev/dl/), and Xcode
 Command Line Tools (for `swiftc`).
 
@@ -125,12 +148,11 @@ make all                          # builds bin/* + Swift helpers
 ./bin/protonmcp install           # registers shim with Claude Desktop + Claude Code
 ```
 
-Restart Claude Desktop / Claude Code. The 29 tools show up under
-`protonmcp` in `/mcp`.
+Source builds are ad-hoc signed by default. For a signed-locally
+build, see [`scripts/signing-setup.md`](./scripts/signing-setup.md).
 
-**Coming in Phase 7/E:** `brew install --cask just-an-oldsalt/protonmcp/protonmcp`
-(pending the Proton AppVersion grant and a Homebrew tap.) Signed
-+ notarized; no developer warning.
+Restart Claude Desktop / Claude Code after either install path.
+The 29 tools show up under `protonmcp` in `/mcp`.
 
 ## A Touch ID prompt looks like this
 
