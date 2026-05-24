@@ -63,7 +63,7 @@ fails):
    The script auto-retries once with a 30s wait if the first
    attempt hits Apple's ticket-propagation lag.
 6. **package** — bundle all five binaries + LICENSE / README /
-   SECURITY into `dist/protonmcp-<version>.tar.gz`, write a
+   SECURITY into `dist/proto-mcp-<version>.tar.gz`, write a
    sidecar sha256 file.
 7. **tag + release** — `git tag` (annotated), push the tag, run
    `gh release create --draft` with the tarball + sha256 attached.
@@ -77,16 +77,16 @@ lets you write release notes before flipping the visibility.
    (or run `gh release view v1.0.0`). Edit notes in the GitHub UI.
 2. **Publish.** Click the green Publish button (or
    `gh release edit v1.0.0 --draft=false`).
-3. **Update the Homebrew cask.** Copy `Formula/protonmcp.rb` from
-   this repo into your `homebrew-protonmcp` tap repo. Update:
+3. **Update the Homebrew cask.** Copy `Formula/proto-mcp.rb` from
+   this repo into your `homebrew-proto-mcp` tap repo. Update:
    ```ruby
    version "1.0.0"
-   sha256 "<the sha from dist/protonmcp-1.0.0.tar.gz.sha256>"
+   sha256 "<the sha from dist/proto-mcp-1.0.0.tar.gz.sha256>"
    ```
    Commit + push the tap. Users then run:
    ```sh
-   brew tap just-an-oldsalt/protonmcp
-   brew install --cask protonmcp
+   brew tap just-an-oldsalt/proto-mcp
+   brew install --cask proto-mcp
    ```
 
 ## What if I tagged but the build failed?
@@ -164,5 +164,5 @@ failure, then:
 ```sh
 gh release create v1.0.0 --draft --generate-notes \
     --title "v1.0.0" \
-    dist/protonmcp-1.0.0.tar.gz dist/protonmcp-1.0.0.tar.gz.sha256
+    dist/proto-mcp-1.0.0.tar.gz dist/proto-mcp-1.0.0.tar.gz.sha256
 ```

@@ -119,17 +119,20 @@ contributors and pre-release testing.
 ### Homebrew (Phase 7/E — pending first tagged release)
 
 ```sh
-brew tap just-an-oldsalt/protonmcp
-brew install --cask protonmcp
+brew tap just-an-oldsalt/proto-mcp
+brew install --cask proto-mcp
 protonmcp login                   # interactive: SRP + TOTP + key unlock
 protonmcp backfill                # one-time: drains every message envelope
 protonmcp daemon install          # registers + starts the LaunchAgent
 protonmcp install                 # registers shim with Claude Desktop + Claude Code
 ```
 
+(The cask is `proto-mcp` with a hyphen; the binaries it installs
+keep their existing names `protonmcp`, `protonmcpd`, etc.)
+
 The cask installs all five binaries into the Homebrew prefix's
 `bin/` (signed + notarized; no Gatekeeper warning). `brew uninstall
---cask protonmcp` reverses everything; `--zap` also removes
+--cask proto-mcp` reverses everything; `--zap` also removes
 `~/Library/Application Support/protonmcp`, `~/Library/Logs/protonmcp`,
 and the LaunchAgent plist.
 
