@@ -1,11 +1,17 @@
-name: Release
+name: Release (PARKED — manual dispatch only)
 
-# Phase 7/E — tag-triggered release pipeline. On `git push <v*>` tag,
-# build all five binaries on macOS, codesign with Developer ID,
-# submit for notarization, and attach the signed zip to a GitHub
-# release. Homebrew cask consumers download from there.
+# Phase 7/E — automated release pipeline. PARKED FOR NOW: the MVP
+# uses local-only signing via `make release VERSION=v1.0.0` (see
+# scripts/release-howto.md) so the Developer ID cert + private key
+# never leave the maintainer's machine.
 #
-# Required repository secrets (configured in scripts/release-setup.md):
+# Trigger is set to `workflow_dispatch` (manual) so this file
+# documents the eventual automation without firing on tag push.
+# When release cadence grows or additional maintainers join,
+# switch the trigger back to `push: tags: - "v*"` after adding the
+# six secrets below.
+#
+# Required repository secrets when re-activating:
 #
 #   APPLE_DEVELOPER_ID_CERT_P12_BASE64
 #     base64 of the .p12 export of the Developer ID Application
@@ -30,9 +36,12 @@ name: Release
 #     specifically for notarytool. Stored verbatim.
 
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_dispatch:
+  # When ready to enable: uncomment the lines below to fire on tag
+  # push instead of (or in addition to) the manual trigger.
+  #push:
+  #  tags:
+  #    - "v*"
 
 permissions:
   contents: write   # required to create the release + upload assets

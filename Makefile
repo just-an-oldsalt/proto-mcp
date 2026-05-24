@@ -174,3 +174,22 @@ notarize: $(DIST_ZIP)
 	@echo ".pkg or .dmg (Phase 7/E) and staple THAT."
 	@echo ""
 	@echo "Confirm acceptance with: make verify-notarized"
+
+# Full local release pipeline: clean → build → sign → notarize →
+# package tarball + sha256 → tag + create draft GitHub release.
+#
+# Runs entirely from your machine — no secrets in cloud. Requires
+# DEVELOPER_ID env var, notarytool keychain profile, and `gh` CLI
+# authenticated. See scripts/release-howto.md.
+#
+# Usage:
+#   export DEVELOPER_ID='Developer ID Application: <NAME> (<TEAMID>)'
+#   make release VERSION=v1.0.0
+.PHONY: release
+release:
+	@if [ -z "$$VERSION" ]; then \
+		echo "error: VERSION not set."; \
+		echo "  Usage: make release VERSION=v1.0.0"; \
+		exit 1; \
+	fi
+	./scripts/release.sh "$$VERSION"
