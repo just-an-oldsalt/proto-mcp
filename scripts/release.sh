@@ -95,10 +95,13 @@ if ! make verify-notarized; then
 fi
 
 # Step 6: package the flat tarball that the Homebrew cask consumes.
+# Artifact + staging dir are named `proto-mcp-<version>` (with
+# hyphen) to match the cask branding; the binaries INSIDE the
+# tarball keep their existing names (protonmcp, protonmcpd, ...).
 echo
-echo "--- (6/7) packaging dist/protonmcp-$VERSION.tar.gz ---"
+echo "--- (6/7) packaging dist/proto-mcp-$VERSION.tar.gz ---"
 STAGE=$(mktemp -d)
-STAGEDIR="$STAGE/protonmcp-$VERSION"
+STAGEDIR="$STAGE/proto-mcp-$VERSION"
 mkdir -p "$STAGEDIR"
 cp bin/protonmcp        "$STAGEDIR/protonmcp"
 cp bin/protonmcpd       "$STAGEDIR/protonmcpd"
@@ -108,10 +111,10 @@ cp helpers/lockwatch/protonmcp-lockwatch "$STAGEDIR/protonmcp-lockwatch"
 cp LICENSE README.md SECURITY.md "$STAGEDIR/"
 
 mkdir -p dist
-TAR="dist/protonmcp-$VERSION.tar.gz"
-(cd "$STAGE" && tar -czf - "protonmcp-$VERSION") > "$TAR"
+TAR="dist/proto-mcp-$VERSION.tar.gz"
+(cd "$STAGE" && tar -czf - "proto-mcp-$VERSION") > "$TAR"
 SHA=$(shasum -a 256 "$TAR" | awk '{print $1}')
-echo "$SHA  protonmcp-$VERSION.tar.gz" > "$TAR.sha256"
+echo "$SHA  proto-mcp-$VERSION.tar.gz" > "$TAR.sha256"
 rm -rf "$STAGE"
 
 echo "  $TAR"
@@ -141,7 +144,7 @@ echo
 echo "Next steps:"
 echo "  1. Edit the draft on GitHub to fill in release notes."
 echo "  2. Click Publish."
-echo "  3. Update Formula/protonmcp.rb in your homebrew-protonmcp tap:"
+echo "  3. Update Formula/proto-mcp.rb in your homebrew-proto-mcp tap:"
 echo "       version \"$VERSION\""
 echo "       sha256 \"$SHA\""
 echo "     Commit + push the tap. Then \`brew install --cask\` Just Works."
