@@ -17,6 +17,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"runtime"
 	"sync"
 	"syscall"
 	"time"
@@ -216,27 +217,35 @@ func Setup(ctx context.Context, cfg SetupConfig) (*Runtime, error) {
 		}
 	}
 
-	// 3. Session (eager-acquire). Phase 6/E — wrapped in a
-	// Touch-ID-at-startup gate via the approval broker if one is
-	// available. This is the application-layer substitute for the
-	// Keychain ACL we deferred: even though the keychain blob is
-	// readable without biometric (keybase/go-keychain doesn't
-	// expose SecAccessControl), every session-acquire — both
-	// initial startup and SIGUSR2-driven unlock — prompts Touch
-	// ID before the keychain is touched. Same net UX.
+	// 3. Session (eager-acquire). Phase 6/E added an application-
+	// layer Touch-ID-at-startup gate as a substitute for the then-
+	// deferred OS Keychain ACL. Phase 7/D shipped the real OS-level
+	// ACL via SecAccessControl on the keychain item, so on darwin
+	// the kernel itself prompts on every keystore.Load.
+	//
+	// D40: stacking both prompts produces two back-to-back Touch ID
+	// dialogs at every startup ("Approve protonmcp startup" then
+	// "protonmcpd would like to access protonmcp credentials"). We
+	// drop the application-layer gate on darwin and lean on the OS
+	// prompt as the single source of truth.
+	//
+	// Edge case during one-time v3→v4 migration: a pre-7/D blob has
+	// no ACL, so its first Load doesn't prompt. The migration re-
+	// saves immediately as v4; the NEXT Load prompts. Net: one
+	// unprompted session-acquire during the upgrade boot — same risk
+	// posture as 7/D shipping by itself (no worse than before this
+	// branch was here).
+	//
+	// On non-darwin (tests only — runtime targets macOS), keep the
+	// application gate so the test fleet still exercises it.
 	if cfg.AcquireSession == nil {
 		_ = st.Close()
 		return nil, errors.New("serve.Setup: AcquireSession is required")
 	}
 
-	// Resolve helper now so we know up-front whether to install
-	// the startup gate. Missing helper is non-fatal: we degrade
-	// to the Phase-5 behavior (acquire-without-prompt at startup),
-	// and the same warning fires later when the broker construction
-	// would have happened.
 	startupHelperPath, helperResolveErr := approval.ResolveHelperPath(os.Args[0])
 	gatedAcquire := cfg.AcquireSession
-	if helperResolveErr == nil {
+	if helperResolveErr == nil && runtime.GOOS != "darwin" {
 		gatedAcquire = newStartupGatedAcquire(startupHelperPath, cfg.AcquireSession, logger)
 	}
 

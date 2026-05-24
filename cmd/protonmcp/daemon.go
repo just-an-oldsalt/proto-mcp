@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -124,7 +125,13 @@ func runDaemonInstall(_ context.Context, args []string) error {
 		fmt.Fprintf(os.Stderr, "warning: could not write binary integrity file: %v\n", err)
 	}
 
-	if err := launchctl("bootstrap", "gui/"+uidString(), plistPath); err != nil {
+	// D39: launchd needs a brief settle window after bootout before
+	// it will accept a fresh bootstrap of the same label, otherwise
+	// the first attempt returns "Bootstrap failed: 5: Input/output
+	// error". Retry with backoff; total ceiling ~1s. Same shape as
+	// runDaemonRestart's existing 500ms settle between stop and
+	// start, just adaptive rather than fixed.
+	if err := launchctlBootstrapWithRetry("gui/"+uidString(), plistPath); err != nil {
 		return fmt.Errorf("bootstrap: %w", err)
 	}
 
@@ -419,6 +426,57 @@ func launchctl(args ...string) error {
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
+}
+
+// launchctlBootstrapWithRetry wraps `launchctl bootstrap` with a
+// short retry loop. D39: launchd can return "Bootstrap failed: 5:
+// Input/output error" if a fresh bootstrap immediately follows a
+// bootout of the same label — the kernel-side service registry
+// needs a moment to clear the old entry. We swallow the EIO once
+// or twice with backoff, then surface any persistent error.
+//
+// Backoff schedule: 100ms, 250ms, 500ms, give up (~850ms total).
+// Each attempt's stderr is captured but only the final failure's
+// is surfaced; intermediate EIOs are quiet so the success case
+// looks like the EIO never happened.
+func launchctlBootstrapWithRetry(domain, plistPath string) error {
+	delays := []time.Duration{0, 100 * time.Millisecond, 250 * time.Millisecond, 500 * time.Millisecond}
+	var lastErr error
+	var lastStderr string
+	for i, d := range delays {
+		if d > 0 {
+			time.Sleep(d)
+		}
+		cmd := exec.Command("launchctl", "bootstrap", domain, plistPath)
+		var stderr bytes.Buffer
+		cmd.Stdout = &stderr
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err == nil {
+			if i > 0 {
+				// One or more retries succeeded; tell the operator
+				// we papered over a race rather than silently
+				// hiding the retry.
+				fmt.Fprintf(os.Stderr, "launchctl bootstrap succeeded on retry %d\n", i)
+			}
+			return nil
+		} else {
+			lastErr = err
+			lastStderr = stderr.String()
+			// Only retry on the specific "Input/output error" exit-5
+			// signature that the bootout race produces. Anything else
+			// (permission denied, plist parse error, etc.) is a real
+			// problem and should fail fast.
+			if !strings.Contains(lastStderr, "Input/output error") {
+				break
+			}
+		}
+	}
+	// Surface the last attempt's stderr alongside the error so the
+	// operator sees the real launchctl message.
+	if lastStderr != "" {
+		fmt.Fprint(os.Stderr, lastStderr)
+	}
+	return lastErr
 }
 
 // labelLoaded reports whether launchctl currently knows about our
