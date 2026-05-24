@@ -10,6 +10,9 @@
 # Phase 4/C — built by `make touchid`. Lives next to the source
 # under helpers/touchid/ but is a real binary product, not source.
 helpers/touchid/protonmcp-touchid
+# Phase 7/A — same shape for the screen-lock / sleep watcher
+# (`make lockwatch`). Compiled product, not source.
+helpers/lockwatch/protonmcp-lockwatch
 
 # Local config / data
 *.db

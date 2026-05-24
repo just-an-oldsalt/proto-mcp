@@ -4,6 +4,12 @@
 <!-- Operator notes live in scripts/signing-setup.md (XML comments -->
 <!-- can't contain double dashes, so all the prose about each -->
 <!-- entitlement is in the sidecar doc). -->
+<!-- NOTE: keychain-access-groups was briefly added in fix/d37-keychain- -->
+<!-- entitlement and immediately reverted: it's a restricted entitlement -->
+<!-- that requires an Apple-provisioned profile embedded in the binary, -->
+<!-- which Developer ID Application signing alone cannot supply. The -->
+<!-- kernel SIGKILLs the binary at launch if you try. Re-enable as part -->
+<!-- of Phase 7/E .app-bundle work (registered Bundle ID + profile). -->
 <plist version="1.0">
 <dict>
     <key>com.apple.security.cs.allow-unsigned-executable-memory</key>

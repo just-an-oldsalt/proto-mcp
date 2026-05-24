@@ -162,26 +162,40 @@
 
 <h2>Status at a glance</h2>
 <div class="stats">
-  <div class="stat"><div class="stat-num">3</div><div class="stat-label">Open defects</div></div>
+  <div class="stat"><div class="stat-num">5</div><div class="stat-label">Open defects</div></div>
   <div class="stat"><div class="stat-num">0</div><div class="stat-label">Investigating</div></div>
-  <div class="stat"><div class="stat-num">37</div><div class="stat-label">Resolved</div></div>
+  <div class="stat"><div class="stat-num">35</div><div class="stat-label">Resolved</div></div>
   <div class="stat"><div class="stat-num">0</div><div class="stat-label"><span class="tag critical">critical</span></div></div>
   <div class="stat"><div class="stat-num">0</div><div class="stat-label"><span class="tag high">high</span></div></div>
   <div class="stat"><div class="stat-num">2</div><div class="stat-label"><span class="tag medium">medium</span></div></div>
-  <div class="stat"><div class="stat-num">1</div><div class="stat-label"><span class="tag low">low</span></div></div>
+  <div class="stat"><div class="stat-num">3</div><div class="stat-label"><span class="tag low">low</span></div></div>
 </div>
 
 <h2>Open</h2>
 <p class="meta">
-  Three residual defects after the MVP-stabilization cleanup
-  (PR #65): two medium-severity items from the 2026-05-22 security
-  re-audit that need real design work (D12 DSN injection, D22
-  <code>mail_read</code> prompt-injection mitigation) and one low-severity
-  forensics paper cut (D38 over-redacted integrity errors). None
-  are blocking the MVP. D12 and D22 are tracked for post-MVP
-  hardening; D38 is operator-only and has a documented one-line
-  fix when we're ready.
+  Five residual defects. Two are real design work from the
+  2026-05-22 re-audit (D12 DSN injection, D22 <code>mail_read</code>
+  prompt-injection); the other three are Phase-7-cycle paper cuts.
+  D37 + D40 were briefly closed in 7/D but the entitlement
+  requirement for <code>keychain-access-groups</code> on Developer-ID-
+  signed CLI binaries can't be met without an Apple-provisioned
+  profile (.app bundle territory) — both reopened and deferred to
+  Phase 7/E. None block the MVP: the application-layer Touch ID
+  startup gate from Phase 6/E / 7/A is back in force as the single
+  source of biometric proof at startup.
 </p>
+
+<h3><span class="id">D37</span>Keychain blob lacks SecAccessControl Touch ID requirement — daemon-layer gate is the substitute <span class="tag open">open</span> <span class="tag low">low</span></h3>
+<p><strong>Reported:</strong> 2026-05-23 (Phase 6/E sign-off) · <strong>Briefly fixed:</strong> PR 7/D · <strong>Reverted:</strong> PR #68 (MVP smoke test).</p>
+<p><strong>Evidence:</strong> Phase 7/D shipped a cgo wrapper around <code>SecAccessControlCreateWithFlags</code> + <code>SecItemAdd</code> / <code>SecItemUpdate</code>. Live MVP smoke testing showed the save consistently returns OSStatus <code>-34018</code> (<code>errSecMissingEntitlement</code>) under Developer ID Application signing alone. The fix needs the <code>keychain-access-groups</code> entitlement, which is <strong>restricted</strong>: macOS's AMFI / taskgated requires an Apple-provisioned profile embedded in the binary AND a registered Bundle ID with the keychain-sharing capability. Without the profile, the kernel <code>SIGKILL</code>s the signed binary at launch (we confirmed via <code>/usr/bin/log show</code>: "Disallowing protonmcp because no eligible provisioning profiles found" + "Code has restricted entitlements, but the validation of its code signature failed"). Provisioning profiles are .app-bundle territory.</p>
+<p><strong>Impact:</strong> Same as the original 6/E deferral: a same-UID process with the keychain unlocked can read the saved blob without a fresh biometric. Mitigated by the application-layer Touch ID startup gate (Phase 6/E + 7/A) — every <code>AcquireSession</code> prompts before touching the keychain. The OS-level prompt would be belt-and-suspenders; the application-layer gate alone is the practical security boundary.</p>
+<p><strong>Remediation:</strong> Phase 7/E (Homebrew + distribution). Wrap the CLI binaries in a real <code>.app</code> bundle with <code>CFBundleIdentifier = zone.dort.protonmcp</code>, register that Bundle ID in the Apple Developer portal with the Keychain Sharing capability, generate a Provisioning Profile for it, and embed the profile via <code>codesign --provisioning-profile</code>. THEN re-enable the cgo path. The cgo wrapper in <code>internal/keystore/access_control_darwin.{h,c,go}</code> stays in tree, dormant, ready to re-activate once the bundle work lands.</p>
+<p class="meta"><strong>Related:</strong> Foundational #5; Phase 7/E packaging; [[D40]] (the side-effect cleanup that also reverted)</p>
+
+<h3><span class="id">D40</span>Double Touch ID prompt at daemon startup — moot until D37 actually fires <span class="tag open">open</span> <span class="tag low">low</span></h3>
+<p><strong>Reported:</strong> 2026-05-23 (Phase 7/D rollout) · <strong>Briefly fixed:</strong> PR #65 · <strong>Reverted:</strong> PR #68 (since D37 was also reverted, there's no second prompt to fight).</p>
+<p><strong>Status:</strong> Re-deferred. The "double prompt" only existed when 7/D's OS-level ACL fired alongside the application-layer gate. With D37 reverted (see entry above), only the application-layer gate fires, so there's no double-prompt anymore. The D40 cleanup (skip the application-layer gate on darwin) is now PREMATURE — until D37 actually works end-to-end, removing the application-layer gate would leave us with no Touch ID at all. Bring back in lockstep with D37's Phase 7/E re-enable.</p>
+<p class="meta"><strong>Related:</strong> [[D37]] (the precondition for re-fixing this); 7/A startup gate; Phase 7/E packaging</p>
 
 <h3><span class="id">D38</span>Redacting slog handler over-redacts operator-facing diagnostics in <code>protonmcpd</code> integrity-check errors <span class="tag open">open</span> <span class="tag low">low</span></h3>
 <p><strong>Reported:</strong> 2026-05-23 (Phase 7/C swap-attack smoke test) · Surface: <code>internal/redact/redact.go:looksLikeToken</code>, the error path in <code>cmd/protonmcpd/integrity.go:VerifyBinaryIntegrity</code>.</p>
@@ -236,51 +250,14 @@
 
 <h2>Resolved</h2>
 
-<h3><span class="id">D40</span>Double Touch ID prompt at daemon startup once <code>SecAccessControl</code> ships (7/A gate + 7/D OS ACL stack up) <span class="tag fixed">fixed in PR #65</span> <span class="tag low">low</span></h3>
-<p><strong>Reported:</strong> 2026-05-23 (Phase 7/D rollout) · Surface: <code>internal/serve/runtime.go</code> (the startup-gate decision), <code>internal/serve/startup_gate.go</code> (the gate itself remains for non-darwin tests).</p>
-<p><strong>Fix:</strong> Skip the Phase-7/A application-layer Touch-ID-at-startup gate on darwin (where <code>runtime.GOOS == "darwin"</code> stands in for <code>saveProtectedSupported</code>). The OS-issued prompt from Phase 7/D's <code>kSecAttrAccessControl</code> becomes the single source of truth on macOS. On non-darwin the gate still fires so the test fleet exercises it. One-time migration window (v3 blob without ACL → first Load doesn't prompt, then migration re-saves as v4) is documented in the runtime comment; that's acceptable for a one-time upgrade event.</p>
-<p class="meta"><strong>Related:</strong> [[D37]] (the OS ACL this was the side effect of)</p>
-
 <h3><span class="id">D39</span><code>launchctl bootstrap</code> race after bootout in <code>protonmcp daemon install</code> <span class="tag fixed">fixed in PR #65</span> <span class="tag low">low</span></h3>
 <p><strong>Reported:</strong> 2026-05-23 (Phase 7/C smoke test) · Surface: <code>cmd/protonmcp/daemon.go:runDaemonInstall</code></p>
 <p><strong>Fix:</strong> New <code>launchctlBootstrapWithRetry</code> helper wraps the bootstrap call. On the EIO signature ("Input/output error") it retries with backoff at 100ms, 250ms, 500ms (~850ms ceiling). Non-EIO errors fail fast — the retry doesn't paper over real plist / permission problems. Successful retries print a one-line "succeeded on retry N" message so the operator knows we papered over a race rather than silently hiding it.</p>
 
-<h3><span class="id">D37</span>Keychain blob lacks SecAccessControl Touch ID requirement — daemon-layer gate is the substitute <span class="tag fixed">fixed in PR 7/D</span> <span class="tag low">low</span></h3>
-<p><strong>Reported:</strong> 2026-05-23 (Phase 6/E sign-off) · Surface: <code>internal/keystore/keystore.go</code> (now writes the blob with <code>kSecAttrAccessControl</code> + <code>kSecAccessControlUserPresence</code>).</p>
-<p><strong>Fix:</strong> Wrote a small cgo wrapper around Security.framework's <code>SecAccessControlCreateWithFlags</code> + <code>SecItemAdd</code> / <code>SecItemUpdate</code> in <code>internal/keystore/access_control_darwin.{h,c,go}</code> (~150 LOC C, ~60 LOC Go), preserving the v3 JSON shape on the wire. Bumped <code>blobVersion</code> from 3 to 4 to signal the ACL flag is in place. Load auto-upgrades v2/v3 blobs in place on first read — no user action required. Build-tagged so <code>internal/keystore</code> still compiles on non-darwin (test stub). After the upgrade, every <code>keystore.Load</code> triggers an OS-issued Touch ID prompt; any same-UID process trying to read the item gets the same prompt and can be refused. The application-layer startup gate from 7/A remains in place; the resulting double-prompt UX is filed as D40 with a documented two-line fix.</p>
-<p class="meta"><strong>Original context preserved below.</strong></p>
-<details><summary>Original deferral notes (2026-05-23)</summary>
-<p><strong>Evidence:</strong> Foundational #5 from the Phase 6
-planning doc asked for the Keychain item to require Touch ID at
-the OS level via <code>kSecAttrAccessControl</code> +
-<code>kSecAccessControlUserPresence</code>. The Go wrapper we use
-(<code>keybase/go-keychain v0.0.1</code>) only exposes the basic
-<code>Accessible*</code> constants — there's no
-<code>SecAccessControl</code> binding. Confirmed by reading the
-library source + an Explore sweep of proton-bridge, which also
-doesn't implement this. Wrapping <code>SecAccessControl</code>
-ourselves would require new cgo and risks the existing v3 blob
-format.</p>
-<p><strong>Impact:</strong> Any process running as the user that
-discovers the Keychain item and has the user's login keychain
-unlocked can read the saved Proton token blob without a fresh
-biometric prompt. Mitigated today by macOS's per-app keychain ACL
-(only signed-as-<code>protonmcp</code> binaries can decrypt the
-item without a per-call prompt) and by the application-layer
-substitute shipped in PR 6/E (Touch-ID-at-startup + lock/unlock
-state machine — every session-acquire prompts Touch ID before
-touching the Keychain).</p>
-<p><strong>Remediation:</strong> Phase 7 binary-identity work
-(signed bundle, hardened runtime) is the natural pairing for OS-
-level ACL hardening. At that point either upstream a
-<code>SecAccessControl</code> binding to <code>keybase/go-keychain</code>
-or write a thin cgo wrapper in <code>internal/keystore</code> that
-sets <code>kSecAttrAccessControl</code> on save. Until then the
-Phase 6/E gate covers the practical UX: an attacker with code-exec
-as our UID still cannot get a fresh session without touching the
-sensor.</p>
-<p class="meta"><strong>Related:</strong> Foundational #5 (deferred); Phase 7 packaging</p>
-</details>
+<!-- D37 lives in Open above (reopened by PR #68). The 7/D fix
+     cgo wrapper stays in tree as code, dormant; D37's text
+     in Open carries the full revert story. -->
+
 
 <h3><span class="id">D36</span>Touch ID prompt is grammatically broken and over-redacted — user can't read what they're approving <span class="tag fixed">fixed in PR 7/A</span> <span class="tag medium">medium</span></h3>
 <p><strong>Reported:</strong> 2026-05-23 from live screenshot · Surface: <code>internal/mcp/middleware.go:defaultPromptBody</code>, <code>internal/redact/redact.go:looksLikeToken</code>.</p>
