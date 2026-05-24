@@ -124,26 +124,34 @@ verify-sign:
 	echo "All binaries pass codesign --verify (signature shape valid)."; \
 	echo "Run 'make verify-notarized' AFTER 'make notarize' to confirm Gatekeeper acceptance."
 
-# Post-notarization check. Uses codesign --test-requirement
-# "=notarized" — the correct query for CLI binaries (spctl --assess
-# --type execute is for .app bundles and rejects bare Mach-O as
-# "not an app" even when notarized).
+# Post-notarization check. Uses `spctl --assess -t open
+# --context context:primary-signature` — the right invocation for
+# bare Mach-O CLI binaries.
 #
-# A "passes" result means Apple's notary database has the binary on
-# its accept list. Gatekeeper looks this up online at first launch
-# and lets the binary run without a developer-unknown warning.
+# Why not `codesign --test-requirement="=notarized"`: that test
+# checks for an attached staple ticket. CLI binaries can't be
+# stapled (Apple error 73), so the requirement is never satisfied
+# locally even after Apple's notary service has Accepted the
+# submission. `spctl` instead triggers an online lookup and
+# accurately reports "Notarized Developer ID" for our case.
+#
+# Why not `--type execute`: that type is for .app bundles; bare
+# Mach-O fails with "the code is valid but does not seem to be an
+# app" even when notarized.
 .PHONY: verify-notarized
 verify-notarized:
 	@fail=0; \
 	for bin in $(SIGN_TARGETS); do \
 		echo "  check $$bin"; \
-		codesign --test-requirement="=notarized" --verify --verbose=2 "$$bin" || fail=1; \
+		result=$$(spctl -a -vv -t open --context context:primary-signature "$$bin" 2>&1); \
+		echo "$$result"; \
+		echo "$$result" | grep -q "source=Notarized Developer ID" || fail=1; \
 	done; \
 	if [ $$fail -ne 0 ]; then \
-		echo "verify-notarized FAILED — one or more binaries not in Apple's notary database"; \
+		echo "verify-notarized FAILED — one or more binaries did not return source=Notarized Developer ID"; \
 		exit 1; \
 	fi; \
-	echo "All binaries satisfy the =notarized requirement (Apple has accepted them)."
+	echo "All binaries assessed as Notarized Developer ID (Gatekeeper accepts)."
 
 $(DIST_ZIP): sign
 	@mkdir -p $(DIST_DIR)
