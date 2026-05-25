@@ -170,7 +170,7 @@ jobs:
           echo "ARTIFACT_SHA=$RUNNER_TEMP/protonmcp-$VERSION.tar.gz.sha256" >> "$GITHUB_ENV"
 
       - name: Create GitHub release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           # body comes from the tag's annotation, or the repo's
           # CHANGELOG if you maintain one; for now leave blank and
