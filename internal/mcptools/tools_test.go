@@ -57,8 +57,8 @@ func TestAllToolsBuild(t *testing.T) {
 	defer st.Close()
 
 	tools := All(Deps{Store: st})
-	if len(tools) != 29 {
-		t.Errorf("expected 29 tools, got %d", len(tools))
+	if len(tools) != 30 {
+		t.Errorf("expected 30 tools, got %d", len(tools))
 	}
 
 	want := map[string]bool{
@@ -95,6 +95,8 @@ func TestAllToolsBuild(t *testing.T) {
 		"mail_reply":      false,
 		"mail_reply_all":  false,
 		"mail_forward":    false,
+		// Phase 8/A attachment read.
+		"mail_download_attachment": false,
 	}
 	for _, tl := range tools {
 		if _, ok := want[tl.Name]; !ok {
@@ -140,8 +142,8 @@ func TestAllToolsRegisterIntoServer(t *testing.T) {
 		srv.Register(tl)
 	}
 	got := srv.Tools()
-	if len(got) != 29 {
-		t.Errorf("server registry has %d tools, want 29", len(got))
+	if len(got) != 30 {
+		t.Errorf("server registry has %d tools, want 30", len(got))
 	}
 }
 

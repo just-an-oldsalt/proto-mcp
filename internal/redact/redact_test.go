@@ -236,6 +236,50 @@ func TestJSONOpaqueIDsSurvive(t *testing.T) {
 	}
 }
 
+// TestJSONAttachmentFieldsRedaction — Phase 8/A. Lock the three
+// attachment-specific contracts:
+//
+//  1. attachment_id and filename pass through verbatim (the user
+//     needs to see them in the Touch ID prompt).
+//  2. content_b64 becomes {sha256, bytes} (audit records which
+//     bytes flowed, not the bytes themselves).
+//
+// If a future refactor accidentally moves any of these into the
+// wrong map, this test breaks loudly.
+func TestJSONAttachmentFieldsRedaction(t *testing.T) {
+	in := json.RawMessage(`{
+		"attachment_id": "att-abcdefghijklmnopqrstuvwxyz0123456",
+		"filename": "report.pdf",
+		"content_b64": "aGVsbG8gd29ybGQ="
+	}`)
+	out := JSON(in)
+	var decoded map[string]any
+	if err := json.Unmarshal(out, &decoded); err != nil {
+		t.Fatalf("output not valid JSON: %v\n%s", err, out)
+	}
+
+	if got := decoded["attachment_id"]; got != "att-abcdefghijklmnopqrstuvwxyz0123456" {
+		t.Errorf("attachment_id should pass through verbatim; got %v", got)
+	}
+	if got := decoded["filename"]; got != "report.pdf" {
+		t.Errorf("filename should pass through verbatim; got %v", got)
+	}
+
+	body, ok := decoded["content_b64"].(map[string]any)
+	if !ok {
+		t.Fatalf("content_b64 should be {sha256, bytes}; got %T %v", decoded["content_b64"], decoded["content_b64"])
+	}
+	if _, ok := body["sha256"].(string); !ok {
+		t.Errorf("content_b64 missing sha256: %v", body)
+	}
+	if n, ok := body["bytes"].(float64); !ok || int(n) != len("aGVsbG8gd29ybGQ=") {
+		t.Errorf("content_b64 bytes wrong: %v", body)
+	}
+	if strings.Contains(string(out), "aGVsbG8gd29ybGQ=") {
+		t.Errorf("content_b64 string value leaked: %s", out)
+	}
+}
+
 func TestJSONNestedSensitiveKey(t *testing.T) {
 	in := json.RawMessage(`{"outer":{"inner":{"password":"hunter2","email":"user@example.com"}}}`)
 	out := JSON(in)

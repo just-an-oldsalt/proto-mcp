@@ -23,6 +23,14 @@
 defaults:
   decision: deny  # SECURITY Foundational #4 — unknown tools always deny
 
+# Phase 8/A — per-attachment size ceiling. Refuses downloads /
+# uploads larger than this number of bytes BEFORE making the
+# network call. 25 MiB matches what most free email providers
+# also cap at. The cache also has a hardcoded 500 MiB total
+# ceiling in internal/store/attachments.go (oldest cached_at
+# evicted first); that's not user-configurable in v1.
+max_attachment_bytes: 26214400
+
 tools:
   # Phase 3 read tools — all allow.
   account_whoami:        { decision: allow }
@@ -31,6 +39,15 @@ tools:
   mail_read:             { decision: allow }
   mail_read_thread:      { decision: allow }
   mail_list_attachments: { decision: allow }
+  # Phase 8/A — decrypts and returns the bytes of a single
+  # attachment. Cached locally for 30 days after first download
+  # (same retention as body cache). Re-prompts after the 5-minute
+  # TTL window so a busy LLM doesn't re-Touch-ID per attachment
+  # in the same conversation.
+  mail_download_attachment:
+    decision: prompt
+    ttl: 5m
+    description: "Download and decrypt one attachment from a Proton message. Cached locally for 30 days; subsequent calls within the TTL window don't re-prompt."
   labels_list:           { decision: allow }
   folders_list:          { decision: allow }
   mail_sync:             { decision: allow }
