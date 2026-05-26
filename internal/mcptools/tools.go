@@ -93,6 +93,8 @@ func All(deps Deps) []mcp.Tool {
 		mailForward(deps),
 		// Phase 8/A — attachment read path.
 		mailDownloadAttachment(deps),
+		// Phase 8/C — attachment polish: save-to-disk.
+		mailSaveAttachment(deps),
 	}
 }
 
