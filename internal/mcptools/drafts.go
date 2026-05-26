@@ -27,22 +27,24 @@ import (
 // accepted from a stranger.
 
 type draftInputCreate struct {
-	Subject  string   `json:"subject"`
-	To       []string `json:"to"`
-	CC       []string `json:"cc,omitempty"`
-	BCC      []string `json:"bcc,omitempty"`
-	BodyText string   `json:"body_text,omitempty"`
-	BodyHTML string   `json:"body_html,omitempty"`
+	Subject     string                `json:"subject"`
+	To          []string              `json:"to"`
+	CC          []string              `json:"cc,omitempty"`
+	BCC         []string              `json:"bcc,omitempty"`
+	BodyText    string                `json:"body_text,omitempty"`
+	BodyHTML    string                `json:"body_html,omitempty"`
+	Attachments []sendAttachmentInput `json:"attachments,omitempty"`
 }
 
 type draftInputUpdate struct {
-	DraftID  string   `json:"draft_id"`
-	Subject  string   `json:"subject,omitempty"`
-	To       []string `json:"to,omitempty"`
-	CC       []string `json:"cc,omitempty"`
-	BCC      []string `json:"bcc,omitempty"`
-	BodyText string   `json:"body_text,omitempty"`
-	BodyHTML string   `json:"body_html,omitempty"`
+	DraftID     string                `json:"draft_id"`
+	Subject     string                `json:"subject,omitempty"`
+	To          []string              `json:"to,omitempty"`
+	CC          []string              `json:"cc,omitempty"`
+	BCC         []string              `json:"bcc,omitempty"`
+	BodyText    string                `json:"body_text,omitempty"`
+	BodyHTML    string                `json:"body_html,omitempty"`
+	Attachments []sendAttachmentInput `json:"attachments,omitempty"`
 }
 
 type draftResult struct {
@@ -60,16 +62,18 @@ func mailDraftCreate(deps Deps) mcp.Tool {
 		Description: "Create a new draft message. Proton encrypts the body with your address keyring before persisting. " +
 			"Body can be plain text (body_text) or HTML (body_html) — HTML is sanitized through the same allowlist " +
 			"as inbound mail before encryption (scripts / iframes / tracking pixels stripped). " +
+			"Optional `attachments` array uploads files to the draft (same shape as mail_send). " +
 			"Returns the draft_id which mail_send_draft / mail_draft_update / mail_draft_delete take.",
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
-				"subject":   {"type": "string"},
-				"to":        {"type": "array", "items": {"type": "string"}, "minItems": 1},
-				"cc":        {"type": "array", "items": {"type": "string"}},
-				"bcc":       {"type": "array", "items": {"type": "string"}},
-				"body_text": {"type": "string"},
-				"body_html": {"type": "string"}
+				"subject":     {"type": "string"},
+				"to":          {"type": "array", "items": {"type": "string"}, "minItems": 1},
+				"cc":          {"type": "array", "items": {"type": "string"}},
+				"bcc":         {"type": "array", "items": {"type": "string"}},
+				"body_text":   {"type": "string"},
+				"body_html":   {"type": "string"},
+				"attachments": ` + attachmentInputSchemaFragment + `
 			},
 			"required": ["subject", "to"],
 			"additionalProperties": false
@@ -83,6 +87,11 @@ func mailDraftCreate(deps Deps) mcp.Tool {
 			if in.Subject == "" || len(in.To) == 0 {
 				return nil, mcp.NewError(mcp.CodeInvalidParams,
 					"mail_draft_create: subject and at least one to recipient are required")
+			}
+
+			decoded, err := decodeAndValidateAttachments(deps, in.Attachments)
+			if err != nil {
+				return mcp.ErrorResult("mail_draft_create: %v", err), nil
 			}
 
 			tpl, mimeType, err := buildDraftTemplate(deps, in.Subject, in.To, in.CC, in.BCC, in.BodyText, in.BodyHTML)
@@ -103,6 +112,14 @@ func mailDraftCreate(deps Deps) mcp.Tool {
 			if err != nil {
 				return mcp.ErrorResult("mail_draft_create: %v", err), nil
 			}
+
+			// Phase 8/B — upload attachments to the draft. Session
+			// keys are discarded; drafts don't send, so we don't
+			// need to fan keys out to recipients here.
+			if _, err := uploadAttachmentsAndCollectKeys(ctx.Std, deps, addrKR, msg.ID, decoded); err != nil {
+				return mcp.ErrorResult("mail_draft_create: %v", err), nil
+			}
+
 			mirrorUpsertDraft(ctx, deps, msg, "drafts")
 			return mcp.StructuredResult(draftResult{
 				DraftID:  msg.ID,
@@ -119,17 +136,19 @@ func mailDraftCreate(deps Deps) mcp.Tool {
 func mailDraftUpdate(deps Deps) mcp.Tool {
 	return mcp.Tool{
 		Name:        "mail_draft_update",
-		Description: "Update an existing draft. Any field you don't pass is preserved. body_html still runs through outbound sanitization.",
+		Description: "Update an existing draft. Any field you don't pass is preserved. body_html still runs through outbound sanitization. " +
+			"Optional `attachments` array uploads ADDITIONAL files (does not replace existing attachments on the draft — for that, mail_draft_delete + mail_draft_create).",
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
-				"draft_id":  {"type": "string"},
-				"subject":   {"type": "string"},
-				"to":        {"type": "array", "items": {"type": "string"}},
-				"cc":        {"type": "array", "items": {"type": "string"}},
-				"bcc":       {"type": "array", "items": {"type": "string"}},
-				"body_text": {"type": "string"},
-				"body_html": {"type": "string"}
+				"draft_id":    {"type": "string"},
+				"subject":     {"type": "string"},
+				"to":          {"type": "array", "items": {"type": "string"}},
+				"cc":          {"type": "array", "items": {"type": "string"}},
+				"bcc":         {"type": "array", "items": {"type": "string"}},
+				"body_text":   {"type": "string"},
+				"body_html":   {"type": "string"},
+				"attachments": ` + attachmentInputSchemaFragment + `
 			},
 			"required": ["draft_id"],
 			"additionalProperties": false
@@ -172,6 +191,11 @@ func mailDraftUpdate(deps Deps) mcp.Tool {
 				return nil, mcp.NewError(mcp.CodeInvalidParams, "mail_draft_update: "+err.Error())
 			}
 
+			decoded, err := decodeAndValidateAttachments(deps, in.Attachments)
+			if err != nil {
+				return mcp.ErrorResult("mail_draft_update: %v", err), nil
+			}
+
 			_, addrKR, err := senderKeyring(deps)
 			if err != nil {
 				return mcp.ErrorResult("mail_draft_update: %v", err), nil
@@ -182,6 +206,14 @@ func mailDraftUpdate(deps Deps) mcp.Tool {
 			if err != nil {
 				return mcp.ErrorResult("mail_draft_update: %v", err), nil
 			}
+
+			// Phase 8/B — additive attachment upload. Existing
+			// attachments on the draft are preserved by the SDK;
+			// these get added.
+			if _, err := uploadAttachmentsAndCollectKeys(ctx.Std, deps, addrKR, msg.ID, decoded); err != nil {
+				return mcp.ErrorResult("mail_draft_update: %v", err), nil
+			}
+
 			mirrorUpsertDraft(ctx, deps, msg, "drafts")
 			return mcp.StructuredResult(draftResult{
 				DraftID:  msg.ID,

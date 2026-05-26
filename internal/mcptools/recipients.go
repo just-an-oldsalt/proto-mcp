@@ -51,20 +51,32 @@ func buildSendPreferences(ctx context.Context, deps Deps, recipients []string, m
 			prefs.EncryptionScheme = gpa.InternalScheme
 
 		case gpa.RecipientTypeExternal:
+			// Phase 8/B — PGP/MIME refusal. We send via
+			// AddTextPackage which the SDK rejects for PGPMIMEScheme
+			// recipients (it requires multipart/mixed via
+			// AddMIMEPackage, which we don't implement). Without an
+			// explicit error here the failure surfaces deep in the
+			// SDK as "invalid MIME type for package: text/plain" —
+			// confusing. Surface a clear refusal instead.
+			//
+			// Tradeoff: external recipients with on-file PGP keys
+			// now fail closed (ClearScheme would be an info-leak —
+			// the user uploaded a key precisely to NOT get cleartext
+			// email). Phase 9 spike will add real PGP/MIME via
+			// AddMIMEPackage. Until then, send to a Proton address
+			// or a recipient without an on-file PGP key.
 			if len(keys) > 0 {
-				kr, err := keys.GetKeyRing()
-				if err == nil && kr != nil {
-					prefs.Encrypt = true
-					prefs.PubKey = kr
-					prefs.EncryptionScheme = gpa.PGPMIMEScheme
-				} else {
-					prefs.EncryptionScheme = gpa.ClearScheme
-					prefs.SignatureType = gpa.NoSignature
-				}
-			} else {
-				prefs.EncryptionScheme = gpa.ClearScheme
-				prefs.SignatureType = gpa.NoSignature
+				return nil, fmt.Errorf(
+					"PGP/MIME-encrypted external recipients aren't supported yet (recipient: %s). "+
+						"This recipient has a PGP key on file with Proton, which would require "+
+						"multipart/mixed encryption that the current send path doesn't implement. "+
+						"Send to a Proton address or a recipient without an on-file PGP key, or "+
+						"wait for Phase 9 PGP/MIME support.",
+					addr,
+				)
 			}
+			prefs.EncryptionScheme = gpa.ClearScheme
+			prefs.SignatureType = gpa.NoSignature
 
 		default:
 			return nil, fmt.Errorf("unknown recipient type for %s", addr)

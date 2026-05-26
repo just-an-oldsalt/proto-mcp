@@ -2,6 +2,7 @@ package mcptools
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +15,12 @@ import (
 	"github.com/just-an-oldsalt/proto-mcp/internal/mcp"
 	"github.com/just-an-oldsalt/proto-mcp/internal/policy"
 )
+
+// decodeBase64 is a thin wrapper for clarity at call sites that
+// decode SDK-returned base64 (KeyPackets, etc.).
+func decodeBase64(s string) ([]byte, error) {
+	return base64.StdEncoding.DecodeString(s)
+}
 
 // The send family. Five tools sharing one core send path:
 //
@@ -32,12 +39,13 @@ import (
 // sendInput is the public shape for mail_send. Reply / reply_all /
 // forward use variants that reference an existing message_id.
 type sendInput struct {
-	Subject  string   `json:"subject"`
-	To       []string `json:"to"`
-	CC       []string `json:"cc,omitempty"`
-	BCC      []string `json:"bcc,omitempty"`
-	BodyText string   `json:"body_text,omitempty"`
-	BodyHTML string   `json:"body_html,omitempty"`
+	Subject     string                `json:"subject"`
+	To          []string              `json:"to"`
+	CC          []string              `json:"cc,omitempty"`
+	BCC         []string              `json:"bcc,omitempty"`
+	BodyText    string                `json:"body_text,omitempty"`
+	BodyHTML    string                `json:"body_html,omitempty"`
+	Attachments []sendAttachmentInput `json:"attachments,omitempty"`
 }
 
 type sendResult struct {
@@ -51,24 +59,30 @@ func mailSend(deps Deps) mcp.Tool {
 	return mcp.Tool{
 		Name: "mail_send",
 		Description: "Compose and send a message in one step. IRREVERSIBLE — once sent, " +
-			"it cannot be unsent. The NSAlert shown before Touch ID approval lists every " +
-			"recipient and the literal subject so the user can verify what's being sent.",
+			"it cannot be unsent. Optional `attachments` array uploads files alongside " +
+			"the body (each entry: filename, mime_type, content_b64). Refuses individual " +
+			"or cumulative attachment sizes exceeding max_attachment_bytes (default 25 MiB). " +
+			"Refuses PGP/MIME-encrypted external recipients — send to a Proton address or " +
+			"a recipient without an on-file PGP key instead. The NSAlert shown before " +
+			"Touch ID approval lists every recipient, the literal subject, and a one-line " +
+			"attachment summary.",
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
-				"subject":   {"type": "string"},
-				"to":        {"type": "array", "items": {"type": "string"}, "minItems": 1},
-				"cc":        {"type": "array", "items": {"type": "string"}},
-				"bcc":       {"type": "array", "items": {"type": "string"}},
-				"body_text": {"type": "string"},
-				"body_html": {"type": "string"}
+				"subject":     {"type": "string"},
+				"to":          {"type": "array", "items": {"type": "string"}, "minItems": 1},
+				"cc":          {"type": "array", "items": {"type": "string"}},
+				"bcc":         {"type": "array", "items": {"type": "string"}},
+				"body_text":   {"type": "string"},
+				"body_html":   {"type": "string"},
+				"attachments": ` + attachmentInputSchemaFragment + `
 			},
 			"required": ["subject", "to"],
 			"additionalProperties": false
 		}`),
 		OutputSchema: json.RawMessage(sendResultSchema),
 		Recipients:   extractSendRecipients,
-		PromptBody:   sendPromptBody("mail_send"),
+		PromptBody:   sendPromptBodyWithDeps(deps, "mail_send"),
 		Handler: func(ctx mcp.Context, raw json.RawMessage) (*mcp.ToolResult, error) {
 			var in sendInput
 			if err := json.Unmarshal(raw, &in); err != nil {
@@ -124,20 +138,23 @@ func mailSendDraft(deps Deps) mcp.Tool {
 
 func mailReply(deps Deps) mcp.Tool {
 	type input struct {
-		InReplyTo string `json:"in_reply_to"`
-		BodyText  string `json:"body_text,omitempty"`
-		BodyHTML  string `json:"body_html,omitempty"`
+		InReplyTo   string                `json:"in_reply_to"`
+		BodyText    string                `json:"body_text,omitempty"`
+		BodyHTML    string                `json:"body_html,omitempty"`
+		Attachments []sendAttachmentInput `json:"attachments,omitempty"`
 	}
 	return mcp.Tool{
 		Name: "mail_reply",
 		Description: "Reply to a message. IRREVERSIBLE once sent. To = original sender. " +
-			"Subject prefixed Re: if not already.",
+			"Subject prefixed Re: if not already. Optional `attachments` array attaches " +
+			"new files (does NOT carry over parent attachments — use mail_forward for that).",
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
 				"in_reply_to": {"type": "string"},
 				"body_text":   {"type": "string"},
-				"body_html":   {"type": "string"}
+				"body_html":   {"type": "string"},
+				"attachments": ` + attachmentInputSchemaFragment + `
 			},
 			"required": ["in_reply_to"],
 			"additionalProperties": false
@@ -150,8 +167,14 @@ func mailReply(deps Deps) mcp.Tool {
 		PromptBody: func(args json.RawMessage) (string, string) {
 			var in input
 			_ = json.Unmarshal(args, &in)
+			body := "Reply to message " + in.InReplyTo + " (recipient = original sender)."
+			if decoded, err := decodeAndValidateAttachments(deps, in.Attachments); err == nil {
+				if s := attachmentsSummary(decoded); s != "" {
+					body += "\n" + s
+				}
+			}
 			return mcp.SanitizePromptText("Approve mail_reply?", 120),
-				mcp.SanitizePromptText("Reply to message "+in.InReplyTo+" (recipient = original sender).", 4000)
+				mcp.SanitizePromptText(body, 4000)
 		},
 		Handler: func(ctx mcp.Context, raw json.RawMessage) (*mcp.ToolResult, error) {
 			var in input
@@ -161,28 +184,31 @@ func mailReply(deps Deps) mcp.Tool {
 			if in.InReplyTo == "" {
 				return nil, mcp.NewError(mcp.CodeInvalidParams, "mail_reply: in_reply_to is required")
 			}
-			return sendReply(ctx, deps, "mail_reply", in.InReplyTo, false, in.BodyText, in.BodyHTML)
+			return sendReply(ctx, deps, "mail_reply", in.InReplyTo, false, in.BodyText, in.BodyHTML, in.Attachments)
 		},
 	}
 }
 
 func mailReplyAll(deps Deps) mcp.Tool {
 	type input struct {
-		InReplyTo string `json:"in_reply_to"`
-		BodyText  string `json:"body_text,omitempty"`
-		BodyHTML  string `json:"body_html,omitempty"`
+		InReplyTo   string                `json:"in_reply_to"`
+		BodyText    string                `json:"body_text,omitempty"`
+		BodyHTML    string                `json:"body_html,omitempty"`
+		Attachments []sendAttachmentInput `json:"attachments,omitempty"`
 	}
 	return mcp.Tool{
 		Name: "mail_reply_all",
 		Description: "Reply-all to a message. IRREVERSIBLE. " +
 			"To = original sender. CC = original To+CC minus your own addresses. " +
-			"BCC dropped (BCC by definition not visible to other recipients).",
+			"BCC dropped (BCC by definition not visible to other recipients). " +
+			"Optional `attachments` array — same shape as mail_send.",
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
 				"in_reply_to": {"type": "string"},
 				"body_text":   {"type": "string"},
-				"body_html":   {"type": "string"}
+				"body_html":   {"type": "string"},
+				"attachments": ` + attachmentInputSchemaFragment + `
 			},
 			"required": ["in_reply_to"],
 			"additionalProperties": false
@@ -192,8 +218,14 @@ func mailReplyAll(deps Deps) mcp.Tool {
 		PromptBody: func(args json.RawMessage) (string, string) {
 			var in input
 			_ = json.Unmarshal(args, &in)
+			body := "Reply-all to message " + in.InReplyTo + " (sender + original To/CC minus you)."
+			if decoded, err := decodeAndValidateAttachments(deps, in.Attachments); err == nil {
+				if s := attachmentsSummary(decoded); s != "" {
+					body += "\n" + s
+				}
+			}
 			return mcp.SanitizePromptText("Approve mail_reply_all?", 120),
-				mcp.SanitizePromptText("Reply-all to message "+in.InReplyTo+" (sender + original To/CC minus you).", 4000)
+				mcp.SanitizePromptText(body, 4000)
 		},
 		Handler: func(ctx mcp.Context, raw json.RawMessage) (*mcp.ToolResult, error) {
 			var in input
@@ -203,58 +235,61 @@ func mailReplyAll(deps Deps) mcp.Tool {
 			if in.InReplyTo == "" {
 				return nil, mcp.NewError(mcp.CodeInvalidParams, "mail_reply_all: in_reply_to is required")
 			}
-			return sendReply(ctx, deps, "mail_reply_all", in.InReplyTo, true, in.BodyText, in.BodyHTML)
+			return sendReply(ctx, deps, "mail_reply_all", in.InReplyTo, true, in.BodyText, in.BodyHTML, in.Attachments)
 		},
 	}
 }
 
 func mailForward(deps Deps) mcp.Tool {
-	type input struct {
-		ForwardOf string   `json:"forward_of"`
-		To        []string `json:"to"`
-		CC        []string `json:"cc,omitempty"`
-		BCC       []string `json:"bcc,omitempty"`
-		BodyText  string   `json:"body_text,omitempty"`
-		BodyHTML  string   `json:"body_html,omitempty"`
-	}
 	return mcp.Tool{
 		Name: "mail_forward",
 		Description: "Forward a message to new recipients. IRREVERSIBLE. " +
 			"Subject prefixed Fwd:. Body is the new content; the original message " +
-			"is NOT quoted automatically — pass it as part of body_text if desired.",
+			"is NOT quoted automatically — pass it as part of body_text if desired. " +
+			"Optional `attachments` array attaches new files. Parent attachments are " +
+			"NOT carried over automatically in 8/B — that's a Phase 8/C shortcut " +
+			"(include_parent_attachments). For now, download + re-upload via " +
+			"mail_download_attachment if you need them on the forwarded message.",
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
-				"forward_of": {"type": "string"},
-				"to":         {"type": "array", "items": {"type": "string"}, "minItems": 1},
-				"cc":         {"type": "array", "items": {"type": "string"}},
-				"bcc":        {"type": "array", "items": {"type": "string"}},
-				"body_text":  {"type": "string"},
-				"body_html":  {"type": "string"}
+				"forward_of":  {"type": "string"},
+				"to":          {"type": "array", "items": {"type": "string"}, "minItems": 1},
+				"cc":          {"type": "array", "items": {"type": "string"}},
+				"bcc":         {"type": "array", "items": {"type": "string"}},
+				"body_text":   {"type": "string"},
+				"body_html":   {"type": "string"},
+				"attachments": ` + attachmentInputSchemaFragment + `
 			},
 			"required": ["forward_of", "to"],
 			"additionalProperties": false
 		}`),
 		OutputSchema: json.RawMessage(sendResultSchema),
 		Recipients: func(args json.RawMessage) []string {
-			var in input
+			var in forwardInput
 			if err := json.Unmarshal(args, &in); err != nil {
 				return nil
 			}
 			return append(append(append([]string{}, in.To...), in.CC...), in.BCC...)
 		},
 		PromptBody: func(args json.RawMessage) (string, string) {
-			var in input
+			var in forwardInput
 			_ = json.Unmarshal(args, &in)
+			body := fmt.Sprintf("Forward message %s\nTo: %s\nCC: %s\nBCC: %s",
+				in.ForwardOf,
+				strings.Join(in.To, ", "),
+				strings.Join(in.CC, ", "),
+				strings.Join(in.BCC, ", "))
+			if decoded, err := decodeAndValidateAttachments(deps, in.Attachments); err == nil {
+				if s := attachmentsSummary(decoded); s != "" {
+					body += "\n" + s
+				}
+			}
 			return mcp.SanitizePromptText("Approve mail_forward?", 120),
-				mcp.SanitizePromptText(fmt.Sprintf("Forward message %s\nTo: %s\nCC: %s\nBCC: %s",
-					in.ForwardOf,
-					strings.Join(in.To, ", "),
-					strings.Join(in.CC, ", "),
-					strings.Join(in.BCC, ", ")), 4000)
+				mcp.SanitizePromptText(body, 4000)
 		},
 		Handler: func(ctx mcp.Context, raw json.RawMessage) (*mcp.ToolResult, error) {
-			var in input
+			var in forwardInput
 			if err := json.Unmarshal(raw, &in); err != nil {
 				return nil, mcp.NewError(mcp.CodeInvalidParams, "mail_forward: "+err.Error())
 			}
@@ -265,6 +300,19 @@ func mailForward(deps Deps) mcp.Tool {
 			return sendForward(ctx, deps, in)
 		},
 	}
+}
+
+// forwardInput is the parsed input for mail_forward. Hoisted to the
+// package level so sendForward and the inner Recipients/PromptBody
+// closures share a single struct shape. Phase 8/B.
+type forwardInput struct {
+	ForwardOf   string                `json:"forward_of"`
+	To          []string              `json:"to"`
+	CC          []string              `json:"cc,omitempty"`
+	BCC         []string              `json:"bcc,omitempty"`
+	BodyText    string                `json:"body_text,omitempty"`
+	BodyHTML    string                `json:"body_html,omitempty"`
+	Attachments []sendAttachmentInput `json:"attachments,omitempty"`
 }
 
 // ============================================================
@@ -326,8 +374,19 @@ func normalizeRecipientList(s string) []string {
 // To / CC / BCC / Subject lines the user sees in the NSAlert.
 // Body content is replaced with sha256+bytes via the redact path
 // — recipient list, subject, and counts are what matter at approval
-// time.
+// time. Phase 8/B — also appends an attachment summary line when
+// the call carries attachments.
 func sendPromptBody(toolName string) func(json.RawMessage) (string, string) {
+	return sendPromptBodyWithDeps(Deps{}, toolName)
+}
+
+// sendPromptBodyWithDeps is the Phase 8/B variant — passes Deps so
+// the closure can validate + summarize the attachments list for
+// display. Validation errors are swallowed (the handler will
+// surface them with a better message); the closure best-efforts
+// the prompt-body fields and lets the user approve based on what
+// did parse.
+func sendPromptBodyWithDeps(deps Deps, toolName string) func(json.RawMessage) (string, string) {
 	return func(args json.RawMessage) (string, string) {
 		var in sendInput
 		_ = json.Unmarshal(args, &in)
@@ -338,13 +397,24 @@ func sendPromptBody(toolName string) func(json.RawMessage) (string, string) {
 			strings.Join(in.BCC, ", "),
 			in.Subject,
 		)
+		if decoded, err := decodeAndValidateAttachments(deps, in.Attachments); err == nil {
+			if s := attachmentsSummary(decoded); s != "" {
+				body += "\n" + s
+			}
+		}
 		return mcp.SanitizePromptText("Approve "+toolName+"?", 120),
 			mcp.SanitizePromptText(body, 4000)
 	}
 }
 
 // sendCompose is mail_send: create a draft, send it, return.
+// Phase 8/B — uploads attachments to the draft between CreateDraft
+// and SendDraft so they ride on the same send call.
 func sendCompose(ctx mcp.Context, deps Deps, toolName, parentID string, in sendInput) (*mcp.ToolResult, error) {
+	decoded, err := decodeAndValidateAttachments(deps, in.Attachments)
+	if err != nil {
+		return mcp.ErrorResult("%s: %v", toolName, err), nil
+	}
 	tpl, mimeType, err := buildDraftTemplate(deps, in.Subject, in.To, in.CC, in.BCC, in.BodyText, in.BodyHTML)
 	if err != nil {
 		return nil, mcp.NewError(mcp.CodeInvalidParams, toolName+": "+err.Error())
@@ -361,10 +431,19 @@ func sendCompose(ctx mcp.Context, deps Deps, toolName, parentID string, in sendI
 	if err != nil {
 		return mcp.ErrorResult("%s: create draft: %v", toolName, err), nil
 	}
-	return finalizeSend(ctx, deps, toolName, addrKR, draft, tpl, mimeType, allRecipients(in.To, in.CC, in.BCC))
+	attKeys, err := uploadAttachmentsAndCollectKeys(ctx.Std, deps, addrKR, draft.ID, decoded)
+	if err != nil {
+		return mcp.ErrorResult("%s: %v", toolName, err), nil
+	}
+	return finalizeSend(ctx, deps, toolName, addrKR, draft, tpl, mimeType, allRecipients(in.To, in.CC, in.BCC), attKeys)
 }
 
 // sendDraftByID is mail_send_draft: load draft, send.
+//
+// Phase 8/B — existing draft attachments are already uploaded to
+// the server; we just need to recover their session keys via the
+// sender keyring so AddTextPackage can re-encrypt them per
+// recipient. No new upload, no attachment input on this tool.
 func sendDraftByID(ctx mcp.Context, deps Deps, toolName, draftID string) (*mcp.ToolResult, error) {
 	draft, err := deps.Session.Client.GetMessage(ctx.Std, draftID)
 	if err != nil {
@@ -392,12 +471,48 @@ func sendDraftByID(ctx mcp.Context, deps Deps, toolName, draftID string) (*mcp.T
 		Body:     draft.Body,
 		MIMEType: draft.MIMEType,
 	}
-	return finalizeSend(ctx, deps, toolName, addrKR, draft, tpl, mimeType, recipients)
+
+	// Recover session keys for existing attachments on the draft.
+	attKeys, err := recoverDraftAttachmentKeys(addrKR, draft)
+	if err != nil {
+		return mcp.ErrorResult("%s: recover draft attachment keys: %v", toolName, err), nil
+	}
+
+	return finalizeSend(ctx, deps, toolName, addrKR, draft, tpl, mimeType, recipients, attKeys)
+}
+
+// recoverDraftAttachmentKeys returns the (attachment_id → session
+// key) map for every attachment already on the given draft. Used
+// by mail_send_draft (and the 8/C forward shortcut) so existing
+// attachments fan out per recipient inside AddTextPackage.
+//
+// SDK shape: each Attachment.KeyPackets is the base64-encoded
+// session key encrypted to the sender's public key. Decrypting it
+// with addrKR gets us the symmetric session key.
+func recoverDraftAttachmentKeys(addrKR *crypto.KeyRing, draft gpa.Message) (map[string]*crypto.SessionKey, error) {
+	if len(draft.Attachments) == 0 {
+		return nil, nil
+	}
+	out := make(map[string]*crypto.SessionKey, len(draft.Attachments))
+	for _, a := range draft.Attachments {
+		kpBytes, err := decodeBase64(a.KeyPackets)
+		if err != nil {
+			return nil, fmt.Errorf("attachment %s (%s): decode KeyPackets: %w", a.ID, a.Name, err)
+		}
+		sk, err := addrKR.DecryptSessionKey(kpBytes)
+		if err != nil {
+			return nil, fmt.Errorf("attachment %s (%s): %w", a.ID, a.Name, err)
+		}
+		out[a.ID] = sk
+	}
+	return out, nil
 }
 
 // sendReply is the reply / reply_all body. Fetches the original,
 // builds the recipient lists, calls sendCompose with ParentID.
-func sendReply(ctx mcp.Context, deps Deps, toolName, parentID string, replyAll bool, bodyText, bodyHTML string) (*mcp.ToolResult, error) {
+// Phase 8/B — accepts attachments and forwards them through
+// sendCompose's upload + send path.
+func sendReply(ctx mcp.Context, deps Deps, toolName, parentID string, replyAll bool, bodyText, bodyHTML string, attachments []sendAttachmentInput) (*mcp.ToolResult, error) {
 	parent, err := deps.Session.Client.GetMessage(ctx.Std, parentID)
 	if err != nil {
 		return mcp.ErrorResult("%s: fetch parent: %v", toolName, err), nil
@@ -430,24 +545,20 @@ func sendReply(ctx mcp.Context, deps Deps, toolName, parentID string, replyAll b
 	}
 
 	return sendCompose(ctx, deps, toolName, parentID, sendInput{
-		Subject:  subject,
-		To:       to,
-		CC:       cc,
-		BodyText: bodyText,
-		BodyHTML: bodyHTML,
+		Subject:     subject,
+		To:          to,
+		CC:          cc,
+		BodyText:    bodyText,
+		BodyHTML:    bodyHTML,
+		Attachments: attachments,
 	})
 }
 
 // sendForward is the forward body. Subject Fwd:-prefixed; body
-// passed through unchanged.
-func sendForward(ctx mcp.Context, deps Deps, in struct {
-	ForwardOf string   `json:"forward_of"`
-	To        []string `json:"to"`
-	CC        []string `json:"cc,omitempty"`
-	BCC       []string `json:"bcc,omitempty"`
-	BodyText  string   `json:"body_text,omitempty"`
-	BodyHTML  string   `json:"body_html,omitempty"`
-}) (*mcp.ToolResult, error) {
+// passed through unchanged. Phase 8/B — accepts new attachments.
+// Phase 8/C will add include_parent_attachments to carry over
+// parent attachments without a byte-round-trip.
+func sendForward(ctx mcp.Context, deps Deps, in forwardInput) (*mcp.ToolResult, error) {
 	parent, err := deps.Session.Client.GetMessage(ctx.Std, in.ForwardOf)
 	if err != nil {
 		return mcp.ErrorResult("mail_forward: fetch parent: %v", err), nil
@@ -457,12 +568,13 @@ func sendForward(ctx mcp.Context, deps Deps, in struct {
 		subject = "Fwd: " + subject
 	}
 	return sendCompose(ctx, deps, "mail_forward", in.ForwardOf, sendInput{
-		Subject:  subject,
-		To:       in.To,
-		CC:       in.CC,
-		BCC:      in.BCC,
-		BodyText: in.BodyText,
-		BodyHTML: in.BodyHTML,
+		Subject:     subject,
+		To:          in.To,
+		CC:          in.CC,
+		BCC:         in.BCC,
+		BodyText:    in.BodyText,
+		BodyHTML:    in.BodyHTML,
+		Attachments: in.Attachments,
 	})
 }
 
@@ -478,7 +590,7 @@ func sendForward(ctx mcp.Context, deps Deps, in struct {
 // tool that ends up calling SendDraft must pass through this
 // function, and every call validates against the active policy
 // before any encryption or network call to /mail/v4/send.
-func finalizeSend(ctx mcp.Context, deps Deps, toolName string, addrKR *crypto.KeyRing, draft gpa.Message, tpl gpa.DraftTemplate, mimeType string, recipients []string) (*mcp.ToolResult, error) {
+func finalizeSend(ctx mcp.Context, deps Deps, toolName string, addrKR *crypto.KeyRing, draft gpa.Message, tpl gpa.DraftTemplate, mimeType string, recipients []string, attKeys map[string]*crypto.SessionKey) (*mcp.ToolResult, error) {
 	// Normalize the recipients we got from wherever (raw args via
 	// allRecipients, draft fetch via addressStrings, reply build) so
 	// the allowlist comparison sees the same shape extractSendRecipients
@@ -500,7 +612,10 @@ func finalizeSend(ctx mcp.Context, deps Deps, toolName string, addrKR *crypto.Ke
 		return mcp.ErrorResult("%s: build send preferences: %v", toolName, err), nil
 	}
 	req := gpa.SendDraftReq{}
-	if err := req.AddTextPackage(addrKR, tpl.Body, mimeTypeForSend(mimeType), prefs, map[string]*crypto.SessionKey{}); err != nil {
+	if attKeys == nil {
+		attKeys = map[string]*crypto.SessionKey{}
+	}
+	if err := req.AddTextPackage(addrKR, tpl.Body, mimeTypeForSend(mimeType), prefs, attKeys); err != nil {
 		return mcp.ErrorResult("%s: build text package: %v", toolName, err), nil
 	}
 	sent, err := deps.Session.Client.SendDraft(ctx.Std, draft.ID, req)
