@@ -246,20 +246,21 @@ func mailForward(deps Deps) mcp.Tool {
 		Description: "Forward a message to new recipients. IRREVERSIBLE. " +
 			"Subject prefixed Fwd:. Body is the new content; the original message " +
 			"is NOT quoted automatically — pass it as part of body_text if desired. " +
-			"Optional `attachments` array attaches new files. Parent attachments are " +
-			"NOT carried over automatically in 8/B — that's a Phase 8/C shortcut " +
-			"(include_parent_attachments). For now, download + re-upload via " +
-			"mail_download_attachment if you need them on the forwarded message.",
+			"Optional `attachments` array attaches new files. Set " +
+			"`include_parent_attachments: true` to carry over the parent message's " +
+			"attachments via re-encrypted session keys (no byte-level round-trip; " +
+			"the server keeps the encrypted bytes and just re-keys for the new draft).",
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
-				"forward_of":  {"type": "string"},
-				"to":          {"type": "array", "items": {"type": "string"}, "minItems": 1},
-				"cc":          {"type": "array", "items": {"type": "string"}},
-				"bcc":         {"type": "array", "items": {"type": "string"}},
-				"body_text":   {"type": "string"},
-				"body_html":   {"type": "string"},
-				"attachments": ` + attachmentInputSchemaFragment + `
+				"forward_of":                 {"type": "string"},
+				"to":                         {"type": "array", "items": {"type": "string"}, "minItems": 1},
+				"cc":                         {"type": "array", "items": {"type": "string"}},
+				"bcc":                        {"type": "array", "items": {"type": "string"}},
+				"body_text":                  {"type": "string"},
+				"body_html":                  {"type": "string"},
+				"attachments":                ` + attachmentInputSchemaFragment + `,
+				"include_parent_attachments": {"type": "boolean", "default": false}
 			},
 			"required": ["forward_of", "to"],
 			"additionalProperties": false
@@ -305,14 +306,21 @@ func mailForward(deps Deps) mcp.Tool {
 // forwardInput is the parsed input for mail_forward. Hoisted to the
 // package level so sendForward and the inner Recipients/PromptBody
 // closures share a single struct shape. Phase 8/B.
+//
+// Phase 8/C added IncludeParentAttachments — when true, mail_forward
+// carries the parent message's attachments over to the new draft
+// without a byte-round-trip via CreateDraftReq.AttachmentKeyPackets.
+// Any explicit `attachments` provided on the input get uploaded
+// alongside.
 type forwardInput struct {
-	ForwardOf   string                `json:"forward_of"`
-	To          []string              `json:"to"`
-	CC          []string              `json:"cc,omitempty"`
-	BCC         []string              `json:"bcc,omitempty"`
-	BodyText    string                `json:"body_text,omitempty"`
-	BodyHTML    string                `json:"body_html,omitempty"`
-	Attachments []sendAttachmentInput `json:"attachments,omitempty"`
+	ForwardOf                 string                `json:"forward_of"`
+	To                        []string              `json:"to"`
+	CC                        []string              `json:"cc,omitempty"`
+	BCC                       []string              `json:"bcc,omitempty"`
+	BodyText                  string                `json:"body_text,omitempty"`
+	BodyHTML                  string                `json:"body_html,omitempty"`
+	Attachments               []sendAttachmentInput `json:"attachments,omitempty"`
+	IncludeParentAttachments  bool                  `json:"include_parent_attachments,omitempty"`
 }
 
 // ============================================================
@@ -556,8 +564,9 @@ func sendReply(ctx mcp.Context, deps Deps, toolName, parentID string, replyAll b
 
 // sendForward is the forward body. Subject Fwd:-prefixed; body
 // passed through unchanged. Phase 8/B — accepts new attachments.
-// Phase 8/C will add include_parent_attachments to carry over
-// parent attachments without a byte-round-trip.
+// Phase 8/C — when include_parent_attachments is set, carries
+// parent attachments over via re-encrypted session keys (no
+// byte-level round-trip).
 func sendForward(ctx mcp.Context, deps Deps, in forwardInput) (*mcp.ToolResult, error) {
 	parent, err := deps.Session.Client.GetMessage(ctx.Std, in.ForwardOf)
 	if err != nil {
@@ -567,15 +576,118 @@ func sendForward(ctx mcp.Context, deps Deps, in forwardInput) (*mcp.ToolResult, 
 	if !strings.HasPrefix(strings.ToLower(subject), "fwd:") {
 		subject = "Fwd: " + subject
 	}
-	return sendCompose(ctx, deps, "mail_forward", in.ForwardOf, sendInput{
-		Subject:     subject,
-		To:          in.To,
-		CC:          in.CC,
-		BCC:         in.BCC,
-		BodyText:    in.BodyText,
-		BodyHTML:    in.BodyHTML,
-		Attachments: in.Attachments,
+
+	// Fast path: no parent-attachment carryover. Reuse sendCompose
+	// — identical behavior to the 8/B contract.
+	if !in.IncludeParentAttachments || len(parent.Attachments) == 0 {
+		return sendCompose(ctx, deps, "mail_forward", in.ForwardOf, sendInput{
+			Subject:     subject,
+			To:          in.To,
+			CC:          in.CC,
+			BCC:         in.BCC,
+			BodyText:    in.BodyText,
+			BodyHTML:    in.BodyHTML,
+			Attachments: in.Attachments,
+		})
+	}
+
+	// Parent-attachment carryover path. Pre-validate the new
+	// attachments first so we fail fast.
+	newDecoded, err := decodeAndValidateAttachments(deps, in.Attachments)
+	if err != nil {
+		return mcp.ErrorResult("mail_forward: %v", err), nil
+	}
+
+	// Build the parent-attachment KeyPackets list: decrypt each
+	// parent attachment's session key with our address keyring,
+	// then re-encrypt it back to ourselves (same keyring). The
+	// server uses these packets to attach the existing encrypted
+	// data blobs to the new draft without re-uploading bytes.
+	_, addrKR, err := senderKeyring(deps)
+	if err != nil {
+		return mcp.ErrorResult("mail_forward: %v", err), nil
+	}
+	parentKPs, err := reencryptParentKeyPackets(addrKR, parent)
+	if err != nil {
+		return mcp.ErrorResult("mail_forward: re-encrypt parent attachment keys: %v", err), nil
+	}
+
+	tpl, mimeType, err := buildDraftTemplate(deps, subject, in.To, in.CC, in.BCC, in.BodyText, in.BodyHTML)
+	if err != nil {
+		return nil, mcp.NewError(mcp.CodeInvalidParams, "mail_forward: "+err.Error())
+	}
+
+	draft, err := deps.Session.Client.CreateDraft(ctx.Std, addrKR, gpa.CreateDraftReq{
+		Message:              tpl,
+		ParentID:             in.ForwardOf,
+		Action:               gpa.ForwardAction,
+		AttachmentKeyPackets: parentKPs,
 	})
+	if err != nil {
+		return mcp.ErrorResult("mail_forward: create draft: %v", err), nil
+	}
+
+	// After CreateDraft the parent attachments are server-side
+	// already; recover their session keys so they fan out per
+	// recipient in AddTextPackage. The list comes back on the new
+	// draft (re-fetch it to get fresh Attachments).
+	freshDraft, err := deps.Session.Client.GetMessage(ctx.Std, draft.ID)
+	if err != nil {
+		return mcp.ErrorResult("mail_forward: refresh draft: %v", err), nil
+	}
+	parentAttKeys, err := recoverDraftAttachmentKeys(addrKR, freshDraft)
+	if err != nil {
+		return mcp.ErrorResult("mail_forward: recover draft keys: %v", err), nil
+	}
+
+	// Upload any NEW attachments alongside.
+	newAttKeys, err := uploadAttachmentsAndCollectKeys(ctx.Std, deps, addrKR, draft.ID, newDecoded)
+	if err != nil {
+		return mcp.ErrorResult("mail_forward: %v", err), nil
+	}
+
+	// Merge maps.
+	merged := make(map[string]*crypto.SessionKey, len(parentAttKeys)+len(newAttKeys))
+	for k, v := range parentAttKeys {
+		merged[k] = v
+	}
+	for k, v := range newAttKeys {
+		merged[k] = v
+	}
+
+	return finalizeSend(ctx, deps, "mail_forward", addrKR, draft, tpl, mimeType, allRecipients(in.To, in.CC, in.BCC), merged)
+}
+
+// reencryptParentKeyPackets reads each parent attachment's
+// (base64-encoded) KeyPackets, decrypts it to the bare session key
+// via the user's keyring, and re-encrypts it back to the same
+// keyring — returning the new base64-encoded packets in the same
+// order as parent.Attachments. The list is what
+// CreateDraftReq.AttachmentKeyPackets expects.
+//
+// Why decrypt + re-encrypt when the keyring is the same? Two
+// reasons: (1) the SDK contract says "encrypted to the sender",
+// not "the parent's recipient-encoded packets verbatim"; (2)
+// future multi-address handling (parent received on one address,
+// forwarded from another) reuses this exact code path.
+func reencryptParentKeyPackets(addrKR *crypto.KeyRing, parent gpa.Message) ([]string, error) {
+	out := make([]string, 0, len(parent.Attachments))
+	for i, a := range parent.Attachments {
+		kpBytes, err := decodeBase64(a.KeyPackets)
+		if err != nil {
+			return nil, fmt.Errorf("attachment %d (%s): decode KeyPackets: %w", i, a.Name, err)
+		}
+		sk, err := addrKR.DecryptSessionKey(kpBytes)
+		if err != nil {
+			return nil, fmt.Errorf("attachment %d (%s): decrypt session key: %w", i, a.Name, err)
+		}
+		enc, err := addrKR.EncryptSessionKey(sk)
+		if err != nil {
+			return nil, fmt.Errorf("attachment %d (%s): re-encrypt session key: %w", i, a.Name, err)
+		}
+		out = append(out, base64.StdEncoding.EncodeToString(enc))
+	}
+	return out, nil
 }
 
 // finalizeSend is the shared "build packages → SendDraft → return"

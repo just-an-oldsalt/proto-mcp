@@ -48,6 +48,15 @@ tools:
     decision: prompt
     ttl: 5m
     description: "Download and decrypt one attachment from a Proton message. Cached locally for 30 days; subsequent calls within the TTL window don't re-prompt."
+  # Phase 8/C — writes a file to ~/Downloads. Filesystem side
+  # effect: confirm: true + ttl: 0 means every save re-asks (no
+  # cached approval — the user reads the literal filename before
+  # they approve each save).
+  mail_save_attachment:
+    decision: prompt
+    confirm: true
+    ttl: 0
+    description: "Save a decrypted attachment to ~/Downloads with a sanitized filename. Refuses paths outside ~/Downloads. Existing files get a (2), (3), ... suffix."
   labels_list:           { decision: allow }
   folders_list:          { decision: allow }
   mail_sync:             { decision: allow }
