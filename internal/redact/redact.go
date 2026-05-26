@@ -79,6 +79,12 @@ var bodyKeys = map[string]struct{}{
 	"text":      {},
 	"html":      {},
 	"plaintext": {},
+	// Phase 8/A — mail_download_attachment / mail_send attachments
+	// carry base64-encoded plaintext bytes. Treat with the same
+	// {sha256, bytes} contract as body fields: audit row records
+	// WHICH bytes flowed without storing them.
+	"content_b64": {},
+	"contentb64":  {},
 }
 
 // opaqueIDKeys are JSON field names whose values are Proton-side
@@ -111,6 +117,14 @@ var opaqueIDKeys = map[string]struct{}{
 	"in_reply_to": {},
 	"inreplyto":   {},
 	"id":          {}, // generic; Proton APIs use "id" for the same opaque type
+	// Phase 8/A — attachment identifiers + sanitized filename.
+	// Filename is the SANITIZED form (sanitize.Filename has run);
+	// it is user-visible by design — the whole point of showing
+	// it in the Touch ID prompt is so the user can verify what
+	// they're downloading / saving / sending.
+	"attachment_id": {},
+	"attachmentid":  {},
+	"filename":      {},
 }
 
 // Attr is the slog.HandlerOptions.ReplaceAttr hook. Two passes:

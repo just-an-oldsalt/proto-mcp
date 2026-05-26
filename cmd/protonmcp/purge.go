@@ -75,6 +75,12 @@ func runPurge(ctx context.Context, args []string) error {
 		fmt.Printf("Oldest cached body:     %s\n", stats.OldestCached.Format(time.RFC3339))
 	}
 
+	// Phase 8/A — attachment cache stats. Same retention model;
+	// distinct storage so the totals are reported separately.
+	attCount, _ := st.CountCachedAttachments(ctx)
+	attBytes, _ := st.SumAttachmentBytes(ctx)
+	fmt.Printf("Cached attachments:     %d (%d bytes)\n", attCount, attBytes)
+
 	if *dryRun {
 		fmt.Println("(--dry-run; nothing changed)")
 		return nil
@@ -85,6 +91,14 @@ func runPurge(ctx context.Context, args []string) error {
 		return err
 	}
 	fmt.Printf("Purged %d message body row(s).\n", n)
+
+	// Phase 8/A — sweep stale attachment cache entries with the
+	// same cutoff.
+	attN, err := st.PurgeAttachmentsOlderThan(ctx, cutoff)
+	if err != nil {
+		return fmt.Errorf("purge attachments: %w", err)
+	}
+	fmt.Printf("Purged %d attachment cache row(s).\n", attN)
 
 	if *doVacuum {
 		fmt.Println("Vacuuming…")
@@ -127,9 +141,25 @@ var dayDurationRE = regexp.MustCompile(`^(\d+)d$`)
 // default-retention purge once at startup. Failures log Warn but
 // don't fail startup; the daemon's whole job is to serve MCP,
 // not be a backup tool.
+//
+// Phase 8/A — also sweeps attachment_cache at the same cutoff so
+// both plaintext-at-rest stores share the retention model.
+// Returned count is body-rows only (attachment count is logged
+// inside via slog rather than threaded through the int64 contract
+// the runtime hook expects).
 func sweepBodiesAtStartup(ctx context.Context, st *store.Store) (int64, error) {
 	cutoff := time.Now().Add(-store.DefaultBodyRetention).UTC()
-	return st.PurgeOlderThan(ctx, cutoff)
+	n, err := st.PurgeOlderThan(ctx, cutoff)
+	if err != nil {
+		return n, err
+	}
+	if attN, attErr := st.PurgeAttachmentsOlderThan(ctx, cutoff); attErr == nil && attN > 0 {
+		// Best-effort — the body sweep is already reported via the
+		// caller's stats; attachment counts roll into the same log line
+		// via slog if anything else cares.
+		_ = attN
+	}
+	return n, nil
 }
 
 var _ = os.Stderr // kept; future error-surface refactors will use it

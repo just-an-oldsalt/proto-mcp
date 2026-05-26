@@ -91,6 +91,8 @@ func All(deps Deps) []mcp.Tool {
 		mailReply(deps),
 		mailReplyAll(deps),
 		mailForward(deps),
+		// Phase 8/A — attachment read path.
+		mailDownloadAttachment(deps),
 	}
 }
 

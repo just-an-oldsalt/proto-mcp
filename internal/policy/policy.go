@@ -102,7 +102,20 @@ type document struct {
 	// without a tool call. 0 (or missing) disables the idle timer.
 	// Range-checked in parseDocument: must be 0–1440 (one day).
 	IdleLockMinutes int `yaml:"idle_lock_minutes,omitempty"`
+	// MaxAttachmentBytes: per-attachment size ceiling enforced by
+	// mail_download_attachment (before fetch) and mail_send.attachments
+	// (before upload). Phase 8/A. 0 / missing → DefaultMaxAttachmentBytes.
+	// Range-checked in parseDocument: must be 0 or positive, at most
+	// 1 GiB. The 500 MiB total-cache ceiling is hardcoded in
+	// internal/store/attachments.go and not user-configurable.
+	MaxAttachmentBytes int64 `yaml:"max_attachment_bytes,omitempty"`
 }
+
+// DefaultMaxAttachmentBytes is the per-attachment cap when the
+// policy doesn't override it. 25 MiB. Round number; matches what
+// most free email providers also cap at, leaving room for Proton's
+// paid-tier larger attachments via explicit policy override.
+const DefaultMaxAttachmentBytes int64 = 25 * 1024 * 1024
 
 // Engine holds the current policy. Reload swaps in a new document
 // under a write lock; Decide reads under a read lock so concurrent
@@ -293,6 +306,12 @@ func parseDocument(data []byte) (document, error) {
 	if doc.IdleLockMinutes < 0 || doc.IdleLockMinutes > 1440 {
 		return document{}, fmt.Errorf("idle_lock_minutes must be in [0, 1440]; got %d", doc.IdleLockMinutes)
 	}
+	// Phase 8/A. Cap the override at 1 GiB — anything larger is
+	// almost certainly a typo + would blow the 500 MiB cache
+	// ceiling on the first download.
+	if doc.MaxAttachmentBytes < 0 || doc.MaxAttachmentBytes > (1<<30) {
+		return document{}, fmt.Errorf("max_attachment_bytes must be in [0, 1 GiB]; got %d", doc.MaxAttachmentBytes)
+	}
 	return doc, nil
 }
 
@@ -304,4 +323,17 @@ func (e *Engine) IdleLockMinutes() int {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	return e.doc.IdleLockMinutes
+}
+
+// MaxAttachmentBytes returns the per-attachment size ceiling from
+// the merged policy, or DefaultMaxAttachmentBytes if the policy
+// doesn't specify one. Phase 8/A — enforced by
+// mail_download_attachment + mail_send.attachments.
+func (e *Engine) MaxAttachmentBytes() int64 {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if e.doc.MaxAttachmentBytes <= 0 {
+		return DefaultMaxAttachmentBytes
+	}
+	return e.doc.MaxAttachmentBytes
 }
