@@ -1478,6 +1478,29 @@ LocalAuthentication / AuthenticationServices.</p>
     Phase 6 / 7 are done — no need to plan now.</li>
   <li>Calendar (events) and Drive — flagged but bigger work; revisit
     after Contacts.</li>
+  <li><span class="check">[ ]</span> <strong>Phase 8/D —
+    <code>mail_download_attachment</code> response shape</strong>.
+    Surfaced during the Phase 8 smoke test: returning the full
+    base64 inline blows the MCP response token cap on anything
+    beyond ~10 KB. A 79 KB PDF returned 106 K base64 chars and
+    spilled to a side file rather than landing in the assistant's
+    context. The realistic shape is
+    <code>{path, sha256, size_bytes, mime_type, filename}</code> —
+    write to a staging dir (cache path is fine), return the path,
+    let the caller <code>Read</code> the bytes out of band.
+    Alternatively, keep <code>content_b64</code> for tiny payloads
+    and switch to <code>path</code> over a threshold (e.g. 16 KiB).
+    <code>mail_save_attachment</code> is the usable path today;
+    this just fixes the API contract on the read tool.</li>
+  <li><span class="check">[ ]</span> <strong>Attachment size
+    reporting consistency</strong>. <code>mail_list_attachments</code>
+    reports the Proton-side encrypted packet size (data + key
+    packet framing); <code>mail_download_attachment</code> returns
+    the decrypted plaintext size. Smoke test saw 79,514 vs
+    79,455 — a 59-byte difference. Either document both numbers
+    explicitly on the list tool, or populate <code>size_bytes</code>
+    from the decrypted size on cache hit so the two tools agree.
+    Trivial; ~20 LOC.</li>
 </ul>
 
 <h2>Done / decided</h2>
