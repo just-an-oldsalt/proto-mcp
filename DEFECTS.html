@@ -164,7 +164,7 @@
 <div class="stats">
   <div class="stat"><div class="stat-num">7</div><div class="stat-label">Open defects</div></div>
   <div class="stat"><div class="stat-num">0</div><div class="stat-label">Investigating</div></div>
-  <div class="stat"><div class="stat-num">35</div><div class="stat-label">Resolved</div></div>
+  <div class="stat"><div class="stat-num">37</div><div class="stat-label">Resolved</div></div>
   <div class="stat"><div class="stat-num">0</div><div class="stat-label"><span class="tag critical">critical</span></div></div>
   <div class="stat"><div class="stat-num">0</div><div class="stat-label"><span class="tag high">high</span></div></div>
   <div class="stat"><div class="stat-num">2</div><div class="stat-label"><span class="tag medium">medium</span></div></div>
@@ -242,6 +242,18 @@
 <p class="meta"><em>None.</em></p>
 
 <h2>Resolved</h2>
+
+<h3><span class="id">D44</span>launchd <code>KeepAlive=true</code> crash-loops the unrecoverable login-required state — endless Touch ID prompts after a reboot kills the session <span class="tag fixed">fixed in PR #84</span> <span class="tag medium">medium</span></h3>
+<p><strong>Reported:</strong> 2026-06-03 (live incident, post-reboot) · Surface: <code>cmd/protonmcp/daemon.go:renderPlist</code>, <code>cmd/protonmcpd/main.go</code></p>
+<p><strong>Evidence:</strong> Post-reboot, the stored session died in two steps: the access token came back 401 and the user-key unlock failed (<code>private key checksum failure</code>); the refresh then 422'd ("Invalid refresh token"), so <code>TryResume</code> hit <code>ErrSessionExpired</code> and deleted the keystore blob. From there the daemon exited 1 with "run <code>protonmcp login</code>" — correct — but the plist's bare <code>KeepAlive=true</code> relaunched it every ~10s, and each relaunch re-fired the Touch ID startup gate. <code>daemon.log</code> shows the <code>touch-id startup gate approved</code> → <code>no stored Proton session</code> → relaunch cycle repeating for minutes until the agent was booted out manually.</p>
+<p><strong>Fix:</strong> Login-required failures are now machine-matchable: both <code>AcquireResumeOnly</code> branches wrap a new <code>session.ErrLoginRequired</code> sentinel (guarded by <code>TestLoginRequiredMatchesSentinel</code>). <code>protonmcpd</code> exits <strong>0</strong> on it, and the plist template switches to <code>KeepAlive {SuccessfulExit: false}</code> — restart on crash (non-zero) only; the deliberate "a human must log in" exit stays down. <code>protonmcp login</code> kickstarts the label after a successful re-auth so MCP comes back without a manual <code>daemon start</code>. Side effect: <code>protonmcp daemon stop</code> now actually stops the daemon instead of being a stealth restart. Root cause in one sentence: launchd was told to restart on <em>every</em> exit, including the one exit that retrying can never fix. Upgrade note: re-run <code>protonmcp daemon install</code> to rewrite the plist.</p>
+<p class="meta"><strong>Related:</strong> [[D43]] (the prompt-before-check half of the same incident); 6/C launchd plist; 6/E startup gate</p>
+
+<h3><span class="id">D43</span>Touch ID startup gate prompts before the session-existence check — asks the user to unlock a session that doesn't exist <span class="tag fixed">fixed in PR #84</span> <span class="tag low">low</span></h3>
+<p><strong>Reported:</strong> 2026-06-03 (live incident, post-reboot) · Surface: <code>internal/serve/runtime.go</code> (gate wraps <code>AcquireSession</code>), <code>internal/session/session.go</code></p>
+<p><strong>Evidence:</strong> The Phase 6/E startup gate wraps the <code>AcquireSession</code> callback, so the biometric prompt fires before <code>AcquireResumeOnly</code> can report <code>keystore.ErrNotFound</code>. A logged-out daemon (or serve-stdio instance) therefore prompted "Touch ID required to unlock the saved Proton session" with no saved session to unlock — and under D44's relaunch loop, did so every ~10 seconds.</p>
+<p><strong>Fix:</strong> New <code>keystore.Exists()</code> does an attributes-only Keychain query (<code>SetReturnAttributes</code>, no <code>SetReturnData</code> — the secret payload is never materialized, so no prompt is warranted). <code>session.CheckStored()</code> wraps it and both <code>protonmcpd</code> and <code>serve-stdio</code> call it <em>before</em> <code>serve.Setup</code>: a missing session now fails fast with the <code>protonmcp login</code> remediation and zero Touch ID prompts. The gate still fires whenever a blob exists — the Phase 6/E security posture (biometric before the keychain secret is read) is unchanged.</p>
+<p class="meta"><strong>Related:</strong> [[D44]] (the relaunch half); [[D37]]/[[D40]] (why the application-layer gate exists at all)</p>
 
 <h3><span class="id">D42</span><code>sanitize.Text</code> leaves <code>&lt;style&gt;</code> / <code>&lt;script&gt;</code> element content in extracted plaintext <span class="tag fixed">fixed in PR #70</span> <span class="tag low">low</span></h3>
 <p><strong>Reported:</strong> 2026-05-24 (live MCP smoke test) · Surface: <code>internal/sanitize/sanitize.go</code></p>

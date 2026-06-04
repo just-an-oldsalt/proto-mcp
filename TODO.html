@@ -1180,8 +1180,11 @@ subcommand.</p>
 <p><strong>6/C — <code>phase-6/launchd</code></strong> <span class="tag">done (PR #54)</span>. Depends on 6/A.</p>
 <ul>
   <li><span class="check">[ ]</span> <code>~/Library/LaunchAgents/zone.dort.protonmcpd.plist</code>
-    written by <code>protonmcp daemon install</code>. <code>KeepAlive=true</code>
-    so a crash restarts the daemon; <code>RunAtLoad=true</code> so
+    written by <code>protonmcp daemon install</code>. <code>KeepAlive
+    SuccessfulExit=false</code> so a crash (non-zero exit) restarts
+    the daemon but a deliberate login-required exit 0 stays down
+    (D44 — was <code>KeepAlive=true</code>, which Touch-ID-prompt-looped
+    when the stored session died); <code>RunAtLoad=true</code> so
     login starts it. StandardErrorPath →
     <code>~/Library/Logs/protonmcp/daemon.log</code>.</li>
   <li><span class="check">[ ]</span> <code>protonmcp daemon</code>

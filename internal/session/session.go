@@ -44,6 +44,43 @@ func (b *Bundle) GetSession() *protonclient.Session {
 	return b.Session
 }
 
+// ErrLoginRequired marks session failures that no amount of retrying
+// can fix — only a human running `protonmcp login` from a terminal
+// can. D44: protonmcpd matches this with errors.Is and exits 0 so
+// launchd (KeepAlive SuccessfulExit=false) leaves the daemon down
+// instead of crash-looping a Touch ID prompt every ~10 seconds.
+var ErrLoginRequired = errors.New("login required")
+
+// loginRequired builds an error that both carries the human-facing
+// remediation message and matches ErrLoginRequired via errors.Is.
+func loginRequired(format string, args ...any) error {
+	args = append([]any{ErrLoginRequired}, args...)
+	return fmt.Errorf("%w: "+format, args...)
+}
+
+// noStoredSessionMsg is shared by CheckStored (pre-gate fast path)
+// and AcquireResumeOnly (post-gate) so the operator sees the same
+// remediation text regardless of which check caught it first.
+const noStoredSessionMsg = "no stored Proton session — run `protonmcp login` from a terminal " +
+	"before launching the MCP server (MCP can't prompt for credentials)"
+
+// CheckStored fails fast — wrapped in ErrLoginRequired — when no
+// session blob exists in the Keychain. The check is attributes-only
+// (keystore.Exists), so it neither reads the secret payload nor
+// warrants a Touch ID prompt. Callers run this BEFORE the startup
+// gate in serve.Setup; that's the whole point (D43).
+//
+// A Keychain query error (as opposed to a clean "not found") returns
+// nil: proceed and let the real Load inside TryResume surface it
+// with full context after the gate.
+func CheckStored() error {
+	ok, err := keystore.Exists()
+	if err != nil || ok {
+		return nil
+	}
+	return loginRequired(noStoredSessionMsg)
+}
+
 // AcquireResumeOnly tries to rebuild a session from the Keychain
 // blob alone. If that fails — for any reason — it returns a clear
 // error instead of falling through to interactive prompts.
@@ -52,15 +89,14 @@ func (b *Bundle) GetSession() *protonclient.Session {
 // launchd / Claude Desktop with no controlling TTY. Falling through
 // to a prompt in that environment fails opaquely; this returns a
 // message that points the user at `protonmcp login` instead.
+// Both failure branches match ErrLoginRequired (see above).
 func AcquireResumeOnly(ctx context.Context) (*Bundle, error) {
 	bundle, err := TryResume(ctx)
 	if err != nil {
 		if errors.Is(err, keystore.ErrNotFound) {
-			return nil, fmt.Errorf(
-				"no stored Proton session — run `protonmcp login` from a terminal " +
-					"before launching the MCP server (MCP can't prompt for credentials)")
+			return nil, loginRequired(noStoredSessionMsg)
 		}
-		return nil, fmt.Errorf(
+		return nil, loginRequired(
 			"stored session unusable (%v) — run `protonmcp logout && protonmcp login` "+
 				"from a terminal to refresh credentials", err)
 	}

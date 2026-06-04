@@ -60,6 +60,21 @@ func runLogin(ctx context.Context, _ []string) error {
 	fmt.Println("Note: a same-UID process with the login keychain unlocked can still read this")
 	fmt.Println("session blob directly. The Touch ID startup gate is the active mitigation;")
 	fmt.Println("OS-level keychain ACL hardening is tracked as D37 (Phase 7/E packaging).")
+
+	// D44: a daemon that previously exited login-required did so with
+	// status 0, and the plist's KeepAlive SuccessfulExit=false means
+	// launchd left it down on purpose. Now that a fresh session is in
+	// the Keychain, kickstart the label so MCP comes back without a
+	// separate `protonmcp daemon start`. kickstart -k also restarts a
+	// still-running daemon, which is equally right: it's holding the
+	// session this login just replaced.
+	if labelLoaded() {
+		fmt.Println("Restarting protonmcpd to pick up the new session (expect a Touch ID prompt)…")
+		if err := launchctl("kickstart", "-k", "gui/"+uidString()+"/"+daemonLabel); err != nil {
+			fmt.Fprintf(os.Stderr,
+				"warning: couldn't restart the daemon (%v) — run `protonmcp daemon start` manually.\n", err)
+		}
+	}
 	return nil
 }
 

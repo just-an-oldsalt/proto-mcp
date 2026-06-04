@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/just-an-oldsalt/proto-mcp/internal/serve"
+	"github.com/just-an-oldsalt/proto-mcp/internal/session"
 )
 
 // runServeStdio is the MCP entry point. Claude Desktop spawns this
@@ -65,6 +66,15 @@ func runServeStdio(ctx context.Context, args []string) error {
 	}
 	for _, k := range []string{"PROTONMCP_TOUCHID", "PROTONMCP_DEBUG"} {
 		_ = os.Unsetenv(k)
+	}
+
+	// D43: fail fast when there's no session blob at all, BEFORE the
+	// Touch ID startup gate inside serve.Setup. A logged-out server
+	// should error with "run `protonmcp login`" — not prompt the user
+	// to unlock a session that doesn't exist (Claude Desktop retries
+	// failed MCP servers, so the prompt would repeat).
+	if err := session.CheckStored(); err != nil {
+		return err
 	}
 
 	// Setup the shared runtime — store + session + policy + audit +
