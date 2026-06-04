@@ -250,9 +250,9 @@ func runDaemonRestart(ctx context.Context, args []string) error {
 		return err
 	}
 	// Brief settle window so launchd registers the exit before
-	// kickstart fires. KeepAlive=true means launchd will
-	// auto-restart anyway; this just makes the user-facing
-	// "restarted" feel deterministic.
+	// kickstart fires. D44: KeepAlive is SuccessfulExit=false now,
+	// so launchd does NOT auto-restart after a clean stop — the
+	// explicit kickstart below is what brings the daemon back.
 	time.Sleep(500 * time.Millisecond)
 	return runDaemonStart(ctx, args)
 }
@@ -366,10 +366,18 @@ type plistItem struct {
 }
 
 // renderPlist returns a minimal but production-ready LaunchAgent
-// plist. RunAtLoad+KeepAlive means launchd starts the daemon
-// immediately and restarts it on crash. ProcessType=Background
-// tells the scheduler this isn't user-interactive (lower priority,
-// no App Nap interference).
+// plist. RunAtLoad starts the daemon immediately; KeepAlive with
+// SuccessfulExit=false restarts it ONLY on non-zero exit (crash).
+// D44: a daemon that needs interactive login exits 0 deliberately —
+// under a bare KeepAlive=true, launchd relaunched that unrecoverable
+// state every ~10s, and each relaunch re-fired the Touch ID startup
+// gate (an endless biometric prompt loop after a reboot invalidated
+// the stored session). `protonmcp login` kickstarts the label after
+// a successful re-auth; `protonmcp daemon start` does it manually.
+// Side effect: `protonmcp daemon stop` (SIGTERM → clean exit 0) now
+// actually stops the daemon instead of being a stealth restart.
+// ProcessType=Background tells the scheduler this isn't
+// user-interactive (lower priority, no App Nap interference).
 //
 // Stderr+stdout both go to the same log file so launchd's idea of
 // "did the process say anything before it died" is in one place.
@@ -389,7 +397,10 @@ func renderPlist(binPath, logPath string) ([]byte, error) {
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
-    <true/>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
     <key>ProcessType</key>
     <string>Background</string>
     <key>StandardErrorPath</key>

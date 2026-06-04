@@ -41,6 +41,7 @@ func TestRenderPlistContainsExpectedKeys(t *testing.T) {
 		`<key>RunAtLoad</key>`,
 		`<true/>`,
 		`<key>KeepAlive</key>`,
+		`<key>SuccessfulExit</key>`,
 		`<key>StandardErrorPath</key>`,
 		`/Users/x/Library/Logs/protonmcp/daemon.log`,
 		`<key>ProcessType</key>`,
@@ -83,6 +84,28 @@ func TestRenderPlistEscapesXMLInPaths(t *testing.T) {
 			}
 			t.Fatalf("xml parse: %v\n%s", err, s)
 		}
+	}
+}
+
+// TestRenderPlistKeepAliveOnlyOnCrash — D44 guard: KeepAlive must be
+// the {SuccessfulExit: false} dict form (restart on crash only), not
+// a bare <true/> (restart always). A bare true turns the daemon's
+// deliberate "login required" exit-0 into a relaunch loop that
+// re-fires the Touch ID startup gate every ~10 seconds.
+func TestRenderPlistKeepAliveOnlyOnCrash(t *testing.T) {
+	out, err := renderPlist("/usr/local/bin/protonmcpd", "/tmp/daemon.log")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Compare with whitespace stripped so indentation changes don't
+	// produce false failures.
+	flat := strings.Join(strings.Fields(string(out)), "")
+	want := `<key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>`
+	if !strings.Contains(flat, want) {
+		t.Errorf("KeepAlive is not the SuccessfulExit=false dict form:\n%s", out)
+	}
+	if strings.Contains(flat, `<key>KeepAlive</key><true/>`) {
+		t.Errorf("KeepAlive regressed to bare <true/> (D44):\n%s", out)
 	}
 }
 

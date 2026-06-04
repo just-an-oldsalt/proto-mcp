@@ -219,6 +219,29 @@ func Load() (Live, error) {
 	return live, nil
 }
 
+// Exists reports whether a session blob is stored, WITHOUT reading
+// the secret payload. Attributes-only Keychain query — no copy of
+// the token/key material is materialized in this process.
+//
+// D43: protonmcpd calls this before the Touch ID startup gate so a
+// missing session fails fast with "run `protonmcp login`" instead of
+// prompting the user to unlock a blob that doesn't exist.
+func Exists() (bool, error) {
+	query := keychain.NewItem()
+	query.SetSecClass(keychain.SecClassGenericPassword)
+	query.SetService(Service)
+	query.SetAccount(Account)
+	query.SetMatchLimit(keychain.MatchLimitOne)
+	query.SetReturnAttributes(true)
+	// QueryItem maps errSecItemNotFound to (nil, nil), so a nil error
+	// with zero results is the canonical "no entry" signal.
+	results, err := keychain.QueryItem(query)
+	if err != nil {
+		return false, fmt.Errorf("keychain query: %w", err)
+	}
+	return len(results) > 0, nil
+}
+
 // v2 used a base64-encoded string for the salted key pass. The bytes
 // it encodes are identical to what v3 ships as a []byte (Go's json
 // happens to encode []byte to base64 too), so the migration is just

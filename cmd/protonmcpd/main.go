@@ -83,6 +83,18 @@ func main() {
 	}
 
 	if err := run(); err != nil {
+		// D44: a login-required failure is unrecoverable without a
+		// human at a terminal — retrying just re-fires the Touch ID
+		// startup gate. Exit 0 so launchd (KeepAlive SuccessfulExit=
+		// false) leaves the daemon down instead of crash-looping a
+		// biometric prompt every ~10 seconds. `protonmcp login`
+		// kickstarts the label again after a successful re-auth.
+		if errors.Is(err, session.ErrLoginRequired) {
+			slog.Error("protonmcpd needs interactive login; exiting cleanly so launchd does not respawn",
+				"err", err.Error(),
+				"fix", "run `protonmcp login`, then `protonmcp daemon start`")
+			os.Exit(0)
+		}
 		slog.Error("protonmcpd exited with error", "err", err.Error())
 		os.Exit(1)
 	}
@@ -134,6 +146,17 @@ func run() error {
 	}
 	for _, k := range []string{"PROTONMCP_TOUCHID", "PROTONMCP_DEBUG"} {
 		_ = os.Unsetenv(k)
+	}
+
+	// D43: fail fast when there's no session blob at all. The Touch ID
+	// startup gate inside serve.Setup fires BEFORE AcquireSession can
+	// report "nothing stored" — without this pre-check, a logged-out
+	// daemon prompts the user to unlock a session that doesn't exist
+	// (and under launchd relaunch, does so over and over). The check
+	// is attributes-only; no secret material is read and no prompt is
+	// warranted.
+	if err := session.CheckStored(); err != nil {
+		return err
 	}
 
 	rt, err := serve.Setup(ctx, serve.SetupConfig{
