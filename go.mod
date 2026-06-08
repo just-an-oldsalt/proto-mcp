@@ -10,11 +10,11 @@ require (
 	github.com/keybase/go-keychain v0.0.1
 	github.com/microcosm-cc/bluemonday v1.0.27
 	github.com/pressly/goose/v3 v3.27.1
-	golang.org/x/sys v0.44.0
+	golang.org/x/sys v0.46.0
 	golang.org/x/term v0.43.0
 	golang.org/x/text v0.37.0
 	gopkg.in/yaml.v3 v3.0.1
-	modernc.org/sqlite v1.50.1
+	modernc.org/sqlite v1.52.0
 )
 
 require (
