@@ -214,6 +214,26 @@ func (s *Server) Register(t Tool) {
 	s.tools[t.Name] = t
 }
 
+// ReplaceTools atomically rebinds already-registered tools to the
+// provided definitions (matched by name). Used by the runtime on unlock
+// to point session-backed handlers at a freshly acquired session
+// (PROTO-132): the handlers captured the pre-lock session pointer at
+// registration, so without this they'd dereference a Closed session
+// after the first lock/unlock cycle. Tools whose names aren't in the
+// provided set are left untouched; unnamed / nil-handler entries are
+// skipped. Takes the write lock, so it's safe against concurrent
+// tools/list and tools/call lookups.
+func (s *Server) ReplaceTools(tools []Tool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, t := range tools {
+		if t.Name == "" || t.Handler == nil {
+			continue
+		}
+		s.tools[t.Name] = t
+	}
+}
+
 // Tools returns a snapshot of the registry. Used by tools/list and
 // by tests; the returned slice is owned by the caller.
 func (s *Server) Tools() []Tool {
