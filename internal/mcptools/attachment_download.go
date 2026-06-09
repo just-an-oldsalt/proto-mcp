@@ -1,16 +1,33 @@
 package mcptools
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 
 	"github.com/just-an-oldsalt/proto-mcp/internal/mcp"
 	"github.com/just-an-oldsalt/proto-mcp/internal/policy"
+	"github.com/just-an-oldsalt/proto-mcp/internal/sanitize"
 	"github.com/just-an-oldsalt/proto-mcp/internal/store"
 )
+
+// inlineAttachmentMaxBytes is the raw-byte ceiling under which
+// mail_download_attachment returns the decrypted bytes inline as
+// base64. Above it, the bytes are written to a staging file and the
+// response carries the path instead (Phase 8/D).
+//
+// Returning full base64 inline blows the MCP response token cap on
+// anything but tiny attachments — a 79 KB PDF expands to ~106 K base64
+// characters. 16 KiB raw (~22 KB base64) keeps inline responses small
+// enough to stay well under the cap while covering the common case of
+// little text/JSON/icon attachments that callers want to read directly.
+const inlineAttachmentMaxBytes = 16 * 1024
 
 // attachmentCacheCeilingBytes is the hard ceiling on the on-disk
 // attachment cache. After every successful download we run
@@ -35,18 +52,27 @@ func mailDownloadAttachment(deps Deps) mcp.Tool {
 		Filename     string `json:"filename"`
 		MIMEType     string `json:"mime_type,omitempty"`
 		SizeBytes    int64  `json:"size_bytes"`
-		ContentB64   string `json:"content_b64"`
-		Cached       bool   `json:"cached"`
+		SHA256       string `json:"sha256"`
+		// Exactly one of ContentB64 / Path is set. Small attachments
+		// (<= inlineAttachmentMaxBytes) come back inline as base64;
+		// larger ones are written to a staging file and Path points at
+		// it (Phase 8/D — keeps the MCP response under the token cap).
+		ContentB64 string `json:"content_b64,omitempty"`
+		Path       string `json:"path,omitempty"`
+		Cached     bool   `json:"cached"`
 	}
 
 	return mcp.Tool{
 		Name: "mail_download_attachment",
 		Description: "Download and decrypt the bytes of a single attachment from a Proton message. " +
-			"Returns the plaintext as base64. On first call, fetches from Proton, decrypts with " +
-			"the address keyring, and caches locally for 30 days. Subsequent calls return from " +
-			"cache. Refuses attachments larger than max_attachment_bytes (policy; default 25 MiB) " +
-			"before any network traffic. Filenames are sanitized — RTL spoofing, control chars, " +
-			"path separators, and leading dots are stripped to defend the display + save paths.",
+			"Small attachments (<= 16 KiB) come back inline as base64 in content_b64; larger ones are " +
+			"written to a local staging file and the response carries its path instead (keeping the " +
+			"response under the MCP token cap) — use mail_save_attachment to copy it somewhere permanent. " +
+			"Either way a sha256 of the plaintext is returned. On first call, fetches from Proton, decrypts " +
+			"with the address keyring, and caches locally for 30 days; subsequent calls return from cache. " +
+			"Refuses attachments larger than max_attachment_bytes (policy; default 25 MiB) before any " +
+			"network traffic. Filenames are sanitized — RTL spoofing, control chars, path separators, and " +
+			"leading dots are stripped to defend the display + save paths.",
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
@@ -64,10 +90,12 @@ func mailDownloadAttachment(deps Deps) mcp.Tool {
 				"filename":      {"type": "string"},
 				"mime_type":     {"type": "string"},
 				"size_bytes":    {"type": "integer"},
-				"content_b64":   {"type": "string"},
+				"sha256":        {"type": "string", "description": "Hex SHA-256 of the decrypted plaintext."},
+				"content_b64":   {"type": "string", "description": "Base64 plaintext; present only for attachments <= 16 KiB."},
+				"path":          {"type": "string", "description": "Path to a staging file holding the plaintext; present only for attachments > 16 KiB."},
 				"cached":        {"type": "boolean"}
 			},
-			"required": ["message_id", "attachment_id", "filename", "size_bytes", "content_b64", "cached"]
+			"required": ["message_id", "attachment_id", "filename", "size_bytes", "sha256", "cached"]
 		}`),
 		PromptBody: func(raw json.RawMessage) (string, string) {
 			var in input
@@ -97,13 +125,19 @@ func mailDownloadAttachment(deps Deps) mcp.Tool {
 			// definition we already passed the cap on the first
 			// download. Filenames in the cache are already sanitized.
 			if row, err := deps.Store.GetCachedAttachment(ctx.Std, in.MessageID, in.AttachmentID); err == nil {
+				b64, path, sha, berr := stageOrInlineAttachment(row.AttachmentID, row.Filename, row.Content)
+				if berr != nil {
+					return mcp.ErrorResult("mail_download_attachment: %v", berr), nil
+				}
 				return mcp.StructuredResult(result{
 					MessageID:    row.MessageID,
 					AttachmentID: row.AttachmentID,
 					Filename:     row.Filename,
 					MIMEType:     row.MIMEType,
 					SizeBytes:    row.SizeBytes,
-					ContentB64:   base64.StdEncoding.EncodeToString(row.Content),
+					SHA256:       sha,
+					ContentB64:   b64,
+					Path:         path,
 					Cached:       true,
 				})
 			} else if !errors.Is(err, store.ErrAttachmentNotCached) {
@@ -183,13 +217,19 @@ func mailDownloadAttachment(deps Deps) mcp.Tool {
 				}
 			}
 
+			b64, path, sha, berr := stageOrInlineAttachment(payload.AttachmentID, payload.Filename, payload.Content)
+			if berr != nil {
+				return mcp.ErrorResult("mail_download_attachment: %v", berr), nil
+			}
 			return mcp.StructuredResult(result{
 				MessageID:    payload.MessageID,
 				AttachmentID: payload.AttachmentID,
 				Filename:     payload.Filename,
 				MIMEType:     payload.MIMEType,
 				SizeBytes:    payload.SizeBytes,
-				ContentB64:   base64.StdEncoding.EncodeToString(payload.Content),
+				SHA256:       sha,
+				ContentB64:   b64,
+				Path:         path,
 				Cached:       false,
 			})
 		},
@@ -206,5 +246,60 @@ func maxAttachmentBytes(deps Deps) int64 {
 	return policy.DefaultMaxAttachmentBytes
 }
 
-// silence unused-import noise if a future refactor drops a use site.
-var _ = fmt.Sprintf
+// stageOrInlineAttachment computes the SHA-256 of the decrypted bytes
+// and decides how to return them: inline base64 for small attachments,
+// or a staging-file path for large ones (Phase 8/D). Exactly one of the
+// returned b64 / path is non-empty; sha is always set.
+func stageOrInlineAttachment(attachmentID, filename string, content []byte) (b64, path, sha string, err error) {
+	sum := sha256.Sum256(content)
+	sha = hex.EncodeToString(sum[:])
+	if int64(len(content)) <= inlineAttachmentMaxBytes {
+		return base64.StdEncoding.EncodeToString(content), "", sha, nil
+	}
+	path, err = writeAttachmentStaging(attachmentID, filename, content)
+	if err != nil {
+		return "", "", "", err
+	}
+	return "", path, sha, nil
+}
+
+// writeAttachmentStaging writes decrypted plaintext to a per-attachment
+// file under ~/Library/Application Support/protonmcp/attachment-staging/
+// and returns its path. The name is deterministic (attachment id +
+// sanitized filename) so re-downloading the same attachment overwrites
+// rather than accumulating copies — the dir stays bounded by the number
+// of distinct large attachments fetched, not the call count. Mode 0600
+// in a 0700 dir, mirroring the on-disk hardening the SQLite cache and
+// socket already use. The bytes are already in the 500 MiB-capped
+// SQLite cache; this is the filesystem handoff for callers that can't
+// read base64 out of a token-capped response.
+func writeAttachmentStaging(attachmentID, filename string, content []byte) (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("home dir: %w", err)
+	}
+	dir := filepath.Join(home, "Library", "Application Support", "protonmcp", "attachment-staging")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", fmt.Errorf("mkdir staging: %w", err)
+	}
+
+	// Both components are sanitized + Base'd so neither the
+	// Proton-issued attachment id nor the filename can escape the
+	// staging dir via separators or "..".
+	stem := filepath.Base(filepath.Clean(sanitize.Filename(attachmentID)))
+	name := filepath.Base(filepath.Clean(sanitize.Filename(filename)))
+	if name == "" || name == "." || name == "/" || name == "\\" {
+		name = "attachment"
+	}
+	if stem == "" || stem == "." || stem == "/" || stem == "\\" {
+		stem = "att"
+	}
+	dest := filepath.Clean(filepath.Join(dir, stem+"__"+name))
+	if filepath.Dir(dest) != filepath.Clean(dir) {
+		return "", fmt.Errorf("refusing staging path outside %s (resolved to %q)", dir, dest)
+	}
+	if err := os.WriteFile(dest, content, 0o600); err != nil {
+		return "", fmt.Errorf("write staging file: %w", err)
+	}
+	return dest, nil
+}
