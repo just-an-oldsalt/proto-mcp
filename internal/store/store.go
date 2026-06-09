@@ -18,6 +18,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/pressly/goose/v3"
 	_ "modernc.org/sqlite"
@@ -114,6 +115,18 @@ func buildDSN(path string) (string, error) {
 		// test code path mirrors production.
 		v.Add("_pragma", "secure_delete(on)")
 		return path + "?" + v.Encode(), nil
+	}
+	// SECURITY D12 — the DSN is `path + "?" + query`, and modernc/sqlite
+	// parses everything after the first "?" as connection pragmas. A path
+	// carrying its own "?" (e.g. `--db '/tmp/x.db?_pragma=journal_mode(off)'`)
+	// would inject pragmas that override ours — silently disabling WAL
+	// durability or defeating the secure_delete (B-10/C-1) mitigation.
+	// "?" is not meaningful in a real SQLite file path, so reject it
+	// rather than try to escape it. (The url.Values above only encodes
+	// our own pragma values, not the path, which is why this guard is
+	// the load-bearing one.)
+	if strings.ContainsRune(path, '?') {
+		return "", fmt.Errorf("invalid db path %q: must not contain '?' (DSN pragma-injection guard)", path)
 	}
 	v := url.Values{}
 	v.Add("_pragma", "busy_timeout(5000)")
