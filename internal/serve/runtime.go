@@ -67,6 +67,12 @@ type Runtime struct {
 	lockReason     string
 	acquireSession func(context.Context) (SessionBundle, error)
 
+	// unlockMu serializes Unlock so two concurrent unlocks don't both
+	// fire a Touch ID prompt. It is held across the (slow) prompt, but
+	// — unlike r.mu — nothing on the tool-call hot path or Lock touches
+	// it, so a pending unlock can't freeze the daemon (PROTO-141).
+	unlockMu sync.Mutex
+
 	// Phase 7/A — auto-lock infrastructure. idleTracker bumps on
 	// every tool call via the mcp.WithToolCallObserver hook.
 	// lockwatchCancel terminates the Swift lockwatch helper on
@@ -119,20 +125,53 @@ func (r *Runtime) Lock(reason string) {
 // via the approval broker). Returns the error from session acquire
 // so the CLI / signal handler can report it.
 func (r *Runtime) Unlock(ctx context.Context) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if !r.locked {
+	// Serialize unlocks (so two don't both prompt) WITHOUT holding the
+	// runtime RWMutex across the prompt — see unlockMu's doc.
+	r.unlockMu.Lock()
+	defer r.unlockMu.Unlock()
+
+	r.mu.RLock()
+	locked := r.locked
+	acquire := r.acquireSession
+	r.mu.RUnlock()
+	if !locked {
 		return nil
 	}
-	if r.acquireSession == nil {
+	if acquire == nil {
 		return errors.New("runtime: no acquireSession callback registered for unlock")
 	}
-	bundle, err := r.acquireSession(ctx)
+
+	// PROTO-141: the Touch-ID-gated acquire (up to a 60s human prompt)
+	// runs OUTSIDE r.mu, so it can't block the tool-call hot path
+	// (r.Locked() → RLock) or an emergency Lock for the prompt's
+	// duration. We take the write lock only for the fast state swap.
+	bundle, err := acquire(ctx)
 	if err != nil {
 		return err
 	}
+	sess := bundle.GetSession()
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.locked {
+		// Lost a race with a concurrent unlock; discard our acquire.
+		bundle.Close()
+		sess.Close()
+		return nil
+	}
 	r.Bundle = bundle
-	r.Session = bundle.GetSession()
+	r.Session = sess
+	// PROTO-132: rebind every session-backed tool handler to the freshly
+	// acquired session. Handlers captured the OLD (now Closed) session
+	// pointer at Setup; without this they'd dereference a closed session
+	// after the first lock/unlock cycle.
+	if r.MCPServer != nil {
+		r.MCPServer.ReplaceTools(mcptools.All(mcptools.Deps{
+			Session: sess,
+			Store:   r.Store,
+			Policy:  r.Policy,
+		}))
+	}
 	r.locked = false
 	r.lockReason = ""
 	slog.Info("daemon unlocked")
