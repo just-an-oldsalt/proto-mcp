@@ -154,6 +154,10 @@ type SessionBundle interface {
 // protonmcpd pass this in.
 func SweepStaleBodies(ctx context.Context, st *store.Store) (int64, error) {
 	cutoff := time.Now().Add(-store.DefaultBodyRetention).UTC()
+	// PROTO-135 — best-effort sweep of the on-disk decrypted-attachment
+	// staging dir at the same retention cutoff, so daemon startup also
+	// clears stale plaintext files (not just the SQLite cache rows).
+	_, _ = mcptools.SweepStagingOlderThan(cutoff)
 	return st.PurgeOlderThan(ctx, cutoff)
 }
 

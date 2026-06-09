@@ -10,6 +10,8 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"syscall"
+	"time"
 
 	"github.com/just-an-oldsalt/proto-mcp/internal/mcp"
 	"github.com/just-an-oldsalt/proto-mcp/internal/policy"
@@ -263,22 +265,35 @@ func stageOrInlineAttachment(attachmentID, filename string, content []byte) (b64
 	return "", path, sha, nil
 }
 
-// writeAttachmentStaging writes decrypted plaintext to a per-attachment
-// file under ~/Library/Application Support/protonmcp/attachment-staging/
-// and returns its path. The name is deterministic (attachment id +
-// sanitized filename) so re-downloading the same attachment overwrites
-// rather than accumulating copies — the dir stays bounded by the number
-// of distinct large attachments fetched, not the call count. Mode 0600
-// in a 0700 dir, mirroring the on-disk hardening the SQLite cache and
-// socket already use. The bytes are already in the 500 MiB-capped
-// SQLite cache; this is the filesystem handoff for callers that can't
-// read base64 out of a token-capped response.
-func writeAttachmentStaging(attachmentID, filename string, content []byte) (string, error) {
+// stagingDir resolves the decrypted-attachment staging directory
+// (~/Library/Application Support/protonmcp/attachment-staging/). Shared
+// by the writer and the retention sweep so they can't drift.
+func stagingDir() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("home dir: %w", err)
 	}
-	dir := filepath.Join(home, "Library", "Application Support", "protonmcp", "attachment-staging")
+	return filepath.Join(home, "Library", "Application Support", "protonmcp", "attachment-staging"), nil
+}
+
+// writeAttachmentStaging writes decrypted plaintext to a per-attachment
+// file under the staging dir and returns its path. The name is
+// deterministic (attachment id + sanitized filename) so re-downloading
+// the same attachment overwrites rather than accumulating copies — the
+// dir stays bounded by the number of distinct large attachments fetched,
+// not the call count. Mode 0600 in a 0700 dir, mirroring the on-disk
+// hardening the SQLite cache and socket already use. The bytes are also
+// in the 500 MiB-capped SQLite cache; this is the filesystem handoff for
+// callers that can't read base64 out of a token-capped response.
+//
+// Retention: the file is swept by SweepStagingOlderThan (wired into
+// `protonmcp purge` and the startup body sweep) so this plaintext does
+// not outlive its SQLite-cache counterpart (PROTO-135).
+func writeAttachmentStaging(attachmentID, filename string, content []byte) (string, error) {
+	dir, err := stagingDir()
+	if err != nil {
+		return "", err
+	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", fmt.Errorf("mkdir staging: %w", err)
 	}
@@ -298,8 +313,65 @@ func writeAttachmentStaging(attachmentID, filename string, content []byte) (stri
 	if filepath.Dir(dest) != filepath.Clean(dir) {
 		return "", fmt.Errorf("refusing staging path outside %s (resolved to %q)", dir, dest)
 	}
-	if err := os.WriteFile(dest, content, 0o600); err != nil {
+
+	// PROTO-135: O_NOFOLLOW so a pre-planted symlink at the (predictable)
+	// dest can't redirect the decrypted plaintext onto an arbitrary
+	// same-UID-writable target — a LaunchAgent plist, policy.yaml, the
+	// SQLite DB. O_TRUNC preserves the deterministic-overwrite contract
+	// for re-downloads of the same attachment. (The lexical containment
+	// check above stops name-based escapes; this stops symlink escapes.)
+	f, err := os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return "", fmt.Errorf("open staging file: %w", err)
+	}
+	defer f.Close()
+	if _, err := f.Write(content); err != nil {
+		_ = os.Remove(dest)
 		return "", fmt.Errorf("write staging file: %w", err)
 	}
 	return dest, nil
+}
+
+// SweepStagingOlderThan removes decrypted-attachment staging files whose
+// modtime is older than cutoff, returning the count removed. Mirrors the
+// SQLite attachment cache's age retention so on-disk plaintext doesn't
+// outlive its DB counterpart (PROTO-135). A missing staging dir is not an
+// error (nothing has been staged yet). Best-effort: a per-file remove
+// error is returned after the sweep completes, not aborted on.
+func SweepStagingOlderThan(cutoff time.Time) (int, error) {
+	dir, err := stagingDir()
+	if err != nil {
+		return 0, err
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	removed := 0
+	var firstErr error
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		if info.ModTime().Before(cutoff) {
+			if rmErr := os.Remove(filepath.Join(dir, e.Name())); rmErr != nil {
+				if firstErr == nil {
+					firstErr = rmErr
+				}
+				continue
+			}
+			removed++
+		}
+	}
+	return removed, firstErr
 }
