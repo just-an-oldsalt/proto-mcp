@@ -107,8 +107,18 @@
   <li><span class="check done">[x]</span> Phase 5.5 — security cleanup (A/B/C/D merged; 21 audit findings closed)</li>
   <li><span class="check done">[x]</span> <strong>v1.0.0-alpha tagged</strong> 2026-05-22 — public-shareable build with LICENSE, README, AppVersion scoping (PR #48)</li>
   <li><span class="check done">[x]</span> Phase 6 — daemon + shim + launchd + lock/unlock <em>(A/B/C/D/E merged; OS-level Keychain ACL deferred to Phase 7 — see D37)</em></li>
-  <li><span class="check">[ ]</span> Phase 7 — polish (log rotation, Developer ID signing + notarization, Homebrew formula, Proton AppVersion registration)</li>
+  <li><span class="check done">[x]</span> Phase 7 — polish <em>(A/B/C/E merged: log rotation, Developer ID signing + notarization, Homebrew cask + release CI; 7/D OS-level Keychain ACL deferred — see D37)</em></li>
+  <li><span class="check done">[x]</span> Phase 8 — attachments <em>(A/B/C merged: read / send / save path; 8/D response shape outstanding)</em></li>
+  <li><span class="check">[ ]</span> Phase 9 — FIDO2 / passkey support <em>(planned; browser-handoff login + local key gate + keystore encryption)</em></li>
 </ul>
+
+<blockquote style="border-left:4px solid var(--accent);padding-left:1em;">
+  <strong>Live tracker moved to Jira (project PROTO).</strong> As of 2026-06-09,
+  issues, defects, and roadmap are tracked in Jira, which is the source of
+  truth. This file and <code>DEFECTS.html</code> are retained as historical
+  design records — the per-phase notes below remain useful context but their
+  checkboxes are no longer maintained.
+</blockquote>
 
 <h2>Quickstart for whoever picks this up</h2>
 <pre><code># build everything: protonmcp + protonmcpd + protonmcp-shim + Touch ID helper
