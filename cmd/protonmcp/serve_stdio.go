@@ -67,6 +67,17 @@ func runServeStdio(ctx context.Context, args []string) error {
 	for _, k := range []string{"PROTONMCP_TOUCHID", "PROTONMCP_DEBUG"} {
 		_ = os.Unsetenv(k)
 	}
+	// PROTO-129: in the untrusted-parent model the spawning client must
+	// not be able to redirect Proton traffic. go-proton-api's transport
+	// honors http.ProxyFromEnvironment, so a parent-set HTTPS_PROXY would
+	// route every SRP login / token refresh / send through an attacker.
+	// Drop all proxy vars (both cases) before the Proton client is built.
+	for _, k := range []string{
+		"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+		"http_proxy", "https_proxy", "all_proxy", "no_proxy",
+	} {
+		_ = os.Unsetenv(k)
+	}
 
 	// D43: fail fast when there's no session blob at all, BEFORE the
 	// Touch ID startup gate inside serve.Setup. A logged-out server

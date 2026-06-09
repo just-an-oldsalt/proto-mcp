@@ -156,6 +156,16 @@ func run() error {
 	for _, k := range []string{"PROTONMCP_TOUCHID", "PROTONMCP_DEBUG"} {
 		_ = os.Unsetenv(k)
 	}
+	// PROTO-129: drop ambient proxy vars so a poisoned launchd plist /
+	// shell profile can't redirect Proton traffic through an attacker
+	// endpoint (go-proton-api honors http.ProxyFromEnvironment). Same
+	// untrusted-parent rationale as the PROTONMCP_* scrub above.
+	for _, k := range []string{
+		"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+		"http_proxy", "https_proxy", "all_proxy", "no_proxy",
+	} {
+		_ = os.Unsetenv(k)
+	}
 
 	// D43: fail fast when there's no session blob at all. The Touch ID
 	// startup gate inside serve.Setup fires BEFORE AcquireSession can
