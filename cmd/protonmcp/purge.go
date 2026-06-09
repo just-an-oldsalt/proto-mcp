@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/just-an-oldsalt/proto-mcp/internal/mcptools"
 	"github.com/just-an-oldsalt/proto-mcp/internal/store"
 )
 
@@ -100,6 +101,16 @@ func runPurge(ctx context.Context, args []string) error {
 	}
 	fmt.Printf("Purged %d attachment cache row(s).\n", attN)
 
+	// PROTO-135 — the on-disk decrypted-attachment staging dir is a
+	// separate plaintext store from the SQLite cache; sweep it with the
+	// same cutoff so `protonmcp purge` actually removes all plaintext at
+	// rest. (--older-than 0s removes everything staged.)
+	stN, err := mcptools.SweepStagingOlderThan(cutoff)
+	if err != nil {
+		return fmt.Errorf("sweep attachment staging: %w", err)
+	}
+	fmt.Printf("Purged %d staged attachment file(s).\n", stN)
+
 	if *doVacuum {
 		fmt.Println("Vacuuming…")
 		if _, err := st.DB.ExecContext(ctx, "VACUUM"); err != nil {
@@ -159,6 +170,9 @@ func sweepBodiesAtStartup(ctx context.Context, st *store.Store) (int64, error) {
 		// via slog if anything else cares.
 		_ = attN
 	}
+	// PROTO-135 — best-effort sweep of the on-disk staging plaintext at
+	// the same retention cutoff.
+	_, _ = mcptools.SweepStagingOlderThan(cutoff)
 	return n, nil
 }
 

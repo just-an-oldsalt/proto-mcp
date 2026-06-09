@@ -6,7 +6,9 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"os"
+	"path/filepath"
 	"testing"
+	"time"
 )
 
 // Phase 8/D — small attachments come back inline as base64 with no
@@ -101,4 +103,80 @@ func TestWriteAttachmentStaging_Idempotent(t *testing.T) {
 func sha256Sum(b []byte) []byte {
 	s := sha256.Sum256(b)
 	return s[:]
+}
+
+// PROTO-135 — a pre-planted symlink at the deterministic staging dest
+// must NOT be followed; the decrypted plaintext must not overwrite the
+// symlink's target.
+func TestWriteAttachmentStaging_RefusesSymlink(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	dir := filepath.Join(home, "Library", "Application Support", "protonmcp", "attachment-staging")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	victim := filepath.Join(t.TempDir(), "victim")
+	if err := os.WriteFile(victim, []byte("original"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Deterministic dest for ("attX","a.bin") is "<dir>/attX__a.bin".
+	dest := filepath.Join(dir, "attX__a.bin")
+	if err := os.Symlink(victim, dest); err != nil {
+		t.Fatal(err)
+	}
+
+	content := bytes.Repeat([]byte("Z"), inlineAttachmentMaxBytes+1)
+	if _, err := writeAttachmentStaging("attX", "a.bin", content); err == nil {
+		t.Fatal("expected writeAttachmentStaging to refuse a symlink dest (O_NOFOLLOW)")
+	}
+	if got, _ := os.ReadFile(victim); string(got) != "original" {
+		t.Errorf("symlink target was overwritten through the staging write: %q", got)
+	}
+}
+
+// PROTO-135 — SweepStagingOlderThan removes files older than the cutoff
+// and leaves fresh ones, so on-disk plaintext doesn't outlive retention.
+func TestSweepStagingOlderThan(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	content := bytes.Repeat([]byte("A"), inlineAttachmentMaxBytes+1)
+
+	old, err := writeAttachmentStaging("attOld", "old.bin", content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	past := time.Now().Add(-60 * 24 * time.Hour)
+	if err := os.Chtimes(old, past, past); err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := writeAttachmentStaging("attNew", "new.bin", content)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	removed, err := SweepStagingOlderThan(time.Now().Add(-30 * 24 * time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed != 1 {
+		t.Errorf("removed = %d, want 1", removed)
+	}
+	if _, err := os.Stat(old); !os.IsNotExist(err) {
+		t.Errorf("stale staging file was not removed")
+	}
+	if _, err := os.Stat(fresh); err != nil {
+		t.Errorf("fresh staging file was wrongly removed: %v", err)
+	}
+}
+
+// A missing staging dir is a no-op, not an error.
+func TestSweepStagingOlderThan_NoDir(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	removed, err := SweepStagingOlderThan(time.Now())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if removed != 0 {
+		t.Errorf("removed = %d, want 0", removed)
+	}
 }
