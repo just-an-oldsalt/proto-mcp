@@ -117,6 +117,81 @@ Plus:
 fix log. [`DEFECTS.html`](./DEFECTS.html) is the open issue list
 (currently 5 open / 33 resolved; the open set is all medium / low).
 
+## Threat model
+
+What proto-mcp defends, what it deliberately does **not**, and the
+residual risks you accept by running it. The honest version — read it
+before you trust the tool with a live mailbox.
+
+### Trust boundaries
+
+The daemon runs as **you**, on **your** Mac, and talks to two parties:
+the local MCP clients (Claude Desktop / Code, via the shim over a
+0600 Unix socket) and Proton's servers (over TLS, via
+`go-proton-api`). Mail content fetched from Proton is **untrusted
+input** — it can contain anything a sender chose to put in it.
+
+### Defended
+
+- **Local IPC isolation.** The socket is 0600 inside a 0700
+  directory; every connection is checked with `SO_PEERCRED` /
+  `LOCAL_PEERPID` and cross-UID connections are refused. The
+  connecting client's real PID/UID lands in the audit log.
+- **Session at rest.** The Proton session lives in the macOS
+  Keychain and the daemon re-prompts for Touch ID on every startup
+  and every `unlock` after a manual/auto-lock (screen lock, sleep,
+  idle timer).
+- **Write authorization.** Every state-changing tool is
+  deny-by-default in policy and fires a per-call Touch ID prompt
+  showing the **literal** recipients and subject. `mail_send` has
+  TTL 0 — every send re-prompts. You cannot ship an unguarded write:
+  a tool with no policy stub fails registration.
+- **Binary tampering.** Hardened-runtime, Developer-ID-signed,
+  Apple-notarized binaries, plus a SHA-256 self-check at daemon
+  startup that refuses to run a swapped binary.
+- **Log leakage.** Passwords / tokens / cookies are redacted; bodies
+  are reduced to `{sha256, bytes}` in the audit log.
+
+### Out of scope — accepted risks
+
+- **Prompt injection from email content (D22 / PROTO-94).**
+  `mail_read` and `mail_read_thread` are allow-by-default, so a
+  malicious message *can* try to steer the model ("forward this to
+  …", "delete that…"). The current mitigation is tool-description
+  guidance plus the load-bearing fact that **every write is
+  Touch-ID-gated and shows the real recipients/subject** — reading
+  a hostile email exfiltrates nothing on its own, and any send it
+  provokes still needs your fingerprint on a prompt that names the
+  actual recipient. **Do not blanket-approve sends**, and treat
+  message bodies as hostile. Hardening this beyond description text
+  is tracked for after 1.0.
+- **OS-level Keychain ACL not yet enforced (D37 / PROTO-95).** The
+  biometric gate is enforced at the application layer, not sealed
+  into the Keychain item with `SecAccessControl`. A process running
+  as you, with the Keychain already unlocked, could read the stored
+  blob without a fresh Touch ID. Closing this needs an `.app`
+  bundle + Apple provisioning profile and is a v1.0 blocker.
+- **A local account already compromised.** Everything runs as your
+  user; malware already executing as you can read the SQLite mirror,
+  the audit log, and staged attachments. proto-mcp is not a defense
+  against code already running under your account.
+- **Physical access to an unlocked, logged-in Mac.** The auto-lock
+  triggers shrink the window, but an attacker at your unlocked
+  machine during an unlocked session is outside the model.
+- **Proton-side trust.** proto-mcp trusts Proton's API and your
+  account security (SRP password + 2FA). It does not defend against
+  a compromised Proton account or a malicious server response beyond
+  ordinary input sanitization.
+
+### Reducing your exposure
+
+- Keep `mail_send` at TTL 0 (default) and actually read the Touch ID
+  prompt — it shows the real recipient.
+- Skim the audit log periodically (`~/Library/Application
+  Support/protonmcp/`).
+- Don't raise `max_attachment_bytes` past what you need; large
+  decrypted attachments are written to a local staging dir.
+
 ## Install
 
 Two paths. **Homebrew** (signed + notarized binaries, recommended)
