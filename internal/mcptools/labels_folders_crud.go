@@ -3,12 +3,56 @@ package mcptools
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"strings"
 
 	gpa "github.com/ProtonMail/go-proton-api"
 
 	"github.com/just-an-oldsalt/proto-mcp/internal/mcp"
 	"github.com/just-an-oldsalt/proto-mcp/internal/store"
 )
+
+// protonAccentColors is Proton's fixed label/folder colour palette —
+// the ACCENT_COLORS set from ProtonMail/WebClients
+// packages/shared/lib/colors.ts (label create/update in the Proton web
+// client only ever sends a value from this list). The Proton API rejects
+// any colour outside the palette with `422 Invalid color (Code=2001)`
+// (D41). We validate client-side so the model gets an actionable error
+// naming the accepted values instead of an opaque 422 after a wasted
+// network round-trip.
+var protonAccentColors = []string{
+	"#8080FF", "#DB60D6", "#EC3E7C", "#F78400", "#936D58",
+	"#5252CC", "#A839A4", "#BA1E55", "#C44800", "#54473F",
+	"#415DF0", "#179FD9", "#1DA583", "#3CBB3A", "#B4A40E",
+	"#273EB2", "#0A77A6", "#0F735A", "#258723", "#807304",
+}
+
+var protonAccentColorSet = func() map[string]struct{} {
+	m := make(map[string]struct{}, len(protonAccentColors))
+	for _, c := range protonAccentColors {
+		m[c] = struct{}{}
+	}
+	return m
+}()
+
+// normalizeLabelColor validates a user-supplied colour against Proton's
+// fixed palette (case-insensitively) and returns the canonical
+// upper-case form Proton stores. Empty input is allowed — Proton assigns
+// a default colour when none is given. A non-palette value returns an
+// error listing the accepted set so the caller can retry without a
+// round-trip to the API (D41).
+func normalizeLabelColor(color string) (string, error) {
+	if color == "" {
+		return "", nil
+	}
+	up := strings.ToUpper(strings.TrimSpace(color))
+	if _, ok := protonAccentColorSet[up]; !ok {
+		return "", fmt.Errorf(
+			"color %q is not one of Proton's accepted palette values; choose one of: %s",
+			color, strings.Join(protonAccentColors, " "))
+	}
+	return up, nil
+}
 
 // labels_create / _update / _delete and folders_create / _update /
 // _delete are six tools backed by three SDK methods. Proton unifies
@@ -203,9 +247,13 @@ func makeCreateHandler(deps Deps, toolName string, lt gpa.LabelType, _ int) mcp.
 		if in.Name == "" {
 			return nil, mcp.NewError(mcp.CodeInvalidParams, toolName+": name is required")
 		}
+		color, err := normalizeLabelColor(in.Color)
+		if err != nil {
+			return nil, mcp.NewError(mcp.CodeInvalidParams, toolName+": "+err.Error())
+		}
 		req := gpa.CreateLabelReq{
 			Name:     in.Name,
-			Color:    in.Color,
+			Color:    color,
 			Type:     lt,
 			ParentID: in.ParentID,
 		}
@@ -235,9 +283,15 @@ func makeUpdateHandler(deps Deps, toolName string, requiredType int) mcp.Handler
 			return nil, mcp.NewError(mcp.CodeInvalidParams,
 				toolName+": id refers to a different label type")
 		}
+		// Validate a caller-supplied colour against the palette before
+		// the API call (D41). Empty → keep the current colour.
+		normColor, cerr := normalizeLabelColor(in.Color)
+		if cerr != nil {
+			return nil, mcp.NewError(mcp.CodeInvalidParams, toolName+": "+cerr.Error())
+		}
 		req := gpa.UpdateLabelReq{
 			Name:     pickStr(in.Name, current.Name),
-			Color:    pickStr(in.Color, current.Color),
+			Color:    pickStr(normColor, current.Color),
 			ParentID: in.ParentID,
 		}
 		label, err := deps.Session.Client.UpdateLabel(ctx.Std, in.ID, req)
@@ -298,7 +352,7 @@ const crudCreateSchema = `{
 	"type": "object",
 	"properties": {
 		"name":      {"type": "string"},
-		"color":     {"type": "string", "description": "Hex color like #aabbcc"},
+		"color":     {"type": "string", "description": "Optional. Must be one of Proton's fixed palette colors (else the API rejects it): #8080FF #DB60D6 #EC3E7C #F78400 #936D58 #5252CC #A839A4 #BA1E55 #C44800 #54473F #415DF0 #179FD9 #1DA583 #3CBB3A #B4A40E #273EB2 #0A77A6 #0F735A #258723 #807304. Omit to let Proton pick a default."},
 		"parent_id": {"type": "string", "description": "Parent folder id for nesting (folders only)"}
 	},
 	"required": ["name"],
@@ -310,7 +364,7 @@ const crudUpdateSchema = `{
 	"properties": {
 		"id":        {"type": "string"},
 		"name":      {"type": "string"},
-		"color":     {"type": "string"},
+		"color":     {"type": "string", "description": "Optional. Must be one of Proton's fixed palette colors: #8080FF #DB60D6 #EC3E7C #F78400 #936D58 #5252CC #A839A4 #BA1E55 #C44800 #54473F #415DF0 #179FD9 #1DA583 #3CBB3A #B4A40E #273EB2 #0A77A6 #0F735A #258723 #807304. Omit to keep the current color."},
 		"parent_id": {"type": "string"}
 	},
 	"required": ["id"],
