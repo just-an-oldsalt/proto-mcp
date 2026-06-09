@@ -177,7 +177,7 @@ func Attr(a slog.Attr) slog.Attr {
 //   - sensitiveKeys → string "[REDACTED]"
 //   - bodyKeys      → object {"sha256": "<hex>", "bytes": <int>}
 //   - other         → unchanged, but string VALUES still go through
-//                     looksLikeToken
+//     looksLikeToken
 //
 // If the input isn't valid JSON we return it unchanged with a
 // best-effort string redaction — better to log the row imperfectly
@@ -210,6 +210,14 @@ func Body(text string) (sha256hex string, byteLen int) {
 // heuristic. Same threshold as the inline version in old logging.go:
 // ≥32 chars, all base64url + optional dots, no whitespace/slashes.
 func LooksLikeToken(s string) bool { return looksLikeToken(s) }
+
+// Error scrubs embedded tokens out of a free-form error string before
+// it lands in the durable audit log. SDK errors and helper stderr can
+// carry quoted JSON snippets with access/refresh tokens; the audit
+// error_msg channel never passed through the D19 scrubber until now
+// (PROTO-136). Returns the input unchanged if nothing token-shaped is
+// found.
+func Error(s string) string { return scrubEmbeddedTokens(s) }
 
 // scrubEmbeddedTokens scrubs tokens that appear INSIDE a larger
 // string — typically a wrapped error message or a quoted JSON
@@ -309,7 +317,14 @@ func redactValue(v any) any {
 		if looksLikeToken(x) {
 			return "[REDACTED-VALUE]"
 		}
-		return x
+		// PROTO-136: looksLikeToken bails on any string containing a
+		// space / slash / quote, so a token embedded in a larger
+		// value (`upstream said {"refreshToken":"<jwt>"}`) or a
+		// standard (non-url-safe) base64 credential containing '/'
+		// slips through. scrubEmbeddedTokens (the D19 backstop, until
+		// now wired only into the slog path) catches both. This brings
+		// the durable args_json audit column to parity with slog.
+		return scrubEmbeddedTokens(x)
 	default:
 		return v
 	}
