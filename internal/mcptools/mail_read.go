@@ -133,14 +133,17 @@ func normalizedFormat(f string) string {
 // body_format. Default ("both") returns both; trimming lets the
 // caller cut prompt size when it matters.
 func applyFormat(out *readResult, text, html, format string) {
+	// PROTO-138: fence the body as untrusted, sender-controlled data.
+	// Done here (result construction) not at cache-write, so the stored
+	// body stays raw and only what's handed to the model is fenced.
 	switch format {
 	case "text":
-		out.Text = text
+		out.Text = wrapUntrustedBody(text)
 	case "html":
-		out.HTML = html
+		out.HTML = wrapUntrustedBody(html)
 	default:
-		out.Text = text
-		out.HTML = html
+		out.Text = wrapUntrustedBody(text)
+		out.HTML = wrapUntrustedBody(html)
 	}
 }
 
