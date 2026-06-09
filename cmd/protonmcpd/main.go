@@ -79,7 +79,16 @@ func main() {
 	// through slog because that's normal daemon telemetry.
 	if err := VerifyBinaryIntegrity(slog.Default()); err != nil {
 		fmt.Fprintln(os.Stderr, "refusing to start:", err.Error())
-		os.Exit(1)
+		// PROTO-113: exit 0, not 1. Under the LaunchAgent's
+		// KeepAlive{SuccessfulExit:false}, a non-zero exit is treated
+		// as a crash and respawned every ~10s — turning a hash
+		// mismatch (e.g. the binary was upgraded without re-running
+		// `protonmcp daemon install`) into a silent crash loop that
+		// burns CPU and floods daemon.log. The failure is
+		// unrecoverable without a human (restore the binary or re-run
+		// install), so exit cleanly and let launchd leave the daemon
+		// down — same rationale as the ErrLoginRequired path below (D44).
+		os.Exit(0)
 	}
 
 	if err := run(); err != nil {

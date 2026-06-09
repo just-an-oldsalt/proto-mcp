@@ -29,10 +29,11 @@ import (
 //   * File missing → log warning, continue. Older installs that
 //     predate Phase 7/C won't have the file; we don't break them.
 //     A fresh `protonmcp daemon install` writes the file.
-//   * Hash mismatch → refuse to start with a clear error to stderr.
-//     launchd's KeepAlive will retry but every retry hits the same
-//     failure, so the daemon stays down. Operator either restores
-//     the original binary or re-runs install.
+//   * Hash mismatch → refuse to start with a clear error to stderr,
+//     then exit 0 (PROTO-113) so launchd's
+//     KeepAlive{SuccessfulExit:false} leaves the daemon down instead
+//     of respawning it into the same failure every ~10s. Operator
+//     either restores the original binary or re-runs install.
 //   * Format error in the file → treat as missing (warn + continue).
 //
 // This is defense-in-depth: macOS code signing (Phase 7/C signing
