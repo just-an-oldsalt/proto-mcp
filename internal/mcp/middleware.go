@@ -94,16 +94,16 @@ func (m *Middleware) ensureRate() {
 // runTool is the per-call pipeline that replaces the inline
 // t.Handler(...) call at the bottom of handleToolsCall.
 //
-//	1. Resolve caller identity (cached for the life of the
-//	   process).
-//	2. Begin an audit row with redacted args + the upcoming
-//	   policy decision.
-//	3. Ask the policy engine. deny → fill row, return ErrorResult.
-//	4. If prompt → ask the broker. ErrUserCanceled / ErrAuthFailed
-//	   → fill row, return ErrorResult.
-//	5. Run the tool handler. recover() in the defer converts panics
-//	   to outcome=error so a buggy handler can't crash the daemon.
-//	6. Complete the audit row.
+//  1. Resolve caller identity (cached for the life of the
+//     process).
+//  2. Begin an audit row with redacted args + the upcoming
+//     policy decision.
+//  3. Ask the policy engine. deny → fill row, return ErrorResult.
+//  4. If prompt → ask the broker. ErrUserCanceled / ErrAuthFailed
+//     → fill row, return ErrorResult.
+//  5. Run the tool handler. recover() in the defer converts panics
+//     to outcome=error so a buggy handler can't crash the daemon.
+//  6. Complete the audit row.
 //
 // The function NEVER returns a *Error for tool-execution failures —
 // those land in ToolResult.isError so the LLM sees the message,
@@ -178,7 +178,11 @@ func (m *Middleware) runTool(ctx context.Context, t Tool, args json.RawMessage, 
 			jrErr = nil
 		}
 		if m.audit != nil {
-			m.audit.Complete(ctx, auditID, outcome, approvalSource, errMsg, time.Since(started))
+			// PROTO-136: errMsg can be a raw SDK error / helper stderr
+			// string carrying embedded tokens; scrub before it reaches
+			// the durable audit DB + JSONL (parity with the redacted
+			// args). All errMsg assignments funnel through here.
+			m.audit.Complete(ctx, auditID, outcome, approvalSource, redact.Error(errMsg), time.Since(started))
 		}
 	}()
 
