@@ -1,6 +1,6 @@
 module github.com/just-an-oldsalt/proto-mcp
 
-go 1.26.3
+go 1.26.4
 
 require (
 	github.com/ProtonMail/gluon v0.17.1-0.20260225115619-c0f05c033a4a
