@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	gpa "github.com/ProtonMail/go-proton-api"
 	"github.com/ProtonMail/gluon/rfc822"
+	gpa "github.com/ProtonMail/go-proton-api"
 	"github.com/ProtonMail/gopenpgp/v2/crypto"
 )
 
@@ -46,8 +46,21 @@ func buildSendPreferences(ctx context.Context, deps Deps, recipients []string, m
 			if err != nil || kr == nil {
 				return nil, fmt.Errorf("build keyring for internal %s: %w", addr, err)
 			}
+			// PROTO-125: a Proton recipient commonly has more than one
+			// address key (key rotation, multiple addresses). The full
+			// keyring makes AddTextPackage encrypt the body + attachment
+			// session keys to EVERY key, so each BodyKeyPacket carries
+			// multiple key packets — which the send API rejects with
+			// "Multiple packets present (Code=2001)". Reduce to the
+			// recipient's primary (first) key so each packet is single.
+			// Verified live: a 2-key recipient went from a hard 400 to a
+			// successful, readable delivery with this change.
+			primary, err := kr.FirstKey()
+			if err != nil {
+				return nil, fmt.Errorf("primary key for internal %s: %w", addr, err)
+			}
 			prefs.Encrypt = true
-			prefs.PubKey = kr
+			prefs.PubKey = primary
 			prefs.EncryptionScheme = gpa.InternalScheme
 
 		case gpa.RecipientTypeExternal:

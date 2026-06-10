@@ -486,13 +486,22 @@ func sendDraftByID(ctx mcp.Context, deps Deps, toolName, draftID string) (*mcp.T
 		addressStrings(draft.CCList),
 		addressStrings(draft.BCCList),
 	)
+	// PROTO-125: draft.Body is armored CIPHERTEXT (CreateDraft encrypted
+	// it to us). finalizeSend → AddTextPackage treats its body argument
+	// as PLAINTEXT and encrypts it again — double-encrypting the message
+	// into garbage. Decrypt it back to the original plaintext so the send
+	// path encrypts it exactly once, identical to the mail_send flow.
+	plainBody, err := decryptDraftBody(addrKR, draft.Body)
+	if err != nil {
+		return mcp.ErrorResult("%s: decrypt draft body: %v", toolName, err), nil
+	}
 	tpl := gpa.DraftTemplate{
 		Subject:  draft.Subject,
 		Sender:   draft.Sender,
 		ToList:   draft.ToList,
 		CCList:   draft.CCList,
 		BCCList:  draft.BCCList,
-		Body:     draft.Body,
+		Body:     plainBody,
 		MIMEType: draft.MIMEType,
 	}
 
@@ -704,6 +713,23 @@ func reencryptParentKeyPackets(addrKR *crypto.KeyRing, parent gpa.Message) ([]st
 		out = append(out, base64.StdEncoding.EncodeToString(enc))
 	}
 	return out, nil
+}
+
+// decryptDraftBody turns the armored ciphertext stored on a draft
+// (CreateDraft encrypts the body to the sender) back into the original
+// plaintext, so the send path can re-encrypt it once instead of
+// double-encrypting the ciphertext (PROTO-125). The draft body is
+// unsigned, so no verification keyring is passed.
+func decryptDraftBody(addrKR *crypto.KeyRing, armored string) (string, error) {
+	msg, err := crypto.NewPGPMessageFromArmored(armored)
+	if err != nil {
+		return "", fmt.Errorf("parse armored draft body: %w", err)
+	}
+	plain, err := addrKR.Decrypt(msg, nil, crypto.GetUnixTime())
+	if err != nil {
+		return "", fmt.Errorf("decrypt draft body: %w", err)
+	}
+	return plain.GetString(), nil
 }
 
 // finalizeSend is the shared "build packages → SendDraft → return"
