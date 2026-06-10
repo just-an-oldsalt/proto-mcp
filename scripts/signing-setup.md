@@ -233,8 +233,15 @@ The protected keychain path lives dormant in
 active). Only after `build-app.sh` produces a launchable bundle:
 
 1. Bump `blobVersion` and route the save path through `saveProtected`
-   (and add a v3→v4 migration, mirroring the v3→v4 migration already in
-   `migrate_test.go`).
+   **with graceful fallback** (and add a v3→v4 migration, mirroring the
+   one already in `migrate_test.go`). The protected path MUST NOT be a
+   hard requirement: a source / ad-hoc build (no provisioning profile)
+   gets `errSecMissingEntitlement (-34018)` from `saveProtected`, so on
+   that status fall back to the plain `AccessibleWhenUnlocked` path and
+   log once that the OS-level ACL is unavailable (the app-layer Touch ID
+   gate still applies). This keeps `make all` installs fully working —
+   only the signed Homebrew `.app` gets the Secure-Enclave-backed ACL;
+   source builds keep today's posture. Add a test for the fallback.
 2. Run the daemon **from inside the bundle** (`proto-mcp.app/Contents/MacOS/protonmcpd`)
    and confirm a keychain read actually triggers the OS Touch ID prompt
    and returns the blob (not OSStatus -34018). If it SIGKILLs at launch,
