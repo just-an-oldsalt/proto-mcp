@@ -29,6 +29,7 @@ import (
 	"github.com/just-an-oldsalt/proto-mcp/internal/policy"
 	protonclient "github.com/just-an-oldsalt/proto-mcp/internal/proton"
 	"github.com/just-an-oldsalt/proto-mcp/internal/store"
+	syncpkg "github.com/just-an-oldsalt/proto-mcp/internal/sync"
 )
 
 // Runtime is the bundle of state every long-running MCP-serving
@@ -80,6 +81,9 @@ type Runtime struct {
 	// process group but we cancel explicitly for cleanliness).
 	idleTracker     *idleTracker
 	lockwatchCancel func()
+
+	// bgSyncCancel stops the background sync ticker (PROTO-144) on Close.
+	bgSyncCancel func()
 
 	hupStop   chan struct{}
 	pidUnlink func()
@@ -471,7 +475,77 @@ func Setup(ctx context.Context, cfg SetupConfig) (*Runtime, error) {
 			"hint", "run `make lockwatch` from the repo root")
 	}
 
+	// PROTO-144 — background sync. Without this the local mirror only
+	// refreshes on an explicit mail_sync, so mail_list / mail_search
+	// serve stale data. Drain the event stream on a fixed cadence,
+	// skipping while locked (no session) and stopping on Close.
+	bgSyncCtx, bgSyncCancel := context.WithCancel(context.Background())
+	rt.bgSyncCancel = bgSyncCancel
+	go rt.runBackgroundSync(bgSyncCtx, logger)
+
 	return rt, nil
+}
+
+// backgroundSyncInterval / Timeout — the cadence at which the daemon
+// drains the Proton event stream into the local mirror, and the
+// per-tick deadline so a stalled sync can't pin the goroutine.
+const (
+	backgroundSyncInterval = 2 * time.Minute
+	backgroundSyncTimeout  = 90 * time.Second
+)
+
+// runBackgroundSync ticks until ctx is cancelled (Close), draining the
+// event stream each tick. PROTO-144.
+func (r *Runtime) runBackgroundSync(ctx context.Context, logger *slog.Logger) {
+	ticker := time.NewTicker(backgroundSyncInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			r.backgroundSyncOnce(ctx, logger)
+		}
+	}
+}
+
+// backgroundSyncOnce runs a single drain, honoring lock state (no
+// session while locked) and a per-tick timeout. Errors log Warn and the
+// loop continues — a transient sync failure isn't fatal to the daemon.
+func (r *Runtime) backgroundSyncOnce(ctx context.Context, logger *slog.Logger) {
+	if locked, _ := r.Locked(); locked {
+		return // resumes automatically after unlock
+	}
+	r.mu.RLock()
+	sess := r.Session
+	st := r.Store
+	r.mu.RUnlock()
+	if sess == nil || st == nil {
+		return
+	}
+
+	syncCtx, cancel := context.WithTimeout(ctx, backgroundSyncTimeout)
+	defer cancel()
+	res, err := syncpkg.RunOnce(syncCtx, sess, st)
+	if err != nil {
+		switch {
+		case errors.Is(err, syncpkg.ErrRefreshRequested):
+			logger.Warn("background sync: server requested a full refresh; run `protonmcp backfill`")
+		case ctx.Err() != nil:
+			// daemon shutting down — not an error
+		default:
+			logger.Warn("background sync failed", "err", err.Error())
+		}
+		return
+	}
+	if res != nil && (res.MessagesUpserted > 0 || res.MessagesDeleted > 0 ||
+		res.LabelsUpserted > 0 || res.LabelsDeleted > 0) {
+		logger.Info("background sync",
+			"messages_upserted", res.MessagesUpserted,
+			"messages_deleted", res.MessagesDeleted,
+			"labels_upserted", res.LabelsUpserted,
+			"labels_deleted", res.LabelsDeleted)
+	}
 }
 
 // Close tears down the runtime in reverse setup order. Safe to call
@@ -479,6 +553,9 @@ func Setup(ctx context.Context, cfg SetupConfig) (*Runtime, error) {
 func (r *Runtime) Close() {
 	if r == nil {
 		return
+	}
+	if r.bgSyncCancel != nil {
+		r.bgSyncCancel()
 	}
 	if r.lockwatchCancel != nil {
 		r.lockwatchCancel()
