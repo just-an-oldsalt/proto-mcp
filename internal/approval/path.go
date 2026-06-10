@@ -69,11 +69,14 @@ func resolveHelperPath(argv0 string) (string, error) {
 	)
 
 	for _, c := range candidates {
-		if isExecutable(c) {
+		if isExecutable(c) && ownerWritableOnly(c) {
 			return c, nil
 		}
 	}
-	return "", fmt.Errorf("touchid helper not found; tried: %v", candidates)
+	return "", fmt.Errorf(
+		"no trusted touchid helper found (must be executable and writable only "+
+			"by its owner — a group/world-writable helper or directory is a "+
+			"substitution vector, SECURITY PROTO-127); tried: %v", candidates)
 }
 
 func isExecutable(p string) bool {
@@ -88,6 +91,27 @@ func isExecutable(p string) bool {
 	// 0o100-only (user-execute only) because dev builds typically
 	// have 0o755 and packaged apps have 0o755 too.
 	return fi.Mode().Perm()&0o111 != 0
+}
+
+// ownerWritableOnly reports whether the helper at p AND its containing
+// directory are writable only by their owner (no group / other write
+// bit). The biometric helper is the root of the application-layer Touch
+// ID trust chain; if an attacker can write the binary — or drop a new
+// file into a group/world-writable directory on the candidate path
+// (e.g. an admin-group-writable /usr/local/bin) — they substitute a
+// `#!/bin/sh; exit 0` shim that the daemon execs as the verdict oracle,
+// while the audit log still attests approval_source=touchid (PROTO-127).
+func ownerWritableOnly(p string) bool {
+	for _, target := range []string{p, filepath.Dir(p)} {
+		fi, err := os.Stat(target)
+		if err != nil {
+			return false
+		}
+		if fi.Mode().Perm()&0o022 != 0 { // group-write or other-write
+			return false
+		}
+	}
+	return true
 }
 
 // (touch a sentinel error here to anchor the doc comment in path.go)

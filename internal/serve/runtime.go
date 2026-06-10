@@ -279,10 +279,20 @@ func Setup(ctx context.Context, cfg SetupConfig) (*Runtime, error) {
 	}
 
 	startupHelperPath, helperResolveErr := approval.ResolveHelperPath(os.Args[0])
-	gatedAcquire := cfg.AcquireSession
-	if helperResolveErr == nil {
-		gatedAcquire = newStartupGatedAcquire(startupHelperPath, cfg.AcquireSession, logger)
+	// PROTO-127: fail CLOSED. Previously a missing/untrusted helper fell
+	// through to an UNGATED session load — the daemon came up fully
+	// authenticated from the Keychain with no biometric check. Since the
+	// application-layer Touch ID gate is the only biometric barrier (the
+	// OS-level Keychain ACL, D37, is deferred), refuse to load the
+	// session without it rather than silently bypass.
+	if helperResolveErr != nil {
+		_ = st.Close()
+		return nil, fmt.Errorf(
+			"refusing to load the Proton session without a trusted Touch ID helper "+
+				"(would be an ungated session load — PROTO-127). Run `make touchid` "+
+				"or reinstall so the helper is present: %w", helperResolveErr)
 	}
+	gatedAcquire := newStartupGatedAcquire(startupHelperPath, cfg.AcquireSession, logger)
 
 	bundle, err := gatedAcquire(ctx)
 	if err != nil {
@@ -341,24 +351,18 @@ func Setup(ctx context.Context, cfg SetupConfig) (*Runtime, error) {
 		return nil, fmt.Errorf("audit writer: %w", err)
 	}
 
-	// 7. Approval broker — missing helper is non-fatal.
-	// Reuse the path resolution result from the Touch-ID-at-startup
-	// gate above so we only pgrep + stat once.
-	var broker *approval.Broker
-	if helperResolveErr != nil {
-		logger.Warn("touchid helper not found; prompted tools will be denied",
-			"hint", "run `make touchid` from the repo root",
-			"err", helperResolveErr.Error())
-	} else {
-		broker, err = approval.New(startupHelperPath, logger)
-		if err != nil {
-			_ = auditWriter.Close()
-			pidCleanup()
-			bundle.Close()
-			sess.Close()
-			_ = st.Close()
-			return nil, fmt.Errorf("approval broker: %w", err)
-		}
+	// 7. Approval broker. The helper is guaranteed present here — Setup
+	// fails closed above (PROTO-127) if it couldn't resolve a trusted
+	// one — so there's no nil-broker / "prompts denied" degraded mode.
+	// Reuse the resolved path so we only pgrep + stat once.
+	broker, err := approval.New(startupHelperPath, logger)
+	if err != nil {
+		_ = auditWriter.Close()
+		pidCleanup()
+		bundle.Close()
+		sess.Close()
+		_ = st.Close()
+		return nil, fmt.Errorf("approval broker: %w", err)
 	}
 
 	// 8. Caller resolver.
