@@ -177,3 +177,70 @@ binary, add to the Makefile's `SIGN_TARGETS` list (Phase 7/C
 sign target) so it gets signed alongside the rest. Forgetting
 this breaks library validation — the daemon's signed but a child
 helper isn't, and macOS refuses to launch the chain.
+
+## D37 provisioning (the .app bundle with the OS-level Keychain Touch ID ACL)
+
+The bare-binary flow above is Developer-ID signing + notarization only.
+D37 — storing the Proton session blob with an OS-enforced
+`SecAccessControl(userPresence)` ACL so a *read* triggers Touch ID at
+the kernel level — needs the **restricted `keychain-access-groups`
+entitlement**, and that entitlement is only honored when the binary
+carries an **Apple provisioning profile**. A profile can only be
+embedded in a bundle, so D37 = a `.app` (`scripts/build-app.sh`).
+
+Notarization (what your other projects do) is NOT enough — that just
+proves "not malware." The profile is a *separate* artifact that proves
+"Apple authorized this App ID to use this restricted entitlement."
+
+### One-time portal setup (developer.apple.com → Certificates, IDs & Profiles)
+
+1. **Identifiers → App IDs → +.** Register an App ID whose Bundle ID is
+   your reverse-DNS id (default `zone.dort.protonmcp`; finalize the name
+   first — PROTO-112). Under **Capabilities**, enable **Keychain Sharing**
+   and add the keychain group `zone.dort.protonmcp` (the same string the
+   entitlement uses, minus the team prefix).
+2. **Profiles → +.** Create a profile of type **Developer ID** (the
+   "outside the App Store" kind, NOT "Mac App Store" or "Development").
+   Select the App ID from step 1 and your Developer ID Application
+   certificate. Download the `.provisionprofile`.
+   - If the Developer ID profile type isn't offered for this App ID, it's
+     usually because the cert isn't a Developer ID Application cert, or
+     the capability wasn't saved — re-check step 1.
+3. Note your 10-char **Team ID** (the `(ABCDE12345)` in your
+   `Developer ID Application: …` identity).
+
+### Per-build
+
+```sh
+export DEVELOPER_ID='Developer ID Application: Your Name (ABCDE12345)'
+export TEAM_ID='ABCDE12345'
+export PROVISION_PROFILE=~/Downloads/proto_mcp_developerid.provisionprofile
+# export BUNDLE_ID=zone.dort.protonmcp   # only if you changed it
+./scripts/build-app.sh
+```
+
+`build-app.sh` assembles `build/proto-mcp.app` (all five binaries in
+`Contents/MacOS`), substitutes `Team.Bundle` into the entitlements,
+embeds the profile at `Contents/embedded.provisionprofile`, signs
+inside-out with the entitlements + hardened runtime, then notarizes and
+**staples** (an `.app` can be stapled; the bare CLIs can't).
+
+### Re-enabling the cgo path (do this LAST, after the bundle is proven)
+
+The protected keychain path lives dormant in
+`internal/keystore/access_control_darwin.{h,c,go}` and
+`keystore.go` (`blobVersion = 3`, plain `AccessibleWhenUnlocked` path
+active). Only after `build-app.sh` produces a launchable bundle:
+
+1. Bump `blobVersion` and route the save path through `saveProtected`
+   (and add a v3→v4 migration, mirroring the v3→v4 migration already in
+   `migrate_test.go`).
+2. Run the daemon **from inside the bundle** (`proto-mcp.app/Contents/MacOS/protonmcpd`)
+   and confirm a keychain read actually triggers the OS Touch ID prompt
+   and returns the blob (not OSStatus -34018). If it SIGKILLs at launch,
+   the profile/entitlement/bundle-id three-way match is off.
+3. Update the Homebrew cask to install the `.app` and point the
+   LaunchAgent at `Contents/MacOS/protonmcpd` instead of a bare binary.
+
+Until step 2 passes on a real machine, keep `blobVersion = 3` — a
+half-enabled protected path locks users out of their own session.
