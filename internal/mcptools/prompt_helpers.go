@@ -2,12 +2,106 @@ package mcptools
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/just-an-oldsalt/proto-mcp/internal/store"
 )
+
+// --- PROTO-126: faithful recipient display in send-approval dialogs ---
+
+// sanitizeField collapses CR / LF / tab in a single user-supplied value
+// to spaces. SanitizePromptText deliberately PRESERVES newlines (they're
+// the framework's field separators in the To/CC/BCC/Subject body), so a
+// recipient or subject containing "\nBCC: evil@x" would otherwise inject
+// a fake line and make the approval dialog misrepresent the send. We
+// neutralize newlines inside each value; only our own separators remain.
+func sanitizeField(s string) string {
+	return strings.NewReplacer("\r", " ", "\n", " ", "\t", " ").Replace(s)
+}
+
+// joinAddrs sanitizes each address (PROTO-126) then comma-joins for
+// display in an approval prompt.
+func joinAddrs(addrs []string) string {
+	out := make([]string, 0, len(addrs))
+	for _, a := range addrs {
+		out = append(out, sanitizeField(a))
+	}
+	return strings.Join(out, ", ")
+}
+
+// addressesFromJSON extracts the address strings out of a stored
+// to_json / cc_json array — shape [{"name":..,"address":..}] (see
+// internal/proton/messages.go marshalAddressList).
+func addressesFromJSON(s string) []string {
+	if s == "" {
+		return nil
+	}
+	var list []struct {
+		Address string `json:"address"`
+	}
+	if err := json.Unmarshal([]byte(s), &list); err != nil {
+		return nil
+	}
+	out := make([]string, 0, len(list))
+	for _, a := range list {
+		if a.Address != "" {
+			out = append(out, a.Address)
+		}
+	}
+	return out
+}
+
+// lookupReplyRecipients resolves, from the local mirror, the addresses a
+// reply / reply-all will actually go to, for the approval dialog
+// (PROTO-126). reply → the original sender; reply-all → sender + the
+// original To/CC. Returns "" if the parent isn't in the mirror so the
+// caller can fall back to a generic line.
+func lookupReplyRecipients(deps Deps, messageID string, replyAll bool) string {
+	if deps.Store == nil || messageID == "" {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), promptLookupTimeout)
+	defer cancel()
+	m, err := deps.Store.GetMessage(ctx, messageID)
+	if err != nil || m.FromAddress == "" {
+		return ""
+	}
+	line := "To: " + joinAddrs([]string{m.FromAddress})
+	if replyAll {
+		if cc := append(addressesFromJSON(m.ToJSON), addressesFromJSON(m.CcJSON)...); len(cc) > 0 {
+			line += "\nCC (minus your own addresses): " + joinAddrs(cc)
+		}
+	}
+	return line
+}
+
+// lookupDraftRecipients resolves a stored draft's recipients via the
+// server (best-effort) so the mail_send_draft dialog can name them
+// (PROTO-126) — the draft was created with decision:allow, so this is
+// where the human first sees who it goes to. Returns "" on any failure
+// (no/locked session, fetch error) so the caller falls back.
+func lookupDraftRecipients(deps Deps, draftID string) string {
+	if deps.Session == nil || deps.Session.Client == nil || draftID == "" {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), promptLookupTimeout)
+	defer cancel()
+	draft, err := deps.Session.Client.GetMessage(ctx, draftID)
+	if err != nil {
+		return ""
+	}
+	parts := []string{"To: " + joinAddrs(addressStrings(draft.ToList))}
+	if cc := addressStrings(draft.CCList); len(cc) > 0 {
+		parts = append(parts, "CC: "+joinAddrs(cc))
+	}
+	if bcc := addressStrings(draft.BCCList); len(bcc) > 0 {
+		parts = append(parts, "BCC: "+joinAddrs(bcc))
+	}
+	return strings.Join(parts, "\n")
+}
 
 // Phase 7/A — D36. Helpers that translate opaque IDs (message_id,
 // label_id, folder destination) into human-readable strings for the
