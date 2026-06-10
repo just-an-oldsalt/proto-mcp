@@ -11,13 +11,20 @@ literal recipients and subject before the message goes out. Every
 call writes a redacted row to a local audit log. Nothing leaves
 your laptop except the mail itself.
 
-> **Status:** `v1.0.0-alpha`. Phase 1–6 merged; Phase 7/A (UX),
-> 7/B (log rotation + polish), 7/C (signing + notarization +
-> binary integrity) all merged. 7/D (OS-level Keychain ACL) is
-> blocked on a provisioning profile and deferred to 7/E (.app
-> bundle). 7/E (Homebrew + AppVersion + release CI) in progress.
+> **Status:** `v1.0.0-alpha`. Phases 1–8 merged — read/search/send/labels,
+> the daemon + shim + launchd model, Developer ID signing + notarization,
+> a Homebrew tap, and full attachment support (Phase 8) are all live.
+> The remaining work toward a stable 1.0 is OS-level Keychain ACL
+> (D37, blocked on a `.app` bundle + provisioning profile; the
+> application-layer Touch ID gate is the active substitute), the
+> Phase 8/D attachment response shape, and a daemon crash-loop
+> follow-up. FIDO2 / passkey support is planned as Phase 9.
 > Personal-use, technical-audience early access. Read the caveats
 > below before installing.
+>
+> **Live tracker:** issues, defects, and roadmap now live in Jira
+> (project **PROTO**), which is the source of truth. `TODO.html` and
+> `DEFECTS.html` are retained as historical design records.
 
 ---
 
