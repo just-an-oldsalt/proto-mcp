@@ -1,6 +1,8 @@
 # Build output
 /bin/
 /dist/
+# scripts/build-app.sh assembles the D37 .app + entitlements here.
+/build/
 
 # Top-level built binaries (anchored so they don't match cmd/protonmcp/ etc.)
 /protonmcp
@@ -22,6 +24,8 @@ helpers/lockwatch/protonmcp-lockwatch
 .env
 .env.*
 !.env.example
+# direnv — local signing / D37 build env (Developer ID, profile path).
+.envrc
 
 # Editor / OS
 .DS_Store
