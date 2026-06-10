@@ -120,8 +120,14 @@ func mailSendDraft(deps Deps) mcp.Tool {
 		PromptBody: func(args json.RawMessage) (string, string) {
 			var in input
 			_ = json.Unmarshal(args, &in)
+			body := "Send draft " + sanitizeField(in.DraftID)
+			if recips := lookupDraftRecipients(deps, in.DraftID); recips != "" {
+				body += "\n" + recips
+			} else {
+				body += " to its stored recipients (could not resolve addresses for display)."
+			}
 			return mcp.SanitizePromptText("Approve mail_send_draft?", 120),
-				mcp.SanitizePromptText("Send draft "+in.DraftID+" to its stored recipients.", 4000)
+				mcp.SanitizePromptText(body, 4000)
 		},
 		Handler: func(ctx mcp.Context, raw json.RawMessage) (*mcp.ToolResult, error) {
 			var in input
@@ -167,7 +173,12 @@ func mailReply(deps Deps) mcp.Tool {
 		PromptBody: func(args json.RawMessage) (string, string) {
 			var in input
 			_ = json.Unmarshal(args, &in)
-			body := "Reply to message " + in.InReplyTo + " (recipient = original sender)."
+			body := "Reply to message " + sanitizeField(in.InReplyTo)
+			if recips := lookupReplyRecipients(deps, in.InReplyTo, false); recips != "" {
+				body += "\n" + recips
+			} else {
+				body += " (recipient = original sender)."
+			}
 			if decoded, err := decodeAndValidateAttachments(deps, in.Attachments); err == nil {
 				if s := attachmentsSummary(decoded); s != "" {
 					body += "\n" + s
@@ -218,7 +229,12 @@ func mailReplyAll(deps Deps) mcp.Tool {
 		PromptBody: func(args json.RawMessage) (string, string) {
 			var in input
 			_ = json.Unmarshal(args, &in)
-			body := "Reply-all to message " + in.InReplyTo + " (sender + original To/CC minus you)."
+			body := "Reply-all to message " + sanitizeField(in.InReplyTo)
+			if recips := lookupReplyRecipients(deps, in.InReplyTo, true); recips != "" {
+				body += "\n" + recips
+			} else {
+				body += " (sender + original To/CC minus you)."
+			}
 			if decoded, err := decodeAndValidateAttachments(deps, in.Attachments); err == nil {
 				if s := attachmentsSummary(decoded); s != "" {
 					body += "\n" + s
@@ -277,10 +293,10 @@ func mailForward(deps Deps) mcp.Tool {
 			var in forwardInput
 			_ = json.Unmarshal(args, &in)
 			body := fmt.Sprintf("Forward message %s\nTo: %s\nCC: %s\nBCC: %s",
-				in.ForwardOf,
-				strings.Join(in.To, ", "),
-				strings.Join(in.CC, ", "),
-				strings.Join(in.BCC, ", "))
+				sanitizeField(in.ForwardOf),
+				joinAddrs(in.To),
+				joinAddrs(in.CC),
+				joinAddrs(in.BCC))
 			if decoded, err := decodeAndValidateAttachments(deps, in.Attachments); err == nil {
 				if s := attachmentsSummary(decoded); s != "" {
 					body += "\n" + s
@@ -313,14 +329,14 @@ func mailForward(deps Deps) mcp.Tool {
 // Any explicit `attachments` provided on the input get uploaded
 // alongside.
 type forwardInput struct {
-	ForwardOf                 string                `json:"forward_of"`
-	To                        []string              `json:"to"`
-	CC                        []string              `json:"cc,omitempty"`
-	BCC                       []string              `json:"bcc,omitempty"`
-	BodyText                  string                `json:"body_text,omitempty"`
-	BodyHTML                  string                `json:"body_html,omitempty"`
-	Attachments               []sendAttachmentInput `json:"attachments,omitempty"`
-	IncludeParentAttachments  bool                  `json:"include_parent_attachments,omitempty"`
+	ForwardOf                string                `json:"forward_of"`
+	To                       []string              `json:"to"`
+	CC                       []string              `json:"cc,omitempty"`
+	BCC                      []string              `json:"bcc,omitempty"`
+	BodyText                 string                `json:"body_text,omitempty"`
+	BodyHTML                 string                `json:"body_html,omitempty"`
+	Attachments              []sendAttachmentInput `json:"attachments,omitempty"`
+	IncludeParentAttachments bool                  `json:"include_parent_attachments,omitempty"`
 }
 
 // ============================================================
@@ -400,10 +416,10 @@ func sendPromptBodyWithDeps(deps Deps, toolName string) func(json.RawMessage) (s
 		_ = json.Unmarshal(args, &in)
 		body := fmt.Sprintf(
 			"To: %s\nCC: %s\nBCC: %s\nSubject: %s",
-			strings.Join(in.To, ", "),
-			strings.Join(in.CC, ", "),
-			strings.Join(in.BCC, ", "),
-			in.Subject,
+			joinAddrs(in.To),
+			joinAddrs(in.CC),
+			joinAddrs(in.BCC),
+			sanitizeField(in.Subject),
 		)
 		if decoded, err := decodeAndValidateAttachments(deps, in.Attachments); err == nil {
 			if s := attachmentsSummary(decoded); s != "" {
