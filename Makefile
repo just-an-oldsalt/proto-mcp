@@ -14,6 +14,17 @@ TOUCHID       := $(TOUCHID_DIR)/protonmcp-touchid
 LOCKWATCH_DIR := helpers/lockwatch
 LOCKWATCH     := $(LOCKWATCH_DIR)/protonmcp-lockwatch
 
+# Build inputs for the Go binaries. NOT just *.go: the binaries also
+# compile cgo (.c/.h, e.g. internal/keystore/access_control_darwin.*)
+# and embed assets via //go:embed (internal/policy/default.yaml,
+# internal/store/migrations/*.sql). Listing those here means editing a
+# migration, the default policy, or the keychain cgo actually triggers a
+# rebuild — with a *.go-only prerequisite, `make all` would report
+# "nothing to be done" and ship a stale binary.
+GO_INPUTS := $(shell find cmd internal -type f \( \
+	-name '*.go' -o -name '*.c' -o -name '*.h' -o \
+	-name '*.yaml' -o -name '*.sql' \) 2>/dev/null)
+
 .PHONY: all
 all: $(PROTONMCP) $(PROTONMCPD) $(SHIM) $(TOUCHID) $(LOCKWATCH)
 
@@ -26,13 +37,13 @@ protonmcpd: $(PROTONMCPD)
 .PHONY: shim
 shim: $(SHIM)
 
-$(PROTONMCP): $(shell find cmd internal -name '*.go' 2>/dev/null) go.mod go.sum
+$(PROTONMCP): $(GO_INPUTS) go.mod go.sum
 	@mkdir -p $(BINDIR)
 	go build -o $@ ./cmd/protonmcp
 
 # Daemon variant. Phase 6/A: same internal/serve.Runtime, transport
 # is a Unix socket accept loop instead of stdin/stdout.
-$(PROTONMCPD): $(shell find cmd internal -name '*.go' 2>/dev/null) go.mod go.sum
+$(PROTONMCPD): $(GO_INPUTS) go.mod go.sum
 	@mkdir -p $(BINDIR)
 	go build -o $@ ./cmd/protonmcpd
 
