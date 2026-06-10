@@ -1,267 +1,105 @@
+<div align="center">
+
 # proto-mcp
 
-**A signed, notarized, Touch-ID-gated bridge between Proton Mail and
-Claude — running entirely on your Mac.**
+**Give Claude your inbox — without giving up control.**
 
-`proto-mcp` exposes 29 [Model Context Protocol](https://modelcontextprotocol.io)
-tools that let Claude Desktop and Claude Code read, search, compose,
-label, and send Proton Mail on your behalf. Every write is gated by
-a per-tool YAML policy and a macOS Touch ID prompt that shows the
-literal recipients and subject before the message goes out. Every
-call writes a redacted row to a local audit log. Nothing leaves
-your laptop except the mail itself.
+A signed, notarized, Touch-ID-gated bridge between **Proton Mail** and
+**Claude**, running entirely on your Mac. Claude reads, searches,
+organizes, drafts, and sends your mail through 31 [Model Context
+Protocol](https://modelcontextprotocol.io) tools — and every message
+that goes out needs your fingerprint on a prompt that names the real
+recipient.
 
-> **Status:** `v1.0.0-alpha`. Phases 1–8 merged — read/search/send/labels,
-> the daemon + shim + launchd model, Developer ID signing + notarization,
-> a Homebrew tap, and full attachment support (Phase 8) are all live.
-> The remaining work toward a stable 1.0 is OS-level Keychain ACL
-> (D37, blocked on a `.app` bundle + provisioning profile; the
-> application-layer Touch ID gate is the active substitute), the
-> Phase 8/D attachment response shape, and a daemon crash-loop
-> follow-up. FIDO2 / passkey support is planned as Phase 9.
-> Personal-use, technical-audience early access. Read the caveats
-> below before installing.
->
-> **Live tracker:** issues, defects, and roadmap now live in Jira
-> (project **PROTO**), which is the source of truth. `TODO.html` and
-> `DEFECTS.html` are retained as historical design records.
+Nothing leaves your laptop except the mail itself.
+
+![platform: macOS](https://img.shields.io/badge/platform-macOS%2013%2B-black?logo=apple)
+![Go 1.26.4+](https://img.shields.io/badge/Go-1.26.4%2B-00ADD8?logo=go&logoColor=white)
+![signed & notarized](https://img.shields.io/badge/Apple-signed%20%26%20notarized-success?logo=apple)
+![MCP](https://img.shields.io/badge/Model%20Context%20Protocol-ready-8A63D2)
+![license: GPLv3](https://img.shields.io/badge/license-GPLv3-blue)
+
+</div>
 
 ---
 
-## What you get
+## What it feels like
 
-| Class | Tools |
-|---|---|
-| **Read** | `mail_list`, `mail_search`, `mail_read`, `mail_read_thread`, `mail_list_attachments`, `labels_list`, `folders_list`, `account_whoami`, `mail_sync` |
-| **State** | `mail_mark_read`, `mail_mark_unread`, `mail_move`, `mail_label`, `mail_trash` |
-| **Labels & folders** | `labels_create`, `labels_update`, `labels_delete`, `folders_create`, `folders_update`, `folders_delete` |
-| **Drafts** | `mail_draft_create`, `mail_draft_update`, `mail_draft_delete`, `mail_draft_list` |
-| **Send** | `mail_send`, `mail_reply`, `mail_reply_all`, `mail_forward`, `mail_send_draft` |
-| **Reserved** | `mail_delete_permanent` (denied by default; opt-in via policy) |
+You talk to Claude. Claude talks to your mailbox. You stay in the loop on
+anything that matters.
 
-29 callable tools; one explicit deny-by-default.
+> *"What did I miss from the climbing group this week?"*
+> → Claude searches the local mirror, reads the thread, summarizes it. No prompt — reading is safe.
 
-## Architecture (Phase 6 daemon model)
+> *"File all the newsletters under Reading and mark them read."*
+> → Claude moves and marks them. Organizing is gated, but quiet.
 
-```
-                Claude Desktop          Claude Code
-                      │                       │
-              (stdio, JSON-RPC over NDJSON per MCP spec)
-                      │                       │
-                      ▼                       ▼
-              protonmcp-shim        protonmcp-shim       <- one per client
-                      │                       │            (tiny stdio↔socket forwarder)
-                      └────── Unix socket ────┘
-                              (0600, in ~/Library/Application Support/protonmcp/)
-                              ▼
-                       protonmcpd                          <- one long-running daemon
-                              │                              (LaunchAgent, KeepAlive)
-                              │
-              ┌──────────────┬──────────────┬──────────────┬──────────────┐
-              │              │              │              │              │
-        internal/proton  internal/store  internal/policy  internal/      internal/audit
-        (go-proton-api  (SQLite mirror,  (default.yaml + (Swift Touch  (SQLite + JSONL,
-          + GPG)        FTS5, body cache,  user override) ID helper)    rotated at 50MB)
-                        SQLCipher TBD)
-```
+> *"Reply to Alice that I'm in for Saturday, and send it."*
+> → A Touch ID prompt appears: **To: alice@example.com · Subject: Re: gear list**. You tap. It sends. You didn't.
 
-`protonmcp serve-stdio` is the old single-process mode — still
-runnable for power users, but the default install registers the
-shim with Claude clients so multiple clients share one daemon and
-one Touch-ID-unlocked session.
+Every read is served from a local SQLite mirror, so it's fast and works
+offline. Every **write** is governed by a per-tool policy. Every **send**
+re-prompts, every time, showing the literal recipients — that fingerprint
+tap is the line between "Claude drafted it" and "Claude sent it."
 
-## Security model
-
-The Keychain item that holds your Proton session is sealed behind
-**three layers**:
-
-1. **macOS Keychain encryption** — the standard at-rest protection
-   for any keychain item. Anything below assumes the user is logged
-   in and the keychain is unlocked.
-2. **Touch ID at session-acquire time** — the daemon prompts for
-   biometric (or password fallback per Apple's
-   `.deviceOwnerAuthentication`) on every startup AND every
-   `protonmcp unlock` after a manual or auto-lock. The prompt is
-   application-issued via the Swift helper. An OS-level
-   SecAccessControl on the keychain item was prototyped in 7/D but
-   reverted (needs an Apple-provisioned profile / .app bundle —
-   tracked as D37, deferred to 7/E).
-3. **Per-call approval** — every `prompt`-gated tool (everything
-   that writes) fires a custom NSAlert + Touch ID prompt showing
-   the literal recipients and subject. Cached approvals expire per
-   policy TTL; `mail_send` has TTL 0, so every send re-prompts.
-
-Plus:
-
-- **Hardened-runtime + Developer-ID-signed + Apple-notarized**
-  binaries. Gatekeeper accepts them without the "developer
-  unknown" dialog.
-- **SHA-256 binary integrity check** at daemon startup. If
-  `protonmcpd` was replaced between install and launch, the daemon
-  refuses to start.
-- **SO_PEERCRED / LOCAL_PEERPID** on every shim connection — the
-  daemon records the real connecting client's PID + UID in audit
-  rows.
-- **Default-deny policy** for unknown tools. Adding a new tool
-  without a policy stub fails registration; you can't accidentally
-  ship an unguarded write.
-- **Auto-lock triggers**: screen lock, sleep, and
-  `idle_lock_minutes`. Walking away from your laptop locks the
-  daemon; unlocking requires Touch ID.
-- **Redacted audit log**. Passwords / tokens / cookies become
-  `[REDACTED]`. Bodies become `{sha256, bytes}`. Recipient
-  addresses stay literal (so the prompt verification chain is
-  honest).
-
-[`SECURITY.md`](./SECURITY.md) has the audit trail and per-defect
-fix log. [`DEFECTS.html`](./DEFECTS.html) is the open issue list
-(currently 5 open / 33 resolved; the open set is all medium / low).
-
-## Threat model
-
-What proto-mcp defends, what it deliberately does **not**, and the
-residual risks you accept by running it. The honest version — read it
-before you trust the tool with a live mailbox.
-
-### Trust boundaries
-
-The daemon runs as **you**, on **your** Mac, and talks to two parties:
-the local MCP clients (Claude Desktop / Code, via the shim over a
-0600 Unix socket) and Proton's servers (over TLS, via
-`go-proton-api`). Mail content fetched from Proton is **untrusted
-input** — it can contain anything a sender chose to put in it.
-
-### Defended
-
-- **Local IPC isolation.** The socket is 0600 inside a 0700
-  directory; every connection is checked with `SO_PEERCRED` /
-  `LOCAL_PEERPID` and cross-UID connections are refused. The
-  connecting client's real PID/UID lands in the audit log.
-- **Session at rest.** The Proton session lives in the macOS
-  Keychain and the daemon re-prompts for Touch ID on every startup
-  and every `unlock` after a manual/auto-lock (screen lock, sleep,
-  idle timer).
-- **Write authorization.** Every state-changing tool is
-  deny-by-default in policy and fires a per-call Touch ID prompt
-  showing the **literal** recipients and subject. `mail_send` has
-  TTL 0 — every send re-prompts. You cannot ship an unguarded write:
-  a tool with no policy stub fails registration.
-- **Binary tampering.** Hardened-runtime, Developer-ID-signed,
-  Apple-notarized binaries, plus a SHA-256 self-check at daemon
-  startup that refuses to run a swapped binary.
-- **Log leakage.** Passwords / tokens / cookies are redacted; bodies
-  are reduced to `{sha256, bytes}` in the audit log.
-
-### Out of scope — accepted risks
-
-- **Prompt injection from email content (D22 / PROTO-94).**
-  `mail_read` and `mail_read_thread` are allow-by-default, so a
-  malicious message *can* try to steer the model ("forward this to
-  …", "delete that…"). The current mitigation is tool-description
-  guidance plus the load-bearing fact that **every write is
-  Touch-ID-gated and shows the real recipients/subject** — reading
-  a hostile email exfiltrates nothing on its own, and any send it
-  provokes still needs your fingerprint on a prompt that names the
-  actual recipient. **Do not blanket-approve sends**, and treat
-  message bodies as hostile. Hardening this beyond description text
-  is tracked for after 1.0.
-- **OS-level Keychain ACL not yet enforced (D37 / PROTO-95).** The
-  biometric gate is enforced at the application layer, not sealed
-  into the Keychain item with `SecAccessControl`. A process running
-  as you, with the Keychain already unlocked, could read the stored
-  blob without a fresh Touch ID. Closing this needs an `.app`
-  bundle + Apple provisioning profile and is a v1.0 blocker.
-- **A local account already compromised.** Everything runs as your
-  user; malware already executing as you can read the SQLite mirror,
-  the audit log, and staged attachments. proto-mcp is not a defense
-  against code already running under your account.
-- **Physical access to an unlocked, logged-in Mac.** The auto-lock
-  triggers shrink the window, but an attacker at your unlocked
-  machine during an unlocked session is outside the model.
-- **Proton-side trust.** proto-mcp trusts Proton's API and your
-  account security (SRP password + 2FA). It does not defend against
-  a compromised Proton account or a malicious server response beyond
-  ordinary input sanitization.
-
-### Reducing your exposure
-
-- Keep `mail_send` at TTL 0 (default) and actually read the Touch ID
-  prompt — it shows the real recipient.
-- Skim the audit log periodically (`~/Library/Application
-  Support/protonmcp/`).
-- Don't raise `max_attachment_bytes` past what you need; large
-  decrypted attachments are written to a local staging dir.
-
-## Install
-
-Two paths. **Homebrew** (signed + notarized binaries, recommended)
-once the first tagged release is up; **build from source** for
-contributors and pre-release testing.
-
-### Homebrew (Phase 7/E — pending first tagged release)
+## Quickstart
 
 ```sh
 brew tap just-an-oldsalt/proto-mcp
 brew install --cask proto-mcp
-protonmcp login                   # interactive: SRP + TOTP + key unlock
-protonmcp backfill                # one-time: drains every message envelope
-protonmcp daemon install          # registers + starts the LaunchAgent
-protonmcp install                 # registers shim with Claude Desktop + Claude Code
+
+protonmcp login            # Proton SRP password + 2FA + key unlock
+protonmcp backfill         # one-time: pull your message envelopes into the local mirror
+protonmcp daemon install   # register + start the background daemon
+protonmcp install          # connect it to Claude Desktop + Claude Code
 ```
 
-(The cask is `proto-mcp` with a hyphen; the binaries it installs
-keep their existing names `protonmcp`, `protonmcpd`, etc.)
+Restart Claude, and the tools show up under `protonmcp` in `/mcp`. That's
+it — signed, notarized binaries, no Gatekeeper warning, no network
+listener.
 
-The cask installs all five binaries into the Homebrew prefix's
-`bin/` (signed + notarized; no Gatekeeper warning). `brew uninstall
---cask proto-mcp` reverses everything; `--zap` also removes
-`~/Library/Application Support/protonmcp`, `~/Library/Logs/protonmcp`,
-and the LaunchAgent plist.
+> Prefer to build it yourself? See [Build from source](#build-from-source).
 
-### Build from source
+## What Claude can do
 
-Requires macOS 13+, [Go 1.26+](https://go.dev/dl/), and Xcode
-Command Line Tools (for `swiftc`).
+31 tools, grouped by what they touch. Reads run free; everything that
+changes state is deny-by-default and Touch-ID gated.
 
-```sh
-git clone https://github.com/just-an-oldsalt/proto-mcp.git
-cd proto-mcp
-make all                          # builds bin/* + Swift helpers
-./bin/protonmcp login             # interactive: SRP + TOTP + key unlock
-./bin/protonmcp backfill          # one-time: drains every message envelope
-./bin/protonmcp daemon install    # registers + starts the LaunchAgent
-./bin/protonmcp install           # registers shim with Claude Desktop + Claude Code
-```
+| | |
+|---|---|
+| 📖 **Read & search** | List, full-text search, read messages, reconstruct threads, list attachments, list labels/folders, sync. |
+| 🗂️ **Organize** | Mark read/unread, move, label, trash. |
+| 🏷️ **Labels & folders** | Full CRUD with colour-palette validation. |
+| ✍️ **Drafts** | Create, update, delete, list. |
+| 📤 **Send** | Send, reply, reply-all, forward, send-draft — each one re-prompts. |
+| 📎 **Attachments** | Decrypt and download, save to disk. |
 
-Source builds are ad-hoc signed by default. For a signed-locally
-build, see [`scripts/signing-setup.md`](./scripts/signing-setup.md).
+Full list with descriptions: **[docs/cli-reference.md](./docs/cli-reference.md)**.
 
-Restart Claude Desktop / Claude Code after either install path.
-The 29 tools show up under `protonmcp` in `/mcp`.
+## Why it's safe
 
-## A Touch ID prompt looks like this
+proto-mcp is built so that an LLM driving your mailbox is a *convenience*,
+never a *liability*. The guarantees that make that true:
 
-When Claude says "move 'Re: gear list' from inbox to archive," the
-NSAlert that fires says exactly that — not a redacted argument
-dump. Specifically:
+- **🔐 Your fingerprint on every send.** Each write fires a native prompt
+  showing the **literal** recipients and subject. `mail_send` has a TTL of
+  zero, so it re-prompts every single time. No blanket approvals for sends.
+- **🛡️ Default-deny by construction.** Unknown tools don't run. A tool
+  with no policy entry fails to register — you can't accidentally ship an
+  unguarded write.
+- **🍎 Signed, notarized, and self-checking.** Hardened-runtime,
+  Developer-ID-signed, Apple-notarized binaries, plus a SHA-256 integrity
+  check at startup that refuses to run a swapped daemon.
+- **🔒 Locks when you walk away.** Screen lock, sleep, or an idle timer
+  zero the in-memory session; resuming takes Touch ID.
+- **🧾 Honest, redacted audit log.** Every call is logged — secrets
+  scrubbed, bodies reduced to `{sha256, bytes}`, recipients kept literal
+  so the verification chain stays truthful.
+- **🏠 Local-only.** The daemon listens on a `0600` Unix socket, never a
+  network port. Mail content goes to Proton over TLS; nothing else leaves.
 
-```
-┌──────────────────────────────────────────────┐
-│ protonmcp-touchid is trying to              │
-│ move message 'Re: gear list' from inbox      │
-│ to Archive                                   │
-│                                              │
-│ Touch ID or enter your password to allow.   │
-│              [ Cancel ]    [ Touch ID ]      │
-└──────────────────────────────────────────────┘
-```
+What a prompt actually looks like:
 
-The verb phrase comes from a per-tool `PromptBody` closure
-(`internal/mcptools/prompt_helpers.go`) that looks up `message_id →
-Subject` and `label_id → Name` from the local SQLite mirror. You
-read what you're approving.
-
-For sends, the format is stricter:
 ```
 ┌──────────────────────────────────────────────┐
 │ Send mail_send?                              │
@@ -274,173 +112,115 @@ For sends, the format is stricter:
 └──────────────────────────────────────────────┘
 ```
 
-Body content is replaced with a SHA-256 reference in the audit log
-but the recipient list is always verbatim in the prompt — that's
-the verification surface you tap against.
+The full threat model — including the risks proto-mcp **doesn't** defend
+against — is in **[docs/security.md](./docs/security.md)**. Read it before
+you point this at a live mailbox.
 
-## Configuring policy
+## How it works
 
-Defaults are in [`internal/policy/default.yaml`](./internal/policy/default.yaml)
-(embedded into the binary). Override per-tool by creating
-`~/Library/Application Support/protonmcp/policy.yaml`:
+One background daemon holds your Touch-ID-unlocked session and serves
+every tool over a local socket. Claude Desktop and Claude Code each attach
+through a tiny forwarder, so they share one session: unlock once, use
+everywhere; lock once, everything locks.
+
+```
+Claude Desktop ─┐                          ┌─ go-proton-api + GPG
+Claude Code ────┼─ shim ─ socket ─ protonmcpd ┼─ SQLite mirror + FTS5
+                ┘     (0600)               └─ Touch ID + policy + audit
+```
+
+The full design — every binary, package, and the local mirror — is in
+**[docs/architecture.md](./docs/architecture.md)**.
+
+## Configuration
+
+Tune per-tool policy, rate limits, allowed recipients, the idle-lock
+timer, and the cached-body TTL with a single YAML file. For example, to
+cap LLM-driven sends and restrict them to one domain:
 
 ```yaml
 tools:
   mail_send:
     decision: prompt
-    confirm: true
-    rate_limit: 5/hour                       # cap LLM-driven sends
-    allowed_recipients: ["@mydomain.com"]    # restrict to one domain
-  mail_delete_permanent:
-    decision: deny                           # default; remove this to enable with prompt
-
-# Phase 7/A — auto-lock idle timer
-idle_lock_minutes: 30                        # lock if no tool call for 30 minutes (0 = disabled)
+    rate_limit: 5/hour
+    allowed_recipients: ["@mydomain.com"]
+idle_lock_minutes: 30
 ```
 
-Reload without restarting:
-```sh
-./bin/protonmcp policy reload      # SIGHUP to every running daemon / serve-stdio
-./bin/protonmcp policy show        # print the merged effective policy
-./bin/protonmcp policy validate ./my-policy.yaml
-```
+Full reference, plus locking and the audit/observability commands:
+**[docs/configuration.md](./docs/configuration.md)**.
 
-Rate-limit buckets persist to SQLite (Phase 6/E), so a daemon
-restart doesn't reset the per-hour cap.
+## Build from source
 
-## Locking
+Requires macOS 13+, [Go 1.26.4+](https://go.dev/dl/), and Xcode Command
+Line Tools (for `swiftc`).
 
 ```sh
-./bin/protonmcp lock      # SIGUSR1 — daemon zeros its in-memory session
-./bin/protonmcp unlock    # SIGUSR2 — Touch ID prompt re-acquires from Keychain
+git clone https://github.com/just-an-oldsalt/proto-mcp.git
+cd proto-mcp
+make all                          # builds bin/* + the Swift helpers
+./bin/protonmcp login
+./bin/protonmcp backfill
+./bin/protonmcp daemon install
+./bin/protonmcp install
 ```
 
-The daemon also auto-locks on:
-- macOS screen lock (`com.apple.screenIsLocked` distributed notification)
-- system sleep (`NSWorkspaceWillSleepNotification`)
-- idle timeout (`idle_lock_minutes` policy field; default 0 = disabled)
+Source builds are ad-hoc signed by default and work fully (the Touch ID
+gate, policy, audit, and lock/unlock all run the same). For a
+locally-signed build, see
+[`scripts/signing-setup.md`](./scripts/signing-setup.md).
 
-While locked, every tool call returns `daemon is locked (<reason>);
-run \`protonmcp unlock\` to resume`. No audit row is written for the
-attempt (logged at WARN instead).
+## Good to know
 
-## Observability
+- **macOS only.** The keystore and biometric helpers use
+  `Security.framework`, `LAContext`, and AppKit. Linux builds compile for
+  testing, but the auth flow won't work.
+- **Be a good Proton citizen.** proto-mcp currently sends Proton Bridge's
+  `AppVersion` header while a dedicated identifier is requested from Proton
+  (see [`docs/proton-appversion-request.md`](./docs/proton-appversion-request.md)).
+  Don't rate-abuse, scrape, or run multi-account automation through it —
+  anything that violates Proton's [Terms](https://proton.me/legal/terms)
+  is no less a violation for borrowing Bridge's header.
+- **Cached bodies are plaintext-in-SQLite.** Decrypted message bodies are
+  cached locally (TTL-bounded, `secure_delete` on). On a stolen, imaged
+  disk that's recoverable cleartext until purged. Envelope encryption
+  (SQLCipher) is a post-1.0 item. `protonmcp purge --older-than 7d
+  --vacuum` shrinks the window now.
+- **Personal use.** Built for one person and their mailbox on their Mac.
 
-Two log destinations, both auto-rotated at 50MB × 10 generations
-(Phase 7/B):
+## Documentation
 
-```sh
-# Tail the audit log (one JSON object per completed tool call)
-tail -f ~/Library/Application\ Support/protonmcp/audit.log
+| Doc | Contents |
+|---|---|
+| [docs/architecture.md](./docs/architecture.md) | The daemon model, binaries, packages, and local mirror. |
+| [docs/security.md](./docs/security.md) | Security layers + the full, honest threat model. |
+| [docs/configuration.md](./docs/configuration.md) | Policy YAML, locking, observability, purging. |
+| [docs/cli-reference.md](./docs/cli-reference.md) | Every CLI command and all 31 MCP tools. |
+| [SECURITY.md](./SECURITY.md) | Security policy + per-defect fix log / audit trail. |
+| [TESTING.md](./TESTING.md) | End-to-end validation playbook. |
 
-# Tail the daemon's slog output
-tail -f ~/Library/Logs/protonmcp/daemon.log
-```
-
-Or query the SQLite source of truth for richer analytics:
-
-```sh
-sqlite3 ~/Library/Application\ Support/protonmcp/store.db \
-  'SELECT tool, outcome, policy_decision, duration_ms
-     FROM audit_log
-    ORDER BY id DESC LIMIT 20;'
-```
-
-Every audit row has: tool name, caller PID + UID + binary, policy
-decision, outcome (ok / denied / error), approval source (touchid /
-cached / policy), error message (if any), duration in ms, and
-redacted args.
-
-## Caveats — read before installing
-
-### Plaintext bodies on disk (until Phase 8)
-
-When Claude reads a message via `mail_read`, the decrypted body
-caches in SQLite for 30 days (`protonmcp purge --older-than 7d` to
-shrink the window). On laptop theft + iCloud-restored disk imaging
-that's recoverable cleartext. The `secure_delete=on` pragma zeros
-deleted cells on the next page write; `protonmcp purge --vacuum`
-forces it immediately. SQLCipher / envelope encryption is Phase 8.
-
-### Proton AppVersion (resolved when Phase 7/E lands)
-
-Today, `proto-mcp` sends `AppVersion: macos-bridge@3.24.2` — Proton
-Bridge's identifier, not ours. Phase 7/E swaps in a legitimate
-`protonmcp@<version>` once Proton grants it (request email is in
-[`docs/proton-appversion-request.md`](./docs/proton-appversion-request.md)).
-Until then: **don't rate-abuse, scrape, or run multi-account
-automation through `proto-mcp`**. Anything that violates Proton's
-[Terms](https://proton.me/legal/terms) is no less violating because
-we're using Bridge's header.
-
-### macOS only
-
-`internal/keystore` uses `keybase/go-keychain` + cgo against
-`Security.framework`. (A `SecAccessControl` cgo wrapper sits
-dormant in `internal/keystore/access_control_darwin.{h,c,go}`,
-ready to re-enable once Phase 7/E lands the .app bundle + a
-provisioning profile that authorizes the required
-`keychain-access-groups` entitlement.) The Swift helpers need
-LAContext + AppKit + workspace notifications. Linux builds
-compile (testing only) but the auth flow won't work.
-
-### License
-
-GPLv3. We transitively depend on `proton-bridge` (also GPLv3) via
-`go-proton-api`; that constrains us. See [`LICENSE`](./LICENSE).
-
-## Testing
-
-For end-to-end validation see [`TESTING.md`](./TESTING.md) — a
-sectioned playbook another agent (or you) can run to validate
-build, signing, daemon lifecycle, Touch ID, lock/unlock, per-tool
-correctness, audit log, and defect regressions. Reports go directly
-into `DEFECTS.html` using the existing D-numbering.
-
-For day-to-day development:
-```sh
-make test         # go test ./...
-make race         # go test -race ./...
-make verify-sign  # codesign --verify each binary (after make sign)
-```
-
-## Project status
-
-| Phase | Scope | Status |
-|---|---|---|
-| 0–2 | Build, store, sanitize, sync | Merged |
-| 3 | MCP server + 9 read tools | Merged |
-| 4 | Policy + audit + Touch ID + middleware | Merged |
-| 5 | 20 write tools + rate limit + allowed_recipients | Merged |
-| 5.5 | Security audit follow-up (21 findings closed) | Merged |
-| 6 | Daemon + shim + launchd + lock/unlock + persistent rate-limit | All sub-PRs in flight |
-| 7 | Signing, notarization, Keychain ACL, Homebrew, AppVersion | 7/A + 7/B + 7/C merged; 7/D reverted (provisioning-profile gap); 7/E in progress |
-| 8 | SQLCipher / envelope encryption at rest | Planning |
-
-[`TODO.html`](./TODO.html) has the full per-phase plan and the
-backlog. [`DEFECTS.html`](./DEFECTS.html) is the truth about what's
-broken.
+Issues, defects, and roadmap are tracked in Jira (project **PROTO**), the
+source of truth. `TODO.html` and `DEFECTS.html` are retained as historical
+design records from the build-out.
 
 ## Contributing
 
-This is alpha software. PRs welcome but **please open an issue
-first** — most architectural direction is locked by the design spec
-in `TODO.html` and unsolicited big-scope PRs probably won't land.
-
-`.github/CODEOWNERS` defines required reviewers for security-load-
-bearing paths (`internal/redact/`, `internal/keystore/`,
+PRs welcome, but **please open an issue first** — most architectural
+direction is settled, and unsolicited big-scope PRs probably won't land.
+`.github/CODEOWNERS` defines required reviewers for the
+security-load-bearing paths (`internal/redact/`, `internal/keystore/`,
 `internal/policy/`, `internal/approval/`, `helpers/touchid/`,
 `helpers/lockwatch/`).
 
-## Acknowledgements
+## License & acknowledgements
 
-- [Proton AG](https://proton.me) for `proton-bridge` and
-  `go-proton-api`, on which the entire crypto + transport layer
-  rests. Working on a legitimate AppVersion grant; appreciate the
-  publish of a real Go client.
-- [Anthropic](https://anthropic.com) for the MCP specification and
-  the Claude clients this server targets.
-- Every defect in [`DEFECTS.html`](./DEFECTS.html) that took the
-  shape it did because someone — `cmd-r`, `claude-review`,
-  `claude-security-review`, or a live testing session — looked at
-  the same code more carefully than I would have on my own.
+GPLv3 — see [`LICENSE`](./LICENSE). proto-mcp depends transitively on
+`proton-bridge` (also GPLv3) via `go-proton-api`.
+
+- [**Proton AG**](https://proton.me) for `proton-bridge` and
+  `go-proton-api`, on which the entire crypto + transport layer rests.
+- [**Anthropic**](https://anthropic.com) for the Model Context Protocol
+  and the Claude clients this server targets.
+- Every defect that took the shape it did because `cmd-r`,
+  `claude-review`, `claude-security-review`, or a live testing session
+  looked at the code more carefully than I would have alone.

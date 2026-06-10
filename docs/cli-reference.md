@@ -1,0 +1,85 @@
+# CLI & tool reference
+
+## The `protonmcp` CLI
+
+Run `protonmcp <command>`. The commands you'll actually use day to day are
+`login`, `daemon`, and `install`; the rest are for inspection and
+maintenance.
+
+| Command | What it does |
+|---|---|
+| `login` | Run the full Proton login flow (SRP password + TOTP + key unlock) and save the session to the macOS Keychain. |
+| `logout` | Revoke the server-side session and delete the Keychain entry. |
+| `whoami` | Print an account summary. Resumes the saved session, or falls back to a one-time login. |
+| `backfill` | Drain message metadata into the local SQLite mirror. Flags: `--db`, `--yes`, `--limit`. |
+| `read` | Print a single decrypted message (text + sanitized HTML) as JSON. Flags: `--db`, `--refresh`. |
+| `search` | Query the local mirror. DSL: `from:`, `to:`, `subject:`, `in:`, `before:`, `after:`, `has:attachment`, plus bare full-text terms. Flags: `--db`, `--limit`, `--offset`. |
+| `sync` | Drain pending events into the mirror (incremental). Flags: `--db`. |
+| `serve-stdio` | Run as an MCP server over stdin/stdout (single-process mode). Prefer `install`. |
+| `install` | Register proto-mcp with Claude Desktop and/or Claude Code. Flags: `--client {desktop\|code\|all}`, `--dry-run`. |
+| `uninstall` | Remove proto-mcp from the selected client config(s). |
+| `daemon` | `install` / `uninstall` / `start` / `stop` / `restart` / `status` — manage the LaunchAgent. |
+| `policy` | `reload` / `show` / `validate` — see [configuration.md](./configuration.md). |
+| `lock` / `unlock` | Lock or Touch-ID-unlock the running daemon. |
+| `purge` | Trim the cached-body window. Flags: `--older-than`, `--vacuum`. |
+
+## The 31 MCP tools
+
+These are what Claude calls. Reads are allow-by-default; every write is
+deny-by-default and Touch-ID gated (see [security.md](./security.md)).
+
+### Read & search (9)
+
+| Tool | Purpose |
+|---|---|
+| `account_whoami` | Account summary for the active session. |
+| `mail_list` | List messages with filters (folder, label, read state…). |
+| `mail_search` | Full-text + structured search over the local mirror. |
+| `mail_read` | Read one message (decrypted text + sanitized HTML). |
+| `mail_read_thread` | Reconstruct and read a full conversation. |
+| `mail_list_attachments` | List a message's attachments (names, sizes, types). |
+| `labels_list` | List labels. |
+| `folders_list` | List folders. |
+| `mail_sync` | Pull the latest changes from Proton into the mirror. |
+
+### Organize (5)
+
+| Tool | Purpose |
+|---|---|
+| `mail_mark_read` | Mark message(s) read. |
+| `mail_mark_unread` | Mark message(s) unread. |
+| `mail_move` | Move message(s) to a folder. |
+| `mail_label` | Add/remove labels on message(s). |
+| `mail_trash` | Move message(s) to Trash. |
+
+### Labels & folders (6)
+
+`labels_create`, `labels_update`, `labels_delete`,
+`folders_create`, `folders_update`, `folders_delete` — full CRUD, with
+colour-palette validation on create/update.
+
+### Drafts (4)
+
+`mail_draft_create`, `mail_draft_update`, `mail_draft_delete`,
+`mail_draft_list`.
+
+### Send (5)
+
+| Tool | Purpose |
+|---|---|
+| `mail_send` | Compose and send a new message. TTL 0 — always re-prompts. |
+| `mail_send_draft` | Send an existing draft. |
+| `mail_reply` | Reply to the sender. |
+| `mail_reply_all` | Reply to everyone. |
+| `mail_forward` | Forward a message (carries attachments). |
+
+### Attachments (2)
+
+| Tool | Purpose |
+|---|---|
+| `mail_download_attachment` | Decrypt an attachment and return it as `{path, sha256, size_bytes}`. |
+| `mail_save_attachment` | Save a decrypted attachment to a chosen path. |
+
+> `mail_delete_permanent` exists but is **denied by default**. It is not
+> registered as a callable tool unless you explicitly enable it in policy
+> with a prompt — irreversible deletion is opt-in.
