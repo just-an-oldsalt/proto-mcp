@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  D37 .app-bundle entitlements (scripts/build-app.sh substitutes
+  __TEAM_ID__ and __BUNDLE_ID__). This is DISTINCT from the bare-binary
+  scripts/protonmcp.entitlements, which stays in use for the
+  non-bundled Homebrew tarball until the .app distribution lands.
+
+  keychain-access-groups is the restricted entitlement that unlocks the
+  OS-enforced Touch ID ACL. Its value must be "<TeamID>.<bundle-id>",
+  and that exact group must be authorized by the embedded provisioning
+  profile (App ID with Keychain Sharing capability). The cgo path in
+  internal/keystore/access_control_darwin.c stores the blob with
+  SecAccessControlCreateWithFlags(..., kSecAccessControlUserPresence),
+  which the data-protection keychain only honors when this entitlement
+  is present and profile-authorized — otherwise OSStatus -34018.
+-->
+<plist version="1.0">
+<dict>
+    <!-- Carried over from the bare-binary entitlements (Go/cgo runtime). -->
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+
+    <!-- D37: restricted. Requires the embedded provisioning profile. -->
+    <key>keychain-access-groups</key>
+    <array>
+        <string>__TEAM_ID__.__BUNDLE_ID__</string>
+    </array>
+</dict>
+</plist>

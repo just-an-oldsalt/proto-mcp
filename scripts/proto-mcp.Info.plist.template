@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Info.plist template for the D37 .app bundle (scripts/build-app.sh).
+
+  __BUNDLE_ID__ and __VERSION__ are substituted by build-app.sh. The
+  CFBundleIdentifier MUST match the App ID you registered in the Apple
+  Developer portal (with the Keychain Sharing capability) and the App ID
+  named in the embedded provisioning profile — otherwise the kernel
+  rejects the profile at launch.
+
+  CFBundleExecutable is the bundle's primary binary; the other products
+  (protonmcpd, protonmcp-shim, protonmcp-touchid, protonmcp-lockwatch)
+  ride along in Contents/MacOS and are launched by path. Only protonmcp
+  + protonmcpd actually touch the Keychain blob, but the whole bundle is
+  signed as a unit under one profile.
+
+  LSUIElement=true keeps the bundle from showing a Dock icon / menu bar
+  presence — it's a CLI/daemon payload, not a windowed app.
+-->
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>__BUNDLE_ID__</string>
+    <key>CFBundleName</key>
+    <string>proto-mcp</string>
+    <key>CFBundleDisplayName</key>
+    <string>proto-mcp</string>
+    <key>CFBundleExecutable</key>
+    <string>protonmcp</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>__VERSION__</string>
+    <key>CFBundleVersion</key>
+    <string>__VERSION__</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>13.0</string>
+    <key>LSUIElement</key>
+    <true/>
+</dict>
+</plist>
