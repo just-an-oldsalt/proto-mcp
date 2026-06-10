@@ -26,7 +26,7 @@ cask "proto-mcp" do
   desc "Local macOS MCP server bridging Proton Mail to Claude"
   homepage "https://github.com/just-an-oldsalt/proto-mcp"
 
-  depends_on macos: ">= :ventura"
+  depends_on macos: :ventura  # ">= Ventura"; bare symbol is Homebrew's required form (the ">= :ventura" string is deprecated)
   depends_on arch: :arm64  # initial release is Apple-silicon-only; Phase 8 adds amd64
 
   # The tarball lays everything in a single flat dir
