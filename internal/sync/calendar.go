@@ -2,6 +2,7 @@ package sync
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -21,12 +22,13 @@ import (
 // high-water mark rather than the shared event_cursor.
 const calendarMaxEditPrefix = "calendar_max_edit:"
 
-// CalendarRunResult summarizes a RunCalendarOnce pass.
+// CalendarRunResult summarizes a RunCalendarOnce / RunCalendarBackfill pass.
 type CalendarRunResult struct {
 	CalendarsUpserted int
 	CalendarsDeleted  int
 	EventsUpserted    int
 	EventsDeleted     int
+	EventsDecrypted   int // populated only by RunCalendarBackfill(decrypt=true)
 	Elapsed           time.Duration
 }
 
@@ -96,6 +98,74 @@ func RunCalendarOnce(ctx context.Context, sess *protonclient.Session, st *store.
 		"events_deleted", res.EventsDeleted,
 		"elapsed_ms", res.Elapsed.Milliseconds())
 	return res, nil
+}
+
+// RunCalendarBackfill seeds the mirror from scratch: it runs the normal
+// envelope sync, then (if decrypt) eagerly decrypts every event and fills
+// the decrypted columns so calendar_events FTS works immediately without
+// waiting for lazy per-read warming. Decrypt failures warn and continue —
+// one unreadable event must not abort the backfill. The CLI
+// `protonmcp calendar-backfill` drives this.
+func RunCalendarBackfill(ctx context.Context, sess *protonclient.Session, st *store.Store, decrypt bool) (*CalendarRunResult, error) {
+	start := time.Now()
+	res, err := RunCalendarOnce(ctx, sess, st)
+	if err != nil {
+		return res, err
+	}
+	if !decrypt {
+		return res, nil
+	}
+
+	cals, err := sess.Client.GetCalendars(ctx)
+	if err != nil {
+		return res, fmt.Errorf("get calendars: %w", err)
+	}
+	for _, c := range cals {
+		if err := ctx.Err(); err != nil {
+			return res, err
+		}
+		events, err := sess.Client.GetAllCalendarEvents(ctx, c.ID, nil)
+		if err != nil {
+			return res, fmt.Errorf("get events for calendar %s: %w", c.ID, err)
+		}
+		cache := protonclient.NewCalendarKeyCache()
+		for _, ev := range events {
+			detail, derr := sess.DecryptCalendarEvent(ctx, ev, cache)
+			if derr != nil {
+				slog.Warn("calendar backfill: decrypt failed", "event", ev.ID, "err", derr.Error())
+				continue
+			}
+			if ferr := st.FillCalendarEventDecrypted(ctx, ev.ID, toStoreDecrypted(detail)); ferr != nil {
+				slog.Warn("calendar backfill: fill failed", "event", ev.ID, "err", ferr.Error())
+				continue
+			}
+			res.EventsDecrypted++
+		}
+		cache.Clear()
+	}
+	res.Elapsed = time.Since(start)
+	return res, nil
+}
+
+// toStoreDecrypted maps a decrypted event detail to the store's decrypted
+// column set (attendees flattened to JSON).
+func toStoreDecrypted(d *protonclient.CalendarEventDetail) store.CalendarEventDecrypted {
+	out := store.CalendarEventDecrypted{
+		Summary:     d.Summary,
+		Location:    d.Location,
+		Description: d.Description,
+		Organizer:   d.Organizer,
+		Status:      d.Status,
+		RRULE:       d.RRULE,
+		IsRecurring: d.IsRecurring,
+		RawICal:     d.RawICal,
+	}
+	if len(d.Attendees) > 0 {
+		if b, err := json.Marshal(d.Attendees); err == nil {
+			out.AttendeesJSON = string(b)
+		}
+	}
+	return out
 }
 
 // applyCalendarEvents upserts events whose LastEditTime exceeds storedMax,
