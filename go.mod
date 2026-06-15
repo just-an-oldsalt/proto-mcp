@@ -6,6 +6,7 @@ require (
 	github.com/ProtonMail/gluon v0.17.1-0.20260225115619-c0f05c033a4a
 	github.com/ProtonMail/go-proton-api v0.4.1-0.20260319112440-799673ddc2db
 	github.com/ProtonMail/gopenpgp/v2 v2.9.0-proton
+	github.com/emersion/go-ical v0.0.0-20250609112844-439c63cef608
 	github.com/go-resty/resty/v2 v2.7.0
 	github.com/keybase/go-keychain v0.0.1
 	github.com/microcosm-cc/bluemonday v1.0.27
@@ -41,6 +42,7 @@ require (
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/sethvargo/go-retry v0.3.0 // indirect
 	github.com/sirupsen/logrus v1.9.3 // indirect
+	github.com/teambition/rrule-go v1.8.2 // indirect
 	gitlab.com/c0b/go-ordered-json v0.0.0-20201030195603-febf46534d5a // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	golang.org/x/crypto v0.50.0 // indirect
