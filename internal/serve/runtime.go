@@ -546,6 +546,23 @@ func (r *Runtime) backgroundSyncOnce(ctx context.Context, logger *slog.Logger) {
 			"labels_upserted", res.LabelsUpserted,
 			"labels_deleted", res.LabelsDeleted)
 	}
+
+	// Calendar sync rides the same tick + lock gate but is a separate
+	// poll (the event stream carries no calendar delta). A calendar
+	// failure is logged and ignored — it must not abort the mail sync.
+	calRes, calErr := syncpkg.RunCalendarOnce(syncCtx, sess, st)
+	if calErr != nil {
+		if ctx.Err() == nil {
+			logger.Warn("background calendar sync failed", "err", calErr.Error())
+		}
+		return
+	}
+	if calRes != nil && (calRes.EventsUpserted > 0 || calRes.EventsDeleted > 0 || calRes.CalendarsDeleted > 0) {
+		logger.Info("background calendar sync",
+			"events_upserted", calRes.EventsUpserted,
+			"events_deleted", calRes.EventsDeleted,
+			"calendars_deleted", calRes.CalendarsDeleted)
+	}
 }
 
 // Close tears down the runtime in reverse setup order. Safe to call
