@@ -158,6 +158,21 @@ func (s *Session) memberKeyring(members []gpa.CalendarMember) (string, *crypto.K
 	return "", nil, errors.New("proton: no calendar member matches an unlocked address keyring — re-login may be required")
 }
 
+// FetchAndDecryptCalendarEvent pulls one event from the API and decrypts
+// it — the calendar analogue of FetchAndDecryptMessage. Used by the
+// read/list tools on a cache miss. Pass nil for a one-off, or a shared
+// cache when decrypting several events from the same calendar.
+func (s *Session) FetchAndDecryptCalendarEvent(ctx context.Context, calID, eventID string, cache *CalendarKeyCache) (*CalendarEventDetail, error) {
+	if s == nil || s.Client == nil {
+		return nil, errors.New("proton: session is closed")
+	}
+	ev, err := s.Client.GetCalendarEvent(ctx, calID, eventID)
+	if err != nil {
+		return nil, fmt.Errorf("get calendar event %s: %w", eventID, err)
+	}
+	return s.DecryptCalendarEvent(ctx, ev, cache)
+}
+
 // DecryptCalendarEvent resolves a single event into structured detail:
 // plaintext metadata from ev plus the decrypted SharedEvents iCalendar
 // text, parsed into fields. Pass a per-pass cache during sync; pass nil

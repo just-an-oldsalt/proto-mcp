@@ -19,6 +19,7 @@ func TestDefaultPolicyAllowsReadTools(t *testing.T) {
 		"account_whoami", "mail_list", "mail_search", "mail_read",
 		"mail_read_thread", "mail_list_attachments",
 		"labels_list", "folders_list", "mail_sync",
+		"calendar_list", "calendar_events", "calendar_read_event",
 	}
 	for _, name := range readTools {
 		d, _ := e.Decide(name, nil, caller.Caller{})

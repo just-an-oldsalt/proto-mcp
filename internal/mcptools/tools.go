@@ -95,6 +95,10 @@ func All(deps Deps) []mcp.Tool {
 		mailDownloadAttachment(deps),
 		// Phase 8/C — attachment polish: save-to-disk.
 		mailSaveAttachment(deps),
+		// Phase 9 — read-only calendar.
+		calendarList(deps),
+		calendarEvents(deps),
+		calendarReadEvent(deps),
 	}
 }
 
