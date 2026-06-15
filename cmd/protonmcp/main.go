@@ -87,6 +87,8 @@ func main() {
 		}
 	case "backfill":
 		err = runBackfill(ctx, args)
+	case "calendar-backfill":
+		err = runCalendarBackfill(ctx, args)
 	case "read":
 		err = runRead(ctx, args)
 	case "search":
@@ -138,6 +140,11 @@ Commands:
   backfill   Drain message metadata into the local SQLite mirror. Same
              session-resume behavior as whoami.
              Flags: --db <path>, --yes (skip confirm), --limit <n>.
+  calendar-backfill
+             Mirror calendars + event metadata into the local store.
+             Pass --decrypt to also decrypt every event now (warms
+             calendar_events full-text search). Flags: --db <path>,
+             --decrypt.
   read       Print a single decrypted message (text + sanitized HTML)
              as JSON. Served from local cache when possible.
              Flags: --db <path>, --refresh (ignore cache).

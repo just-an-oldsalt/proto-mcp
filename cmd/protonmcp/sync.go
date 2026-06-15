@@ -59,24 +59,38 @@ func runSync(ctx context.Context, args []string) error {
 		return err
 	}
 
+	// Calendar rides the same one-shot. A calendar failure is reported
+	// but doesn't fail the mail sync (which already succeeded).
+	var calUpserted, calDeleted int
+	if calRes, calErr := syncpkg.RunCalendarOnce(ctx, bundle.Session, st); calErr != nil {
+		fmt.Fprintf(os.Stderr, "warning: calendar sync failed (mail sync succeeded): %v\n", calErr)
+	} else if calRes != nil {
+		calUpserted = calRes.EventsUpserted
+		calDeleted = calRes.EventsDeleted
+	}
+
 	out := struct {
-		StartCursor      string `json:"start_cursor"`
-		EndCursor        string `json:"end_cursor"`
-		Pages            int    `json:"pages"`
-		MessagesUpserted int    `json:"messages_upserted"`
-		MessagesDeleted  int    `json:"messages_deleted"`
-		LabelsUpserted   int    `json:"labels_upserted"`
-		LabelsDeleted    int    `json:"labels_deleted"`
-		ElapsedMS        int64  `json:"elapsed_ms"`
+		StartCursor          string `json:"start_cursor"`
+		EndCursor            string `json:"end_cursor"`
+		Pages                int    `json:"pages"`
+		MessagesUpserted     int    `json:"messages_upserted"`
+		MessagesDeleted      int    `json:"messages_deleted"`
+		LabelsUpserted       int    `json:"labels_upserted"`
+		LabelsDeleted        int    `json:"labels_deleted"`
+		CalendarEventsUpsert int    `json:"calendar_events_upserted"`
+		CalendarEventsDelete int    `json:"calendar_events_deleted"`
+		ElapsedMS            int64  `json:"elapsed_ms"`
 	}{
-		StartCursor:      res.StartCursor,
-		EndCursor:        res.EndCursor,
-		Pages:            res.Pages,
-		MessagesUpserted: res.MessagesUpserted,
-		MessagesDeleted:  res.MessagesDeleted,
-		LabelsUpserted:   res.LabelsUpserted,
-		LabelsDeleted:    res.LabelsDeleted,
-		ElapsedMS:        res.Elapsed.Milliseconds(),
+		StartCursor:          res.StartCursor,
+		EndCursor:            res.EndCursor,
+		Pages:                res.Pages,
+		MessagesUpserted:     res.MessagesUpserted,
+		MessagesDeleted:      res.MessagesDeleted,
+		LabelsUpserted:       res.LabelsUpserted,
+		LabelsDeleted:        res.LabelsDeleted,
+		CalendarEventsUpsert: calUpserted,
+		CalendarEventsDelete: calDeleted,
+		ElapsedMS:            res.Elapsed.Milliseconds(),
 	}
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")

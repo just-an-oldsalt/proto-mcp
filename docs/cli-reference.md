@@ -12,9 +12,10 @@ maintenance.
 | `logout` | Revoke the server-side session and delete the Keychain entry. |
 | `whoami` | Print an account summary. Resumes the saved session, or falls back to a one-time login. |
 | `backfill` | Drain message metadata into the local SQLite mirror. Flags: `--db`, `--yes`, `--limit`. |
+| `calendar-backfill` | Mirror calendars + event metadata. Pass `--decrypt` to decrypt every event now (warms `calendar_events` full-text search). Flags: `--db`, `--decrypt`. |
 | `read` | Print a single decrypted message (text + sanitized HTML) as JSON. Flags: `--db`, `--refresh`. |
 | `search` | Query the local mirror. DSL: `from:`, `to:`, `subject:`, `in:`, `before:`, `after:`, `has:attachment`, plus bare full-text terms. Flags: `--db`, `--limit`, `--offset`. |
-| `sync` | Drain pending events into the mirror (incremental). Flags: `--db`. |
+| `sync` | Drain pending events into the mirror (incremental) — mail and calendar. Flags: `--db`. |
 | `serve-stdio` | Run as an MCP server over stdin/stdout (single-process mode). Prefer `install`. |
 | `install` | Register proto-mcp with Claude Desktop and/or Claude Code. Flags: `--client {desktop\|code\|all}`, `--dry-run`. |
 | `uninstall` | Remove proto-mcp from the selected client config(s). |
@@ -23,7 +24,7 @@ maintenance.
 | `lock` / `unlock` | Lock or Touch-ID-unlock the running daemon. |
 | `purge` | Trim the cached-body window. Flags: `--older-than`, `--vacuum`. |
 
-## The 31 MCP tools
+## The 34 MCP tools
 
 These are what Claude calls. Reads are allow-by-default; every write is
 deny-by-default and Touch-ID gated (see [security.md](./security.md)).
@@ -79,6 +80,29 @@ colour-palette validation on create/update.
 |---|---|
 | `mail_download_attachment` | Decrypt an attachment and return it as `{path, sha256, size_bytes}`. |
 | `mail_save_attachment` | Save a decrypted attachment to a chosen path. |
+
+### Calendar (3, read-only)
+
+| Tool | Purpose |
+|---|---|
+| `calendar_list` | List the user's calendars. |
+| `calendar_events` | List/search events by date range, calendar, and/or full-text query. Cursor-paginated. |
+| `calendar_read_event` | Read one event in full, including description and attendees. |
+
+Proton Calendar is end-to-end encrypted; events decrypt locally with the
+same keyring as mail. Notes & limitations:
+
+- **Read-only.** `go-proton-api` exposes no calendar write/encrypt path, so
+  there is no create/edit/delete or RSVP.
+- **Recurrence** is surfaced as the master event plus its raw `rrule`
+  (`recurring: true`); individual occurrences are **not** expanded.
+- **Full-text search** (`calendar_events query=…`) matches only events
+  already decrypted. Background sync mirrors metadata lazily; run
+  `protonmcp calendar-backfill --decrypt` to decrypt everything up front and
+  warm the index, or just list a date range once (which decrypts that page).
+- Decrypted event text is cached in SQLite — same plaintext-at-rest posture
+  as message bodies (see [security.md](./security.md)), swept by
+  `protonmcp purge`.
 
 > `mail_delete_permanent` exists but is **denied by default**. It is not
 > registered as a callable tool unless you explicitly enable it in policy

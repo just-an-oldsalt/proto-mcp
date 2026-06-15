@@ -6,7 +6,7 @@
 
 A signed, notarized, Touch-ID-gated bridge between **Proton Mail** and
 **Claude**, running entirely on your Mac. Claude reads, searches,
-organizes, drafts, and sends your mail through 31 [Model Context
+organizes, drafts, and sends your mail — and reads your calendar — through 34 [Model Context
 Protocol](https://modelcontextprotocol.io) tools — and every message
 that goes out needs your fingerprint on a prompt that names the real
 recipient.
@@ -62,7 +62,7 @@ listener.
 
 ## What Claude can do
 
-31 tools, grouped by what they touch. Reads run free; everything that
+34 tools, grouped by what they touch. Reads run free; everything that
 changes state is deny-by-default and Touch-ID gated.
 
 | | |
@@ -73,6 +73,7 @@ changes state is deny-by-default and Touch-ID gated.
 | ✍️ **Drafts** | Create, update, delete, list. |
 | 📤 **Send** | Send, reply, reply-all, forward, send-draft — each one re-prompts. |
 | 📎 **Attachments** | Decrypt and download, save to disk. |
+| 📅 **Calendar** | List calendars, browse/search events by date range, read full event detail. Read-only. |
 
 Full list with descriptions: **[docs/cli-reference.md](./docs/cli-reference.md)**.
 
@@ -195,7 +196,7 @@ locally-signed build, see
 | [docs/architecture.md](./docs/architecture.md) | The daemon model, binaries, packages, and local mirror. |
 | [docs/security.md](./docs/security.md) | Security layers + the full, honest threat model. |
 | [docs/configuration.md](./docs/configuration.md) | Policy YAML, locking, observability, purging. |
-| [docs/cli-reference.md](./docs/cli-reference.md) | Every CLI command and all 31 MCP tools. |
+| [docs/cli-reference.md](./docs/cli-reference.md) | Every CLI command and all 34 MCP tools. |
 | [SECURITY.md](./SECURITY.md) | Security policy + per-defect fix log / audit trail. |
 | [TESTING.md](./TESTING.md) | End-to-end validation playbook. |
 
