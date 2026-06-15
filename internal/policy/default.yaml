@@ -61,6 +61,12 @@ tools:
   folders_list:          { decision: allow }
   mail_sync:             { decision: allow }
 
+  # Phase 9 read-only calendar tools — mirror-backed reads, allow-by-
+  # default like the mail read tools. No write/RSVP path exists.
+  calendar_list:         { decision: allow }
+  calendar_events:       { decision: allow }
+  calendar_read_event:   { decision: allow }
+
   # Phase 5 write tools — stubbed today so Decide doesn't fall
   # through to the default-deny fallback once those handlers register.
   # Active enforcement of allowed_recipients / rate_limit lands in Phase 5.
