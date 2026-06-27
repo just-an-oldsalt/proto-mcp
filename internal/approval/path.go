@@ -41,21 +41,39 @@ func resolveHelperPath(argv0 string) (string, error) {
 		candidates = append(candidates, env)
 	}
 
+	// fromBinDir emits the layout-relative candidates for a directory the
+	// daemon binary might live in (sibling dev helper, two-up dev helper,
+	// and the flat-prefix helper next to the daemon).
+	fromBinDir := func(binDir string) {
+		// Dev layout: <repo>/bin/protonmcp + <repo>/helpers/touchid/
+		candidates = append(candidates,
+			filepath.Join(binDir, "helpers", "touchid", "protonmcp-touchid"),
+			filepath.Join(filepath.Dir(binDir), "helpers", "touchid", "protonmcp-touchid"),
+			// Phase 7/E Homebrew cask layout: cask `binary` stanzas
+			// drop every product directly into the prefix's bin/ —
+			// protonmcp-touchid sits next to protonmcp.
+			filepath.Join(binDir, "protonmcp-touchid"),
+		)
+	}
+
 	if argv0 != "" {
 		abs, err := filepath.Abs(argv0)
 		if err == nil {
-			binDir := filepath.Dir(abs)
-			// Dev layout: <repo>/bin/protonmcp + <repo>/helpers/touchid/
-			sib := filepath.Join(binDir, "helpers", "touchid", "protonmcp-touchid")
-			candidates = append(candidates, sib)
-			twoUp := filepath.Join(filepath.Dir(binDir), "helpers", "touchid", "protonmcp-touchid")
-			candidates = append(candidates, twoUp)
-			// Phase 7/E Homebrew cask layout: cask `binary`
-			// stanzas drop every product directly into the
-			// prefix's bin/ — protonmcp-touchid sits next to
-			// protonmcp.
-			brewish := filepath.Join(binDir, "protonmcp-touchid")
-			candidates = append(candidates, brewish)
+			fromBinDir(filepath.Dir(abs))
+			// PROTO-127 / cask layout: a `binary` stanza symlinks the
+			// daemon into Homebrew's group-writable <prefix>/bin, but the
+			// real binaries sit beside each other in the owner-writable-only
+			// Caskroom. The lexical candidates above land in the writable
+			// bin dir and are correctly rejected by ownerWritableOnly; the
+			// trusted helper is only reachable by following the daemon's
+			// own symlink to its real directory. Resolve it and emit the
+			// same candidates from there. Anchoring on the *daemon's*
+			// resolved path (not the helper symlink, which an attacker could
+			// repoint inside the writable bin dir) keeps the trust chain
+			// rooted in whatever binary is actually running as the daemon.
+			if resolved, rerr := filepath.EvalSymlinks(abs); rerr == nil && resolved != abs {
+				fromBinDir(filepath.Dir(resolved))
+			}
 		}
 	}
 
