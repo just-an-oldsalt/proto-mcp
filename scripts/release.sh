@@ -131,11 +131,26 @@ make clean
 #
 # Exporting puts it in the environment, where `?=` also honours it, so
 # every sub-make in this script agrees on the version.
-export VERSION="$TAG"
+#
+# Export the UNPREFIXED value ("1.1.0"), not TAG ("v1.1.0"). $VERSION is
+# this script's own variable, used below for the tarball name, the
+# staging directory, and the cask's `version` field — all of which must
+# be unprefixed, because the cask builds its download URL and its
+# `binary` paths out of it. Exporting TAG here silently renamed the
+# artifact to proto-mcp-v1.1.0.tar.gz and would have produced a cask
+# pointing at a URL that does not exist. The Makefile strips a leading
+# "v" itself, so the unprefixed value stamps identically.
+export VERSION
+
+# Guard the invariant the naming below depends on, rather than trusting
+# it to stay true.
+case "$VERSION" in
+    v*) echo "error: VERSION must not carry a leading 'v' (got '$VERSION')." >&2; exit 1;;
+esac
 
 # Universal (arm64 + x86_64) so Intel Macs can install at all — the cask
 # used to declare `depends_on arch: :arm64`, which excluded them.
-make universal VERSION="$TAG"
+make universal
 
 # Assert the binaries actually carry the version we are cutting, before
 # anything is signed, notarized, tagged, or published. This is cheap and
