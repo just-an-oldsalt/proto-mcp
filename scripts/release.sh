@@ -117,12 +117,41 @@ echo
 # Step 1: clean build.
 echo "--- (1/7) make clean && make universal ---"
 make clean
+
+# EXPORT VERSION, don't just pass it to the first make.
+#
+# Every make invocation below (sign, verify-sign, notarize) lists the
+# binaries as prerequisites, so any of them can decide a rebuild is
+# needed. The Makefile's `VERSION ?=` falls back to `git describe` — and
+# the tag does not exist until step 7 — so a later make without VERSION
+# resolved to "1.0.2-18-g<sha>", rewrote the version stamp, rebuilt the
+# binaries under the wrong version, and THEN signed and notarized them.
+# The pipeline reported success end to end while shipping an artifact
+# whose `protonmcp version` disagreed with its own tarball name.
+#
+# Exporting puts it in the environment, where `?=` also honours it, so
+# every sub-make in this script agrees on the version.
+export VERSION="$TAG"
+
 # Universal (arm64 + x86_64) so Intel Macs can install at all — the cask
 # used to declare `depends_on arch: :arm64`, which excluded them.
-#
-# Pass VERSION through so the binaries are stamped with the tag being
-# cut, not with whatever `git describe` reports for the working tree.
 make universal VERSION="$TAG"
+
+# Assert the binaries actually carry the version we are cutting, before
+# anything is signed, notarized, tagged, or published. This is cheap and
+# it is the check that would have caught the rebuild described above.
+EXPECTED_VERSION="$VERSION_INPUT"
+EXPECTED_VERSION="${EXPECTED_VERSION#v}"
+for b in bin/universal/protonmcp bin/universal/protonmcpd bin/universal/protonmcp-shim; do
+    got=$("$b" --version 2>/dev/null | awk '{print $2}')
+    if [ "$got" != "$EXPECTED_VERSION" ]; then
+        echo "error: $b reports version '$got', expected '$EXPECTED_VERSION'." >&2
+        echo "  The build did not stamp the version being released. Refusing to" >&2
+        echo "  sign and publish an artifact that misreports its own version." >&2
+        exit 1
+    fi
+done
+echo "  version stamp verified: $EXPECTED_VERSION"
 
 # Everything downstream — sign, notarize, stage — operates on the
 # universal binaries, not the host-arch ones in bin/.
