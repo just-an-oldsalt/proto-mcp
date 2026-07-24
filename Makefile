@@ -54,6 +54,71 @@ SHIM_LDFLAGS := -X main.version=$(VERSION:v%=%)
 version:
 	@echo "VERSION=$(VERSION:v%=%) COMMIT=$(COMMIT) DATE=$(DATE)"
 
+# -----------------------------------------------------------------------------
+# Universal (arm64 + x86_64) builds.
+#
+# `make all` builds for the host arch only — that's what you want while
+# developing. `make universal` builds both slices and lipo's them, which
+# is what a release ships: the cask previously declared
+# `depends_on arch: :arm64`, so every Intel Mac was simply unable to
+# install.
+#
+# Cross-compiling the Go binaries needs CGO (internal/keystore wraps
+# Security.framework), which means handing the C compiler an explicit
+# -arch. The macOS clang that ships with the command line tools can
+# target both, so no extra toolchain is required.
+UNIVERSAL_DIR := $(BINDIR)/universal
+GO_PRODUCTS   := protonmcp protonmcpd protonmcp-shim
+
+# cgoCC maps a GOARCH to the clang -arch flag for that slice.
+cc_for_arm64 := clang -arch arm64
+cc_for_amd64 := clang -arch x86_64
+
+# Deployment target for the Swift helpers. Matches the cask's
+# `depends_on macos: :ventura` (13.0) — building against a newer SDK is
+# fine, but the minimum has to agree or the helper refuses to launch on
+# the oldest supported OS.
+SWIFT_MACOS_MIN := 13.0
+
+.PHONY: universal
+universal: $(addprefix $(UNIVERSAL_DIR)/,$(GO_PRODUCTS)) \
+           $(UNIVERSAL_DIR)/protonmcp-touchid \
+           $(UNIVERSAL_DIR)/protonmcp-lockwatch
+	@echo "Universal binaries in $(UNIVERSAL_DIR):"
+	@for b in $^; do printf '  %s: ' "$$b"; lipo -archs "$$b"; done
+
+# One rule per Go product: build each slice into a temp path, then lipo.
+# $* is the product name (protonmcp, protonmcpd, protonmcp-shim).
+$(UNIVERSAL_DIR)/%: $(GO_INPUTS) go.mod go.sum
+	@mkdir -p $(UNIVERSAL_DIR)
+	@ldflags='$(LDFLAGS)'; \
+	if [ "$*" = "protonmcp-shim" ]; then ldflags='$(SHIM_LDFLAGS)'; fi; \
+	for arch in arm64 amd64; do \
+		case $$arch in \
+			arm64) cc='$(cc_for_arm64)';; \
+			amd64) cc='$(cc_for_amd64)';; \
+		esac; \
+		echo "  go build $* ($$arch)"; \
+		CGO_ENABLED=1 GOOS=darwin GOARCH=$$arch CC="$$cc" \
+			go build -ldflags "$$ldflags" -o $@.$$arch ./cmd/$* || exit 1; \
+	done
+	@lipo -create -output $@ $@.arm64 $@.amd64
+	@rm -f $@.arm64 $@.amd64
+
+$(UNIVERSAL_DIR)/protonmcp-touchid: $(TOUCHID_DIR)/main.swift
+	@mkdir -p $(UNIVERSAL_DIR)
+	swiftc -O -target arm64-apple-macos$(SWIFT_MACOS_MIN)  -o $@.arm64 $<
+	swiftc -O -target x86_64-apple-macos$(SWIFT_MACOS_MIN) -o $@.amd64 $<
+	@lipo -create -output $@ $@.arm64 $@.amd64
+	@rm -f $@.arm64 $@.amd64
+
+$(UNIVERSAL_DIR)/protonmcp-lockwatch: $(LOCKWATCH_DIR)/main.swift
+	@mkdir -p $(UNIVERSAL_DIR)
+	swiftc -O -target arm64-apple-macos$(SWIFT_MACOS_MIN)  -o $@.arm64 $<
+	swiftc -O -target x86_64-apple-macos$(SWIFT_MACOS_MIN) -o $@.amd64 $<
+	@lipo -create -output $@ $@.arm64 $@.amd64
+	@rm -f $@.arm64 $@.amd64
+
 .PHONY: all
 all: $(PROTONMCP) $(PROTONMCPD) $(SHIM) $(TOUCHID) $(LOCKWATCH)
 
@@ -130,7 +195,15 @@ clean:
 #   NOTARY_PROFILE Keychain profile (default "protonmcp-notary")
 # -----------------------------------------------------------------------------
 
-SIGN_TARGETS := $(PROTONMCP) $(PROTONMCPD) $(SHIM) $(TOUCHID) $(LOCKWATCH)
+# Overridable so the release path can sign the universal binaries
+# instead of the host-arch ones:
+#
+#   make sign SIGN_TARGETS="$(UNIVERSAL_TARGETS)"
+#
+# Defaults to the host-arch layout, which is what you want when signing
+# a local build for testing.
+UNIVERSAL_TARGETS := $(addprefix $(UNIVERSAL_DIR)/,$(GO_PRODUCTS) protonmcp-touchid protonmcp-lockwatch)
+SIGN_TARGETS ?= $(PROTONMCP) $(PROTONMCPD) $(SHIM) $(TOUCHID) $(LOCKWATCH)
 ENTITLEMENTS := scripts/protonmcp.entitlements
 NOTARY_PROFILE ?= protonmcp-notary
 DIST_DIR     := dist

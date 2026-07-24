@@ -63,26 +63,34 @@ echo "=== Release pipeline for $TAG ==="
 echo
 
 # Step 1: clean build.
-echo "--- (1/7) make clean && make all ---"
+echo "--- (1/7) make clean && make universal ---"
 make clean
+# Universal (arm64 + x86_64) so Intel Macs can install at all — the cask
+# used to declare `depends_on arch: :arm64`, which excluded them.
+#
 # Pass VERSION through so the binaries are stamped with the tag being
 # cut, not with whatever `git describe` reports for the working tree.
-make all VERSION="$TAG"
+make universal VERSION="$TAG"
+
+# Everything downstream — sign, notarize, stage — operates on the
+# universal binaries, not the host-arch ones in bin/.
+UNIVERSAL_TARGETS="bin/universal/protonmcp bin/universal/protonmcpd bin/universal/protonmcp-shim bin/universal/protonmcp-touchid bin/universal/protonmcp-lockwatch"
+export SIGN_TARGETS="$UNIVERSAL_TARGETS"
 
 # Step 2: sign.
 echo
 echo "--- (2/7) make sign ---"
-make sign
+make sign SIGN_TARGETS="$UNIVERSAL_TARGETS"
 
 # Step 3: verify signatures.
 echo
 echo "--- (3/7) make verify-sign ---"
-make verify-sign
+make verify-sign SIGN_TARGETS="$UNIVERSAL_TARGETS"
 
 # Step 4: notarize (this is the slow one — 1–5 minutes typically).
 echo
 echo "--- (4/7) make notarize (1-5 min round trip to Apple) ---"
-make notarize
+make notarize SIGN_TARGETS="$UNIVERSAL_TARGETS"
 
 # Step 5: verify Gatekeeper accepts.
 echo
@@ -90,10 +98,10 @@ echo "--- (5/7) make verify-notarized ---"
 # Apple's ticket cache can lag the notarytool 'Accepted' status by
 # a few seconds. Retry once after a 30s wait if the first attempt
 # fails.
-if ! make verify-notarized; then
+if ! make verify-notarized SIGN_TARGETS="$UNIVERSAL_TARGETS"; then
     echo "First verify-notarized failed; waiting 30s for Apple to propagate ticket..."
     sleep 30
-    make verify-notarized
+    make verify-notarized SIGN_TARGETS="$UNIVERSAL_TARGETS"
 fi
 
 # Step 6: package the flat tarball that the Homebrew cask consumes.
@@ -105,12 +113,20 @@ echo "--- (6/7) packaging dist/proto-mcp-$VERSION.tar.gz ---"
 STAGE=$(mktemp -d)
 STAGEDIR="$STAGE/proto-mcp-$VERSION"
 mkdir -p "$STAGEDIR"
-cp bin/protonmcp        "$STAGEDIR/protonmcp"
-cp bin/protonmcpd       "$STAGEDIR/protonmcpd"
-cp bin/protonmcp-shim   "$STAGEDIR/protonmcp-shim"
-cp helpers/touchid/protonmcp-touchid     "$STAGEDIR/protonmcp-touchid"
-cp helpers/lockwatch/protonmcp-lockwatch "$STAGEDIR/protonmcp-lockwatch"
+for b in $UNIVERSAL_TARGETS; do
+    cp "$b" "$STAGEDIR/$(basename "$b")"
+done
 cp LICENSE README.md SECURITY.md "$STAGEDIR/"
+
+# Fail loudly rather than shipping a single-arch tarball: a missing
+# slice would silently exclude every Intel Mac again.
+for b in "$STAGEDIR"/protonmcp*; do
+    archs=$(lipo -archs "$b")
+    case "$archs" in
+        *arm64*x86_64*|*x86_64*arm64*) ;;
+        *) echo "error: $b is not universal (archs: $archs)"; exit 1;;
+    esac
+done
 
 mkdir -p dist
 TAR="dist/proto-mcp-$VERSION.tar.gz"

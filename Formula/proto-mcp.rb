@@ -27,7 +27,8 @@ cask "proto-mcp" do
   homepage "https://github.com/just-an-oldsalt/proto-mcp"
 
   depends_on macos: :ventura  # ">= Ventura"; bare symbol is Homebrew's required form (the ">= :ventura" string is deprecated)
-  depends_on arch: :arm64  # initial release is Apple-silicon-only; Phase 8 adds amd64
+  # No arch constraint: the tarball ships universal (arm64 + x86_64)
+  # binaries, built by `make universal` and verified by release.sh.
 
   # The tarball lays everything in a single flat dir
   # (proto-mcp-<version>/). All five binaries land in

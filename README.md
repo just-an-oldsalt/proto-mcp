@@ -192,11 +192,12 @@ Line Tools (for `swiftc`).
 git clone https://github.com/just-an-oldsalt/proto-mcp.git
 cd proto-mcp
 make all                          # builds bin/* + the Swift helpers
-./bin/protonmcp login
-./bin/protonmcp backfill
-./bin/protonmcp daemon install
-./bin/protonmcp install
+./bin/protonmcp setup
 ```
+
+`make all` builds for your own architecture. `make universal` builds
+arm64 + x86_64 and `lipo`s them into `bin/universal/` — that's what a
+release ships, so the cask works on both Apple silicon and Intel.
 
 Source builds are ad-hoc signed by default and work fully (the Touch ID
 gate, policy, audit, and lock/unlock all run the same). For a
