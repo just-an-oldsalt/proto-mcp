@@ -107,6 +107,9 @@ same keyring as mail. Notes & limitations:
   as message bodies (see [security.md](./security.md)), swept by
   `protonmcp purge`.
 
-> `mail_delete_permanent` exists but is **denied by default**. It is not
-> registered as a callable tool unless you explicitly enable it in policy
-> with a prompt — irreversible deletion is opt-in.
+> There is deliberately **no permanent-delete tool**. `mail_trash` moves a
+> message to Trash and is reversible with `mail_move`; nothing Claude can
+> call destroys mail irrecoverably. `internal/policy/default.yaml`
+> reserves a `mail_delete_permanent: deny` stanza so the name is spoken
+> for if it is ever implemented — setting it to `prompt` today does
+> nothing, because no such tool exists.

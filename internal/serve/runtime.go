@@ -17,6 +17,8 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"sort"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -414,11 +416,24 @@ func Setup(ctx context.Context, cfg SetupConfig) (*Runtime, error) {
 		opts = append(opts, mcp.WithApproval(broker))
 	}
 	srv := mcp.New(logger, opts...)
-	for _, tl := range mcptools.All(mcptools.Deps{
+	tools := mcptools.All(mcptools.Deps{
 		Session: sess,
 		Store:   st,
 		Policy:  engine,
-	}) {
+	})
+	// Every registered tool must have an explicit policy entry. A tool
+	// with none is still denied at call time (Decide falls through to a
+	// deny default), but silently — it registers, advertises itself to
+	// Claude, and then refuses every invocation with no hint that the
+	// cause is a missing policy stanza rather than a bug.
+	//
+	// Fail startup instead. This is the guarantee the README describes:
+	// you cannot ship a write tool that nobody wrote a policy for,
+	// because the daemon won't start.
+	if err := validatePolicyCoverage(engine, tools); err != nil {
+		return nil, err
+	}
+	for _, tl := range tools {
 		srv.Register(tl)
 	}
 
@@ -598,4 +613,31 @@ func (r *Runtime) Close() {
 	if r.Store != nil {
 		_ = r.Store.Close()
 	}
+}
+
+// validatePolicyCoverage reports the tools that would register without
+// an explicit policy entry. Sorted so the error is stable across runs —
+// mcptools.All returns a slice, but a set-difference over a map would
+// otherwise reorder the names between startups and make the failure
+// look different each time.
+func validatePolicyCoverage(engine *policy.Engine, tools []mcp.Tool) error {
+	if engine == nil {
+		return nil // no policy configured: the caller opted out entirely
+	}
+	var missing []string
+	for _, t := range tools {
+		if !engine.HasEntry(t.Name) {
+			missing = append(missing, t.Name)
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	sort.Strings(missing)
+	return fmt.Errorf(
+		"policy coverage: %d tool(s) have no policy entry: %s\n"+
+			"Every tool needs an explicit stanza under `tools:` — without one it "+
+			"registers but denies every call, which looks like a bug rather than "+
+			"a configuration gap. Add entries to internal/policy/default.yaml",
+		len(missing), strings.Join(missing, ", "))
 }

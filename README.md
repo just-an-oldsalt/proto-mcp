@@ -117,9 +117,9 @@ never a *liability*. The guarantees that make that true:
 - **🔐 Your fingerprint on every send.** Each write fires a native prompt
   showing the **literal** recipients and subject. `mail_send` has a TTL of
   zero, so it re-prompts every single time. No blanket approvals for sends.
-- **🛡️ Default-deny by construction.** Unknown tools don't run. A tool
-  with no policy entry fails to register — you can't accidentally ship an
-  unguarded write.
+- **🛡️ Default-deny by construction.** Unknown tools don't run, and the
+  daemon refuses to start if any registered tool lacks an explicit policy
+  entry — you can't accidentally ship an unguarded write.
 - **🍎 Signed, notarized, and self-checking.** Hardened-runtime,
   Developer-ID-signed, Apple-notarized binaries, plus a SHA-256 integrity
   check at startup that refuses to run a swapped daemon.

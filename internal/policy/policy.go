@@ -177,6 +177,21 @@ func (e *Engine) Decide(tool string, _ []byte, _ Caller) (Decision, *ToolPolicy)
 	return d.Decision, &d
 }
 
+// HasEntry reports whether tool has an explicit policy entry, as
+// opposed to falling through to the defaults.
+//
+// Decide deliberately cannot answer this: it returns the defaults for
+// an unknown tool, which is indistinguishable from an explicit entry
+// that happens to match them. Startup coverage checking needs the
+// difference — a tool nobody wrote a policy for is a packaging mistake,
+// even though Decide would correctly deny it at call time.
+func (e *Engine) HasEntry(tool string) bool {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	_, ok := e.doc.Tools[tool]
+	return ok
+}
+
 // Reload re-reads the user override and swaps it in atomically.
 // On any parse error the previous policy stays in place — there is
 // never a window where Decide sees a partial document.

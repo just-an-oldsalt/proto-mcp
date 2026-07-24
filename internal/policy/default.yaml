@@ -136,9 +136,14 @@ tools:
     decision: prompt
     ttl: 5m
     description: "Move a message to trash (reversible via mail_move)"
+  # Reserved name, not an implemented tool. No handler registers under
+  # it, so this stanza has no runtime effect today; it exists so the
+  # name is spoken for, and so the policy is already deny if a
+  # permanent-delete tool is ever added. Setting it to `prompt` does
+  # nothing on its own.
   mail_delete_permanent:
     decision: deny
-    description: "Permanently delete — opt-in only, override required"
+    description: "Reserved — no such tool is implemented; deny if one ever is"
 
   # Label / folder CRUD.
   labels_create:

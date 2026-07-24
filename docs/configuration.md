@@ -14,8 +14,8 @@ tools:
     confirm: true
     rate_limit: 5/hour                       # cap LLM-driven sends
     allowed_recipients: ["@mydomain.com"]    # restrict to one domain
-  mail_delete_permanent:
-    decision: deny                           # default; remove to enable with a prompt
+  mail_trash:
+    decision: prompt                         # reversible; mail_move puts it back
 
 # Auto-lock idle timer
 idle_lock_minutes: 30                        # lock if no tool call for 30 min (0 = disabled)
