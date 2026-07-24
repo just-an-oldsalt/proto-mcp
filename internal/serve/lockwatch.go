@@ -133,18 +133,34 @@ func runLockwatchOnce(ctx context.Context, binPath string, lockFn func(reason st
 //
 // Returns ("", false) if no candidate is executable.
 func resolveLockwatchPath() (string, bool) {
+	exe, err := os.Executable()
+	if err != nil {
+		return "", false
+	}
+	return ResolveLockwatchPathFrom(exe)
+}
+
+// ResolveLockwatchPathFrom returns the lockwatch helper the daemon
+// would use if it were running from exe, and whether one was found.
+// Exported so `protonmcp doctor` reports the same answer the daemon
+// will reach at runtime instead of reimplementing the search.
+func ResolveLockwatchPathFrom(exe string) (string, bool) {
 	if envPath := os.Getenv("PROTONMCP_LOCKWATCH"); envPath != "" {
 		if isExecutable(envPath) {
 			return envPath, true
 		}
 	}
-	exe, err := os.Executable()
-	if err != nil {
-		return "", false
-	}
 	binDir := filepath.Dir(exe)
 	for _, candidate := range []string{
 		filepath.Join(binDir, "helpers", "lockwatch", "protonmcp-lockwatch"),
+		// Source-build layout: the Makefile builds the daemon into
+		// <repo>/bin/ but leaves the Swift helper in
+		// <repo>/helpers/lockwatch/, one level up from binDir. Without
+		// this candidate a source build finds no helper at all and
+		// screen-lock auto-locking silently never arms — the same
+		// two-up case internal/approval's touchid resolver already
+		// covers.
+		filepath.Join(filepath.Dir(binDir), "helpers", "lockwatch", "protonmcp-lockwatch"),
 		filepath.Join(binDir, "protonmcp-lockwatch"),
 		"/Applications/protonmcp.app/Contents/MacOS/protonmcp-lockwatch",
 		"/opt/homebrew/bin/protonmcp-lockwatch",
