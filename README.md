@@ -14,7 +14,7 @@ recipient.
 Nothing leaves your laptop except the mail itself.
 
 ![platform: macOS](https://img.shields.io/badge/platform-macOS%2013%2B-black?logo=apple)
-![Go 1.26.4+](https://img.shields.io/badge/Go-1.26.4%2B-00ADD8?logo=go&logoColor=white)
+![Go 1.26.5+](https://img.shields.io/badge/Go-1.26.5%2B-00ADD8?logo=go&logoColor=white)
 ![signed & notarized](https://img.shields.io/badge/Apple-signed%20%26%20notarized-success?logo=apple)
 ![MCP](https://img.shields.io/badge/Model%20Context%20Protocol-ready-8A63D2)
 ![license: GPLv3](https://img.shields.io/badge/license-GPLv3-blue)
@@ -185,7 +185,7 @@ Full reference, plus locking and the audit/observability commands:
 
 ## Build from source
 
-Requires macOS 13+, [Go 1.26.4+](https://go.dev/dl/), and Xcode Command
+Requires macOS 13+, [Go 1.26.5+](https://go.dev/dl/), and Xcode Command
 Line Tools (for `swiftc`).
 
 ```sh
