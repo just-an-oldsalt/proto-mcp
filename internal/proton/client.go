@@ -210,6 +210,26 @@ func (s *Session) Tokens() (access, refresh string) {
 	return s.AccessToken, s.RefreshToken
 }
 
+// SaltedKeyPassCopy returns an independent deep copy of the salted
+// mailbox pass, taken under the auth mutex. Persisting code MUST use
+// this instead of reading SaltedKeyPass directly.
+//
+// SECURITY D16 (the "keystore blob may be stale / private key checksum
+// failure" onboarding bug): SaltedKeyPass shares its backing array with
+// every value copy, and Close()/releaseLocal() zeroes it. A persist
+// path that serialized the live Secret could have its bytes zeroed
+// mid-marshal by a concurrent Close — writing a *partially* zeroed,
+// non-empty pass that slips past keystore.Save's len==0 guard and then
+// fails at gpa.Unlock on the next resume. Cloning under authMu makes
+// the read atomic with respect to Zero: the caller gets either the full
+// pass or (if Close already ran) an empty one that the guard rejects
+// cleanly. The caller owns the returned copy and should Zero() it.
+func (s *Session) SaltedKeyPassCopy() secret.Secret {
+	s.authMu.Lock()
+	defer s.authMu.Unlock()
+	return s.SaltedKeyPass.Clone()
+}
+
 // installAuthHandler wires the SDK's AuthHandler into the session so
 // rotated tokens are captured and (optionally) forwarded to
 // OnAuthUpdate. Called by both Login and Resume after they construct
@@ -300,7 +320,12 @@ func (s *Session) releaseLocal() {
 		kr.ClearPrivateParams()
 		delete(s.AddrKRs, id)
 	}
+	// Zero under authMu so it serializes with SaltedKeyPassCopy — a
+	// persist in flight on another goroutine either observes the full
+	// pass or the empty one, never a half-zeroed array (SECURITY D16).
+	s.authMu.Lock()
 	s.SaltedKeyPass.Zero()
+	s.authMu.Unlock()
 }
 
 // NewManager constructs a Manager pre-configured for production Proton

@@ -48,6 +48,20 @@ func New(b []byte) Secret {
 	return Secret{b: cp}
 }
 
+// Clone returns a deep copy of the Secret with its own backing array.
+// Zeroing the original (or the clone) does not touch the other — unlike
+// a plain value copy, which shares the backing slice (see the type doc
+// and TestZeroOverwritesSharedBacking).
+//
+// Use Clone when a Secret must be read (e.g. serialized) concurrently
+// with a copy that another goroutine may Zero. Persisting the salted
+// mailbox pass is the canonical case: without an independent copy, a
+// Close()-driven Zero() can corrupt the bytes mid-marshal (SECURITY
+// D16). The caller owns the clone and should Zero() it when done.
+func (s Secret) Clone() Secret {
+	return New(s.b)
+}
+
 // FromString copies a string into a Secret. Prefer New([]byte) for
 // terminal-read material — Go strings are immutable and live in
 // memory until GC reclaims them, so the original string copy cannot

@@ -157,12 +157,18 @@ func TryResume(ctx context.Context) (*Bundle, error) {
 // carries rotated tokens that must replace the stored ones.
 func Persist(b *Bundle) error {
 	access, refresh := b.Session.Tokens()
+	// D16: serialize a private clone, never the live SaltedKeyPass — a
+	// concurrent Session.Close() zeroes the shared backing array and
+	// would corrupt the marshaled bytes. SaltedKeyPassCopy takes the
+	// copy under authMu; we own it and zero it when done.
+	skp := b.Session.SaltedKeyPassCopy()
+	defer skp.Zero()
 	return keystore.Save(keystore.Live{
 		Email:         b.Session.Email,
 		UID:           b.Session.UID,
 		AccessToken:   access,
 		RefreshToken:  refresh,
-		SaltedKeyPass: b.Session.SaltedKeyPass,
+		SaltedKeyPass: skp,
 		Cookies:       protonclient.JarCookies(b.Jar),
 	})
 }
@@ -174,12 +180,17 @@ func Persist(b *Bundle) error {
 // refresh token.
 func WireKeystoreSync(b *Bundle) {
 	b.Session.OnAuthUpdate = func(uid, accessToken, refreshToken string) {
+		// D16: clone under authMu rather than serializing the live
+		// SaltedKeyPass — this fires on a background-sync refresh and can
+		// race a Close()-driven Zero() of the shared backing array.
+		skp := b.Session.SaltedKeyPassCopy()
+		defer skp.Zero()
 		err := keystore.Save(keystore.Live{
 			Email:         b.Session.Email,
 			UID:           uid,
 			AccessToken:   accessToken,
 			RefreshToken:  refreshToken,
-			SaltedKeyPass: b.Session.SaltedKeyPass,
+			SaltedKeyPass: skp,
 			Cookies:       protonclient.JarCookies(b.Jar),
 		})
 		if err != nil {
