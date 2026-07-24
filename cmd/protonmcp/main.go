@@ -126,7 +126,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, `protonmcp — Proton MCP daemon (pre-alpha)
+	fmt.Fprintln(os.Stderr, `protonmcp — bridge Proton Mail to Claude, locally.
 
 Usage:
   protonmcp <command> [options]
@@ -154,9 +154,9 @@ Commands:
              plus bare full-text terms.
              Flags: --db <path>, --limit n, --offset n.
   sync       Drain pending events into the local mirror (incremental
-             update from the last stored event cursor). Phase 6's
-             daemon will call this on its own cadence; the CLI is for
-             one-shot manual updates.
+             update from the last stored event cursor). The daemon
+             does this on its own cadence; the CLI is for one-shot
+             manual updates.
              Flags: --db <path>.
   serve-stdio
              Run as a Model Context Protocol server over stdin/stdout
@@ -187,7 +187,7 @@ Commands:
   lock       Signal every running protonmcp serve-stdio or daemon to
              drop its in-memory Proton session and refuse further tool
              calls until unlocked. Touch ID is NOT re-prompted on lock —
-             only on the unlock side. (Phase 6/E.)
+             only on the unlock side.
   unlock     Signal every running daemon to prompt Touch ID and re-
              acquire the session from the saved Keychain blob. Failure
              (denied biometric, missing Keychain entry) leaves the
@@ -299,7 +299,7 @@ func runWhoami(ctx context.Context) error {
 		float64(sess.User.MaxSpace)/1024/1024,
 	)
 	fmt.Printf("  Login + unlock: %s\n", time.Since(start).Round(time.Millisecond))
-	fmt.Printf("  Client header:  %s   (impersonating Proton Bridge; see TODO open question #7)\n",
+	fmt.Printf("  Client header:  %s   (Proton Bridge's identifier; a dedicated one is requested)\n",
 		protonclient.AppVersion)
 	return nil
 }

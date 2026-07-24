@@ -96,7 +96,7 @@ func runInstall(_ context.Context, args []string) error {
 	if !*dryRun {
 		fmt.Println("Restart any running Claude clients to pick up the new server.")
 		if *transport == "shim" {
-			fmt.Println("Also: make sure protonmcpd is running — `protonmcp daemon start` (Phase 6/C).")
+			fmt.Println("Also: make sure the daemon is running — `protonmcp daemon status`.")
 		}
 	}
 	return nil
