@@ -45,6 +45,29 @@ if ! gh auth status >/dev/null 2>&1; then
     exit 1
 fi
 
+# Sanity: are the notary credentials actually usable?
+#
+# Checked HERE rather than discovered at step 4. Notarization is the
+# first step that talks to Apple, and it runs after a full universal
+# build and a signing pass that prompts for keychain access — so a
+# stale app-specific password used to mean several minutes of work and
+# a Touch ID prompt before anything told you the credentials were dead.
+# `notarytool history` is a cheap authenticated round trip that fails
+# the same way a submit would.
+if ! xcrun notarytool history --keychain-profile "${NOTARY_PROFILE:-protonmcp-notary}" \
+        >/dev/null 2>&1; then
+    echo "error: notarytool credentials for keychain profile '${NOTARY_PROFILE:-protonmcp-notary}' are not working." >&2
+    echo "  App-specific passwords are revoked when the Apple ID password changes," >&2
+    echo "  and they expire. Generate a fresh one at https://appleid.apple.com" >&2
+    echo "  (Sign-In and Security → App-Specific Passwords), then re-store it:" >&2
+    echo >&2
+    echo "    xcrun notarytool store-credentials ${NOTARY_PROFILE:-protonmcp-notary} \\" >&2
+    echo "      --apple-id <your-apple-id> --team-id 346JJCHZP7 --password <app-specific-password>" >&2
+    echo >&2
+    echo "  See scripts/signing-setup.md." >&2
+    exit 1
+fi
+
 # Working tree clean? Tagging an untracked-state release is usually
 # a mistake — abort with a clear prompt.
 if [ -n "$(git status --porcelain)" ]; then
