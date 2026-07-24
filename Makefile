@@ -25,6 +25,35 @@ GO_INPUTS := $(shell find cmd internal -type f \( \
 	-name '*.go' -o -name '*.c' -o -name '*.h' -o \
 	-name '*.yaml' -o -name '*.sql' \) 2>/dev/null)
 
+# -----------------------------------------------------------------------------
+# Version stamping.
+#
+# VERSION is overridable so `make release VERSION=v1.0.0` stamps the tag
+# being cut rather than whatever `git describe` reports. The leading "v"
+# is stripped so `protonmcp version` prints "1.0.2", matching the cask
+# version and the release tarball name.
+#
+# DATE is the *commit* timestamp, not the wall clock: stamping the build
+# time would make two builds of the same commit differ, which breaks
+# reproducibility and — because the daemon pins its own SHA-256 at
+# install time — would force a `daemon install` after every rebuild.
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+COMMIT  := $(shell git rev-parse --short HEAD 2>/dev/null)
+DATE    := $(shell git log -1 --format=%cI 2>/dev/null)
+
+BUILDINFO := github.com/just-an-oldsalt/proto-mcp/internal/buildinfo
+LDFLAGS   := -X $(BUILDINFO).version=$(VERSION:v%=%) \
+             -X $(BUILDINFO).commit=$(COMMIT) \
+             -X $(BUILDINFO).date=$(DATE)
+
+# The shim keeps its own stdlib-only version var (see its package doc),
+# so it gets a different -X target.
+SHIM_LDFLAGS := -X main.version=$(VERSION:v%=%)
+
+.PHONY: version
+version:
+	@echo "VERSION=$(VERSION:v%=%) COMMIT=$(COMMIT) DATE=$(DATE)"
+
 .PHONY: all
 all: $(PROTONMCP) $(PROTONMCPD) $(SHIM) $(TOUCHID) $(LOCKWATCH)
 
@@ -39,20 +68,20 @@ shim: $(SHIM)
 
 $(PROTONMCP): $(GO_INPUTS) go.mod go.sum
 	@mkdir -p $(BINDIR)
-	go build -o $@ ./cmd/protonmcp
+	go build -ldflags "$(LDFLAGS)" -o $@ ./cmd/protonmcp
 
 # Daemon variant. Phase 6/A: same internal/serve.Runtime, transport
 # is a Unix socket accept loop instead of stdin/stdout.
 $(PROTONMCPD): $(GO_INPUTS) go.mod go.sum
 	@mkdir -p $(BINDIR)
-	go build -o $@ ./cmd/protonmcpd
+	go build -ldflags "$(LDFLAGS)" -o $@ ./cmd/protonmcpd
 
 # Phase 6/B: stdio↔socket forwarder Claude clients spawn instead
 # of serve-stdio. Tiny binary, no internal/ deps; the cross-binary
 # coordination lives in the daemon.
 $(SHIM): $(shell find cmd/protonmcp-shim -name '*.go' 2>/dev/null) go.mod go.sum
 	@mkdir -p $(BINDIR)
-	go build -o $@ ./cmd/protonmcp-shim
+	go build -ldflags "$(SHIM_LDFLAGS)" -o $@ ./cmd/protonmcp-shim
 
 # Touch ID helper. swiftc is part of the Xcode command-line tools;
 # CI's macos-14 runner has it, dev machines need `xcode-select

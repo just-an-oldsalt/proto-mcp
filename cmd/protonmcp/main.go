@@ -20,6 +20,7 @@ import (
 
 	gpa "github.com/ProtonMail/go-proton-api"
 
+	"github.com/just-an-oldsalt/proto-mcp/internal/buildinfo"
 	"github.com/just-an-oldsalt/proto-mcp/internal/cli"
 	"github.com/just-an-oldsalt/proto-mcp/internal/logging"
 	protonclient "github.com/just-an-oldsalt/proto-mcp/internal/proton"
@@ -111,6 +112,8 @@ func main() {
 		err = runLock(ctx, args)
 	case "unlock":
 		err = runUnlock(ctx, args)
+	case "version", "--version", "-v":
+		err = runVersion(ctx, args)
 	case "help", "-h", "--help":
 		usage()
 		return
@@ -127,11 +130,13 @@ func main() {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, `protonmcp — bridge Proton Mail to Claude, locally.
+Version: `+buildinfo.String()+`
 
 Usage:
   protonmcp <command> [options]
 
 Commands:
+  version    Print the build version, commit, and platform.
   login      Run the full Proton login flow and save the session to the
              macOS Keychain so other subcommands can resume silently.
   logout     Revoke the server-side session and delete the Keychain entry.

@@ -35,6 +35,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/just-an-oldsalt/proto-mcp/internal/buildinfo"
 	"github.com/just-an-oldsalt/proto-mcp/internal/caller"
 	"github.com/just-an-oldsalt/proto-mcp/internal/logging"
 	"github.com/just-an-oldsalt/proto-mcp/internal/serve"
@@ -42,6 +43,15 @@ import (
 )
 
 func main() {
+	// --version before anything else: no log setup, no integrity
+	// check, no keychain. `protonmcp doctor` shells out to this to
+	// compare the daemon's build against the CLI's, so it has to work
+	// even when the daemon is otherwise refusing to start.
+	if len(os.Args) == 2 && (os.Args[1] == "--version" || os.Args[1] == "version") {
+		fmt.Println("protonmcpd " + buildinfo.String())
+		return
+	}
+
 	// Phase 7/B: route the daemon's slog output through a rotating
 	// writer at ~/Library/Logs/protonmcp/daemon.log (50 MiB × 10
 	// generations). Launchd's plist StandardErrorPath also points
@@ -65,6 +75,11 @@ func main() {
 		// nothing we can do with it at exit.
 		defer func() { _ = logWriter.Close() }()
 	}
+
+	// First line in every daemon.log generation: which build is
+	// actually running. Without it, a log tail from a bug report
+	// can't be tied to a version.
+	slog.Info("protonmcpd starting", "version", buildinfo.String())
 
 	// D24 (Phase 7/C) — binary integrity check before any setup
 	// runs. If the daemon binary's SHA-256 doesn't match what was

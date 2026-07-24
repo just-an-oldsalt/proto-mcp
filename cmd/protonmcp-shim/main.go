@@ -31,12 +31,28 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"syscall"
 	"time"
 )
 
+// version is stamped by the Makefile via -ldflags -X. The shim
+// deliberately imports nothing outside the standard library (see the
+// package doc), so it carries its own copy rather than depending on
+// internal/buildinfo.
+var version = "dev"
+
 func main() {
+	// --version must work without a daemon: `protonmcp doctor` uses it
+	// to detect a shim/daemon version skew, which is exactly the state
+	// a broken upgrade leaves behind.
+	if len(os.Args) == 2 && (os.Args[1] == "--version" || os.Args[1] == "version") {
+		fmt.Printf("protonmcp-shim %s (%s, %s/%s)\n",
+			version, runtime.Version(), runtime.GOOS, runtime.GOARCH)
+		return
+	}
+
 	if err := run(); err != nil {
 		// stderr only — stdout is reserved for MCP framing.
 		fmt.Fprintln(os.Stderr, "protonmcp-shim:", err)

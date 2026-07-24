@@ -65,7 +65,9 @@ echo
 # Step 1: clean build.
 echo "--- (1/7) make clean && make all ---"
 make clean
-make all
+# Pass VERSION through so the binaries are stamped with the tag being
+# cut, not with whatever `git describe` reports for the working tree.
+make all VERSION="$TAG"
 
 # Step 2: sign.
 echo
