@@ -56,7 +56,9 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: "1.26.x"
+          # See ci.yml: sourced from go.mod so the toolchain always
+          # satisfies the declared floor.
+          go-version-file: go.mod
           cache: true
 
       # The cert/key are imported into a transient keychain so the
