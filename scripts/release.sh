@@ -32,11 +32,40 @@ fi
 VERSION="${VERSION_INPUT#v}"
 TAG="v$VERSION"
 
+# Signing identity. An explicit DEVELOPER_ID always wins; otherwise read
+# it out of the keychain.
+#
+# Requiring the operator to export a long exact string on every release
+# was a step that added no safety: the value is already discoverable, and
+# getting it wrong fails loudly at `codesign` anyway. Env vars also do
+# not survive between shell invocations, so "export it first" reliably
+# turned into a failed first attempt.
+#
+# Refuse to guess when the keychain holds more than one Developer ID
+# Application identity — picking silently there could sign a release
+# with the wrong team.
 if [ -z "${DEVELOPER_ID:-}" ]; then
-    echo "error: DEVELOPER_ID environment variable not set." >&2
-    echo "  Run: export DEVELOPER_ID='Developer ID Application: <NAME> (<TEAMID>)'" >&2
-    echo "  See scripts/signing-setup.md." >&2
-    exit 1
+    identities=$(security find-identity -v -p codesigning 2>/dev/null \
+        | sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' | sort -u)
+    count=$(printf '%s' "$identities" | grep -c . || true)
+
+    if [ "$count" -eq 1 ]; then
+        DEVELOPER_ID="$identities"
+        export DEVELOPER_ID
+        echo "Using signing identity from keychain: $DEVELOPER_ID"
+    elif [ "$count" -eq 0 ]; then
+        echo "error: no 'Developer ID Application' identity found in the keychain." >&2
+        echo "  Install your Developer ID certificate, or set DEVELOPER_ID explicitly:" >&2
+        echo "    export DEVELOPER_ID='Developer ID Application: <NAME> (<TEAMID>)'" >&2
+        echo "  See scripts/signing-setup.md." >&2
+        exit 1
+    else
+        echo "error: $count 'Developer ID Application' identities found; refusing to guess." >&2
+        echo "$identities" | sed 's/^/    /' >&2
+        echo "  Pick one explicitly:" >&2
+        echo "    export DEVELOPER_ID='<one of the above>'" >&2
+        exit 1
+    fi
 fi
 
 # Sanity: gh is logged in?
