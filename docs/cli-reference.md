@@ -8,6 +8,7 @@ maintenance. When something isn't working, start with `protonmcp doctor`.
 
 | Command | What it does |
 |---|---|
+| `setup` | Run first-time setup end to end: sign in, copy the mailbox index, start the background service, connect Claude, then verify. Skips any step already complete, so it doubles as a repair command. Flags: `--db`, `--force`. |
 | `doctor` | Check every part of the install — binaries and version skew, Touch ID / lockwatch helpers, keychain session, local mirror, daemon, recorded binary hash, and Claude client registration — then print the exact command to fix anything broken. Never prompts for Touch ID. Exits non-zero if something is wrong. Flags: `--db`. |
 | `version` | Print the build version, commit, and platform. `protonmcpd --version` and `protonmcp-shim --version` do the same, which is how `doctor` detects a partial upgrade. |
 | `login` | Run the full Proton login flow (SRP password + TOTP + key unlock) and save the session to the macOS Keychain. |

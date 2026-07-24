@@ -114,6 +114,8 @@ func main() {
 		err = runUnlock(ctx, args)
 	case "version", "--version", "-v":
 		err = runVersion(ctx, args)
+	case "setup":
+		err = runSetup(ctx, args)
 	case "doctor":
 		err = runDoctor(ctx, args)
 	case "help", "-h", "--help":
@@ -137,12 +139,17 @@ Version: `+buildinfo.String()+`
 Usage:
   protonmcp <command> [options]
 
-First-time setup, in order:
-  login   →   backfill   →   daemon install   →   install
-  Then restart Claude Desktop / Claude Code.
-  Check everything at once with: protonmcp doctor
+First-time setup — run this one command:
+  protonmcp setup
+  It signs you in, copies your mailbox index, starts the background
+  service, and connects Claude. Safe to re-run; it skips what's done.
 
 Commands:
+  setup      Run first-time setup end to end: sign in, copy the mailbox
+             index, start the background service, connect Claude, then
+             verify. Skips any step already complete, so it doubles as a
+             repair command.
+             Flags: --db <path>, --force (re-run every step).
   doctor     Run every health check — login state, local mirror, daemon,
              helper binaries, and Claude client registration — and print
              what to do about anything broken. Start here when something

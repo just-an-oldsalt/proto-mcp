@@ -48,15 +48,30 @@ tap is the line between "Claude drafted it" and "Claude sent it."
 brew tap just-an-oldsalt/proto-mcp
 brew install --cask proto-mcp
 
+protonmcp setup
+```
+
+That's the whole thing. `setup` signs you in, copies your mailbox index
+into a local database, starts the background service, and connects both
+Claude clients — explaining each step as it goes. Restart Claude
+afterwards and the tools show up under `protonmcp` in `/mcp`.
+
+It's safe to re-run: completed steps are skipped, so it doubles as a
+repair command.
+
+<details>
+<summary>Prefer to run the four steps yourself?</summary>
+
+```sh
 protonmcp login            # Proton SRP password + 2FA + key unlock
 protonmcp backfill         # one-time: pull your message envelopes into the local mirror
 protonmcp daemon install   # register + start the background daemon
 protonmcp install          # connect it to Claude Desktop + Claude Code
 ```
 
-Restart Claude, and the tools show up under `protonmcp` in `/mcp`. That's
-it — signed, notarized binaries, no Gatekeeper warning, no network
-listener.
+</details>
+
+Signed, notarized binaries — no Gatekeeper warning, no network listener.
 
 Anything not working? **`protonmcp doctor`** checks every piece of the
 install and tells you the one command that fixes it:

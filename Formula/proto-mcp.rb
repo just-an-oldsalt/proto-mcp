@@ -68,16 +68,18 @@ cask "proto-mcp" do
   ]
 
   caveats <<~CAVEATS
-    To complete setup:
+    To complete setup, run:
 
-      protonmcp login                 # interactive: SRP + TOTP + key unlock
-      protonmcp backfill              # one-time: drains every message envelope
-      protonmcp daemon install        # registers + starts the LaunchAgent
-      protonmcp install               # registers shim with Claude Desktop + Claude Code
+      protonmcp setup
 
-    Restart Claude Desktop / Claude Code afterward, then verify with:
+    It signs you in, copies your mailbox index, starts the background
+    service, and connects Claude Desktop + Claude Code. Safe to re-run —
+    completed steps are skipped.
 
-      protonmcp doctor                # checks every part of the install
+    Restart Claude Desktop / Claude Code afterward. To re-check the
+    install at any time:
+
+      protonmcp doctor
 
     Upgrading: the daemon keeps running the previous build until it is
     restarted, so after `brew upgrade --cask proto-mcp` run:
