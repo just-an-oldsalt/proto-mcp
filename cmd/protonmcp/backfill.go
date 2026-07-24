@@ -56,6 +56,31 @@ func runBackfill(ctx context.Context, args []string) error {
 	}
 	defer st.Close()
 
+	// A running daemon writes to the same SQLite file. WAL mode allows
+	// only one writer, so a live daemon and this bulk drain fight over
+	// the write lock and backfill fails mid-run with "database is
+	// locked" (SQLITE_BUSY). Warn before the long login + drain so the
+	// user can stop it first. The daemon captures its own event cursor,
+	// so stopping it here loses nothing — it replays on restart.
+	if pid := daemonPID(); pid > 0 {
+		fmt.Fprintf(os.Stderr, "\nWarning: the protonmcp daemon is running (pid %d).\n", pid)
+		fmt.Fprintln(os.Stderr, "It writes to the same store, and SQLite allows only one writer, so a")
+		fmt.Fprintln(os.Stderr, "concurrent backfill can fail with \"database is locked\". Stop it first:")
+		fmt.Fprintln(os.Stderr, "    protonmcp daemon stop")
+		fmt.Fprintln(os.Stderr, "and start it again once the backfill finishes:")
+		fmt.Fprintln(os.Stderr, "    protonmcp daemon start")
+		if !*yes {
+			ans, err := cli.PromptLine(ctx, "Continue anyway? [y/N]: ")
+			if err != nil {
+				return err
+			}
+			if !strings.EqualFold(strings.TrimSpace(ans), "y") {
+				return errors.New("aborted")
+			}
+		}
+		fmt.Fprintln(os.Stderr)
+	}
+
 	acquireCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 	bundle, err := acquireSession(acquireCtx)
@@ -134,6 +159,14 @@ func runBackfill(ctx context.Context, args []string) error {
 		return nil
 	})
 	if walkErr != nil && !errors.Is(walkErr, errLimitReached) {
+		if isDatabaseLocked(walkErr) {
+			return fmt.Errorf("walk messages: %w\n\n"+
+				"The local store is locked by another writer — most likely the\n"+
+				"protonmcp daemon. Stop it, then re-run backfill (it's idempotent):\n"+
+				"    protonmcp daemon stop\n"+
+				"    protonmcp backfill\n"+
+				"    protonmcp daemon start", walkErr)
+		}
 		return fmt.Errorf("walk messages: %w", walkErr)
 	}
 
@@ -154,6 +187,15 @@ func runBackfill(ctx context.Context, args []string) error {
 // --limit is hit. It's not exposed and not an error condition for the
 // command — runBackfill swallows it.
 var errLimitReached = errors.New("limit reached")
+
+// isDatabaseLocked reports whether err is a SQLITE_BUSY "database is
+// locked" failure. modernc/sqlite surfaces it in the error string
+// rather than a typed sentinel, so match on the stable text. Used to
+// turn the cryptic SQLITE_BUSY into an actionable "stop the daemon"
+// hint — the usual cause is the daemon writing to the same store.
+func isDatabaseLocked(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "database is locked")
+}
 
 // backfillLabels fetches every user-defined label and folder from
 // Proton and upserts each into the local mirror's `labels` table.
