@@ -54,6 +54,27 @@ SHIM_LDFLAGS := -X main.version=$(VERSION:v%=%)
 version:
 	@echo "VERSION=$(VERSION:v%=%) COMMIT=$(COMMIT) DATE=$(DATE)"
 
+# A stamp file holding the current version, rewritten only when the
+# value actually changes. Every binary depends on it, so a new commit
+# rebuilds them even when their own sources are untouched.
+#
+# Without this the version lives only in LDFLAGS, which make cannot see:
+# the shim's prerequisites are just cmd/protonmcp-shim/*.go, so a commit
+# that changed nothing under there left the shim carrying an old stamp
+# while protonmcp and protonmcpd moved on. `protonmcp doctor` then
+# reported a version skew that was real in the binaries but phantom in
+# substance — the exact false alarm that erodes trust in the check.
+#
+# The cmp guard keeps the mtime stable when the version is unchanged, so
+# this doesn't force a rebuild on every single make invocation.
+VERSION_STAMP := $(BINDIR)/.version
+
+.PHONY: force-version-stamp
+$(VERSION_STAMP): force-version-stamp
+	@mkdir -p $(BINDIR)
+	@printf '%s' '$(VERSION:v%=%)' | cmp -s - $@ 2>/dev/null || \
+		printf '%s' '$(VERSION:v%=%)' > $@
+
 # -----------------------------------------------------------------------------
 # Universal (arm64 + x86_64) builds.
 #
@@ -89,7 +110,7 @@ universal: $(addprefix $(UNIVERSAL_DIR)/,$(GO_PRODUCTS)) \
 
 # One rule per Go product: build each slice into a temp path, then lipo.
 # $* is the product name (protonmcp, protonmcpd, protonmcp-shim).
-$(UNIVERSAL_DIR)/%: $(GO_INPUTS) go.mod go.sum
+$(UNIVERSAL_DIR)/%: $(GO_INPUTS) go.mod go.sum $(VERSION_STAMP)
 	@mkdir -p $(UNIVERSAL_DIR)
 	@ldflags='$(LDFLAGS)'; \
 	if [ "$*" = "protonmcp-shim" ]; then ldflags='$(SHIM_LDFLAGS)'; fi; \
@@ -131,20 +152,20 @@ protonmcpd: $(PROTONMCPD)
 .PHONY: shim
 shim: $(SHIM)
 
-$(PROTONMCP): $(GO_INPUTS) go.mod go.sum
+$(PROTONMCP): $(GO_INPUTS) go.mod go.sum $(VERSION_STAMP)
 	@mkdir -p $(BINDIR)
 	go build -ldflags "$(LDFLAGS)" -o $@ ./cmd/protonmcp
 
 # Daemon variant. Phase 6/A: same internal/serve.Runtime, transport
 # is a Unix socket accept loop instead of stdin/stdout.
-$(PROTONMCPD): $(GO_INPUTS) go.mod go.sum
+$(PROTONMCPD): $(GO_INPUTS) go.mod go.sum $(VERSION_STAMP)
 	@mkdir -p $(BINDIR)
 	go build -ldflags "$(LDFLAGS)" -o $@ ./cmd/protonmcpd
 
 # Phase 6/B: stdio↔socket forwarder Claude clients spawn instead
 # of serve-stdio. Tiny binary, no internal/ deps; the cross-binary
 # coordination lives in the daemon.
-$(SHIM): $(shell find cmd/protonmcp-shim -name '*.go' 2>/dev/null) go.mod go.sum
+$(SHIM): $(shell find cmd/protonmcp-shim -name '*.go' 2>/dev/null) go.mod go.sum $(VERSION_STAMP)
 	@mkdir -p $(BINDIR)
 	go build -ldflags "$(SHIM_LDFLAGS)" -o $@ ./cmd/protonmcp-shim
 
@@ -176,7 +197,8 @@ race:
 
 .PHONY: clean
 clean:
-	rm -f $(PROTONMCP) $(PROTONMCPD) $(SHIM) $(TOUCHID) $(LOCKWATCH)
+	rm -f $(PROTONMCP) $(PROTONMCPD) $(SHIM) $(TOUCHID) $(LOCKWATCH) $(VERSION_STAMP)
+	rm -rf $(UNIVERSAL_DIR)
 	rm -rf dist
 
 # -----------------------------------------------------------------------------
