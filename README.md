@@ -58,6 +58,23 @@ Restart Claude, and the tools show up under `protonmcp` in `/mcp`. That's
 it — signed, notarized binaries, no Gatekeeper warning, no network
 listener.
 
+Anything not working? **`protonmcp doctor`** checks every piece of the
+install and tells you the one command that fixes it:
+
+```
+[  ok  ] protonmcpd             version 1.0.2
+[  ok  ] login                  session present in keychain
+[ FAIL ] local mirror           exists but holds no messages
+[  ok  ] daemon                 running (pid 4875), socket healthy
+
+To fix:
+  local mirror
+      protonmcp backfill
+```
+
+After `brew upgrade --cask proto-mcp`, run `protonmcp daemon restart` so
+the daemon picks up the new build.
+
 > Prefer to build it yourself? See [Build from source](#build-from-source).
 
 ## What Claude can do

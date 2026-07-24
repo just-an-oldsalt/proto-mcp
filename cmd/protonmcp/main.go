@@ -114,6 +114,8 @@ func main() {
 		err = runUnlock(ctx, args)
 	case "version", "--version", "-v":
 		err = runVersion(ctx, args)
+	case "doctor":
+		err = runDoctor(ctx, args)
 	case "help", "-h", "--help":
 		usage()
 		return
@@ -135,7 +137,17 @@ Version: `+buildinfo.String()+`
 Usage:
   protonmcp <command> [options]
 
+First-time setup, in order:
+  login   →   backfill   →   daemon install   →   install
+  Then restart Claude Desktop / Claude Code.
+  Check everything at once with: protonmcp doctor
+
 Commands:
+  doctor     Run every health check — login state, local mirror, daemon,
+             helper binaries, and Claude client registration — and print
+             what to do about anything broken. Start here when something
+             isn't working.
+             Flags: --db <path>.
   version    Print the build version, commit, and platform.
   login      Run the full Proton login flow and save the session to the
              macOS Keychain so other subcommands can resume silently.

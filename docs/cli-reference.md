@@ -4,10 +4,12 @@
 
 Run `protonmcp <command>`. The commands you'll actually use day to day are
 `login`, `daemon`, and `install`; the rest are for inspection and
-maintenance.
+maintenance. When something isn't working, start with `protonmcp doctor`.
 
 | Command | What it does |
 |---|---|
+| `doctor` | Check every part of the install — binaries and version skew, Touch ID / lockwatch helpers, keychain session, local mirror, daemon, recorded binary hash, and Claude client registration — then print the exact command to fix anything broken. Never prompts for Touch ID. Exits non-zero if something is wrong. Flags: `--db`. |
+| `version` | Print the build version, commit, and platform. `protonmcpd --version` and `protonmcp-shim --version` do the same, which is how `doctor` detects a partial upgrade. |
 | `login` | Run the full Proton login flow (SRP password + TOTP + key unlock) and save the session to the macOS Keychain. |
 | `logout` | Revoke the server-side session and delete the Keychain entry. |
 | `whoami` | Print an account summary. Resumes the saved session, or falls back to a one-time login. |
