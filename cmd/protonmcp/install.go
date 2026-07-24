@@ -23,9 +23,9 @@ import (
 // file).
 
 type clientTarget struct {
-	id       string // "desktop" / "code"
-	name     string // human label
-	path     func() (string, error)
+	id   string // "desktop" / "code"
+	name string // human label
+	path func() (string, error)
 }
 
 func clientTargets() []clientTarget {
@@ -160,10 +160,68 @@ func installInto(t clientTarget, cmdPath string, cmdArgs []string, dryRun bool) 
 	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o700); err != nil {
 		return fmt.Errorf("create config dir: %w", err)
 	}
-	if err := os.WriteFile(cfgPath, append(out, '\n'), 0o600); err != nil {
+	if err := writeConfigAtomic(cfgPath, append(out, '\n')); err != nil {
 		return fmt.Errorf("write config: %w", err)
 	}
 	fmt.Printf("Installed protonmcp into %s config: %s\n", t.name, cfgPath)
+	return nil
+}
+
+// writeConfigAtomic replaces path's contents without ever leaving it
+// truncated or half-written.
+//
+// This matters more than it looks. Claude Code's config is ~/.claude.json,
+// which also holds the user's project history, session state, and
+// preferences — none of it ours, all of it rewritten wholesale every
+// time we add or remove our one mcpServers entry. A plain
+// os.WriteFile truncates in place, so an interrupt, a crash, or a full
+// disk between truncate and write destroys all of it.
+//
+// Write to a temp file in the same directory (same filesystem, so the
+// rename is atomic), fsync it, keep the previous contents as a .bak,
+// then rename over the target. A reader either sees the old file or the
+// new one, never a partial.
+func writeConfigAtomic(path string, data []byte) error {
+	dir := filepath.Dir(path)
+
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+"-*")
+	if err != nil {
+		return fmt.Errorf("create temp file: %w", err)
+	}
+	tmpName := tmp.Name()
+	// Removes the temp file on any error path; a no-op once the rename
+	// below has moved it away.
+	defer func() { _ = os.Remove(tmpName) }()
+
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("write temp file: %w", err)
+	}
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("chmod temp file: %w", err)
+	}
+	// fsync before rename: without it a crash right after the rename
+	// can leave the directory entry pointing at a file whose contents
+	// never reached disk.
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("sync temp file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close temp file: %w", err)
+	}
+
+	// Best-effort backup of what we're about to replace. Never fatal —
+	// failing to back up a file is not a reason to refuse to install,
+	// and the atomic rename already guarantees we don't corrupt it.
+	if prev, err := os.ReadFile(path); err == nil {
+		_ = os.WriteFile(path+".bak", prev, 0o600)
+	}
+
+	if err := os.Rename(tmpName, path); err != nil {
+		return fmt.Errorf("replace %s: %w", path, err)
+	}
 	return nil
 }
 
@@ -212,7 +270,9 @@ func uninstallFrom(t clientTarget) error {
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(cfgPath, append(out, '\n'), 0o600); err != nil {
+	// Same atomic path as install — uninstall rewrites the whole file
+	// too, so it carries the identical risk to the user's other state.
+	if err := writeConfigAtomic(cfgPath, append(out, '\n')); err != nil {
 		return err
 	}
 	fmt.Printf("Removed protonmcp from %s: %s\n", t.name, cfgPath)
