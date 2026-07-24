@@ -42,12 +42,29 @@ cask "proto-mcp" do
 
   # No app bundle, no LaunchDaemon plist baked in — the
   # `protonmcp daemon install` subcommand wires the LaunchAgent
-  # plist into ~/Library/LaunchAgents at first run. That keeps
-  # the cask install fully reversible by `brew uninstall`.
+  # plist into ~/Library/LaunchAgents at first run.
+  #
+  # Because that plist is written at runtime rather than by the cask,
+  # Homebrew doesn't know about it and won't unload it. Without the
+  # `uninstall launchctl:` below, `brew uninstall --cask proto-mcp`
+  # deleted the binaries but left the LaunchAgent bootstrapped and
+  # pointing at a now-dangling symlink, so launchd kept trying to
+  # spawn a binary that no longer existed. Naming the label here makes
+  # Homebrew bootout the agent before removing anything.
+  #
+  # `delete` (not `trash`) for the plist: it's a generated file with no
+  # user content, and leaving it in ~/.Trash means a later `brew
+  # install` finds a stale plist if the user ever restores it.
+  uninstall launchctl: "zone.dort.protonmcpd",
+            delete:    "~/Library/LaunchAgents/zone.dort.protonmcpd.plist"
+
+  # zap additionally removes user data the plain uninstall preserves:
+  # the local mail mirror, the recorded binary hash, and the logs. The
+  # Keychain session is NOT zapped — `protonmcp logout` revokes it
+  # server-side, which a file delete cannot do.
   zap trash: [
     "~/Library/Application Support/protonmcp",
     "~/Library/Logs/protonmcp",
-    "~/Library/LaunchAgents/zone.dort.protonmcpd.plist",
   ]
 
   caveats <<~CAVEATS
@@ -58,7 +75,15 @@ cask "proto-mcp" do
       protonmcp daemon install        # registers + starts the LaunchAgent
       protonmcp install               # registers shim with Claude Desktop + Claude Code
 
-    Restart Claude Desktop / Claude Code afterward. See
-    https://github.com/just-an-oldsalt/proto-mcp for full docs.
+    Restart Claude Desktop / Claude Code afterward, then verify with:
+
+      protonmcp doctor                # checks every part of the install
+
+    Upgrading: the daemon keeps running the previous build until it is
+    restarted, so after `brew upgrade --cask proto-mcp` run:
+
+      protonmcp daemon restart
+
+    See https://github.com/just-an-oldsalt/proto-mcp for full docs.
   CAVEATS
 end
