@@ -10,12 +10,12 @@ require (
 	github.com/go-resty/resty/v2 v2.7.0
 	github.com/keybase/go-keychain v0.0.1
 	github.com/microcosm-cc/bluemonday v1.0.27
-	github.com/pressly/goose/v3 v3.27.2
-	golang.org/x/sys v0.46.0
-	golang.org/x/term v0.44.0
+	github.com/pressly/goose/v3 v3.27.3
+	golang.org/x/sys v0.47.0
+	golang.org/x/term v0.45.0
 	golang.org/x/text v0.40.0
 	gopkg.in/yaml.v3 v3.0.1
-	modernc.org/sqlite v1.53.0
+	modernc.org/sqlite v1.54.0
 )
 
 require (
@@ -35,21 +35,21 @@ require (
 	github.com/emersion/go-vcard v0.0.0-20230331202150-f3d26859ccd3 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/gorilla/css v1.0.1 // indirect
-	github.com/mattn/go-isatty v0.0.21 // indirect
+	github.com/mattn/go-isatty v0.0.23 // indirect
 	github.com/mfridman/interpolate v0.0.2 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
-	github.com/sethvargo/go-retry v0.3.0 // indirect
+	github.com/sethvargo/go-retry v0.4.0 // indirect
 	github.com/sirupsen/logrus v1.9.3 // indirect
 	github.com/teambition/rrule-go v1.8.2 // indirect
 	gitlab.com/c0b/go-ordered-json v0.0.0-20201030195603-febf46534d5a // indirect
 	go.uber.org/multierr v1.11.0 // indirect
-	golang.org/x/crypto v0.52.0 // indirect
-	golang.org/x/exp v0.0.0-20260410095643-746e56fc9e2f // indirect
-	golang.org/x/net v0.55.0 // indirect
+	golang.org/x/crypto v0.54.0 // indirect
+	golang.org/x/exp v0.0.0-20260718201538-764159d718ef // indirect
+	golang.org/x/net v0.57.0 // indirect
 	golang.org/x/sync v0.22.0 // indirect
-	modernc.org/libc v1.73.4 // indirect
+	modernc.org/libc v1.74.3 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
 )
