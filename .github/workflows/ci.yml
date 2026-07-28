@@ -15,7 +15,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           # Read the version straight from go.mod's `go` directive rather
           # than pinning a literal here. "1.26.x" resolved to 1.26.4 even
@@ -52,7 +52,7 @@ jobs:
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           # See ci.yml: sourced from go.mod so the toolchain always
           # satisfies the declared floor.
