@@ -91,6 +91,7 @@ func Resume(ctx context.Context, mgr *gpa.Manager, args ResumeArgs) (*Session, e
 		SaltedKeyPass: args.SaltedKeyPass,
 	}
 	sess.installAuthHandler()
+	sess.installCalendarMemberHook()
 
 	closeAndWrap := func(format string, vals ...any) error {
 		// Best-effort revoke. If the refresh succeeded but a follow-up

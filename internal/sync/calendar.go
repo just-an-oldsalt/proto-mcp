@@ -51,45 +51,48 @@ func RunCalendarOnce(ctx context.Context, sess *protonclient.Session, st *store.
 		return res, fmt.Errorf("get calendars: %w", err)
 	}
 
+	// Phase 1 — mirror the calendars themselves. GetCalendars has already
+	// succeeded, and its response carried each calendar's member record
+	// (the post-request hook stashed them), so every row we write here is
+	// backed by a 200. Doing this before events matters: on a session
+	// without calendar scope the listing succeeds while /events 403s, and
+	// this is then the only calendar data we can get. Writing it is what
+	// lets calendar_list show real names on an otherwise blocked account.
 	liveCalIDs := make([]string, 0, len(cals))
 	for _, c := range cals {
-		if err := ctx.Err(); err != nil {
-			return res, err
-		}
 		liveCalIDs = append(liveCalIDs, c.ID)
-
-		if err := st.UpsertCalendar(ctx, toStoreCalendar(c)); err != nil {
-			return res, fmt.Errorf("upsert calendar %s: %w", c.ID, err)
-		}
-		res.CalendarsUpserted++
-
-		events, err := sess.Client.GetAllCalendarEvents(ctx, c.ID, nil)
-		if err != nil {
-			return res, fmt.Errorf("get events for calendar %s: %w", c.ID, err)
-		}
-
-		storedMax := readMaxEdit(ctx, st, c.ID)
-		newMax, upserted, deleted, err := applyCalendarEvents(ctx, st, c.ID, events, storedMax)
-		if err != nil {
-			return res, err
-		}
-		res.EventsUpserted += upserted
-		res.EventsDeleted += deleted
-
-		if newMax > storedMax {
-			if err := st.SetSyncState(ctx, calendarMaxEditPrefix+c.ID, strconv.FormatInt(newMax, 10)); err != nil {
-				return res, fmt.Errorf("save calendar high-water for %s: %w", c.ID, err)
-			}
-		}
 	}
+	upsertedCals, err := syncCalendarRows(ctx, st, cals, sess.OwnCalendarMember)
+	if err != nil {
+		return res, err
+	}
+	res.CalendarsUpserted = upsertedCals
 
 	// Reconcile calendars that disappeared server-side (their events
-	// cascade-delete via the FK).
+	// cascade-delete via the FK). This belongs with phase 1 — it is driven
+	// by the listing, and running it here means a later events failure
+	// can't leave a vanished calendar behind.
 	deletedCals, err := reconcileCalendars(ctx, st, liveCalIDs)
 	if err != nil {
 		return res, err
 	}
 	res.CalendarsDeleted = deletedCals
+
+	// Phase 2 — events, per calendar.
+	fetch := func(ctx context.Context, calID string) ([]gpa.CalendarEvent, error) {
+		return sess.Client.GetAllCalendarEvents(ctx, calID, nil)
+	}
+	for _, c := range cals {
+		if err := ctx.Err(); err != nil {
+			return res, err
+		}
+		upserted, deleted, err := syncCalendarEvents(ctx, st, c.ID, fetch)
+		if err != nil {
+			return res, err
+		}
+		res.EventsUpserted += upserted
+		res.EventsDeleted += deleted
+	}
 
 	res.Elapsed = time.Since(start)
 	slog.Info("calendar sync",
@@ -168,6 +171,79 @@ func toStoreDecrypted(d *protonclient.CalendarEventDetail) store.CalendarEventDe
 	return out
 }
 
+// syncCalendarRows mirrors the calendar rows themselves, hydrating each
+// from its member record.
+//
+// member is looked up rather than fetched: the listing response carries
+// every calendar's members inline and the post-request hook has already
+// stashed them, so this costs no network.
+//
+// A missing member record is survivable but not silent. The live API
+// sends no display fields on the calendar object itself, so falling back
+// to it writes a blank, inactive row — exactly the symptom this whole
+// change set exists to fix. If that ever happens we want a breadcrumb
+// rather than a mystery, so warn and carry on: a named-but-eventless
+// calendar is still better than aborting the sync.
+func syncCalendarRows(
+	ctx context.Context,
+	st *store.Store,
+	cals []gpa.Calendar,
+	member func(string) *protonclient.CalendarMemberFull,
+) (upserted int, err error) {
+	for _, c := range cals {
+		if err := ctx.Err(); err != nil {
+			return upserted, err
+		}
+		m := member(c.ID)
+		if m == nil {
+			slog.Warn("calendar sync: no member record for calendar, name/active will be blank",
+				"calendar", c.ID)
+		}
+		if err := st.UpsertCalendar(ctx, toStoreCalendar(c, m)); err != nil {
+			return upserted, fmt.Errorf("upsert calendar %s: %w", c.ID, err)
+		}
+		upserted++
+	}
+	return upserted, nil
+}
+
+// syncCalendarEvents mirrors one calendar's events and advances its
+// high-water mark. The calendar row is expected to exist already — phase
+// 1 of RunCalendarOnce writes it, and calendar_events.calendar_id is an
+// FK onto calendars(id).
+//
+// The fetch happens before any write, so a failure (the 403 / Code 9100
+// case on a session without calendar scope) leaves this calendar's events
+// and high-water mark exactly as they were rather than half-applied.
+//
+// fetch is injected rather than taken from the session so the ordering
+// guarantee is testable against an in-memory store, in the same spirit as
+// applyCalendarEvents.
+func syncCalendarEvents(
+	ctx context.Context,
+	st *store.Store,
+	calID string,
+	fetch func(context.Context, string) ([]gpa.CalendarEvent, error),
+) (upserted, deleted int, err error) {
+	events, err := fetch(ctx, calID)
+	if err != nil {
+		return 0, 0, fmt.Errorf("get events for calendar %s: %w", calID, err)
+	}
+
+	storedMax := readMaxEdit(ctx, st, calID)
+	newMax, upserted, deleted, err := applyCalendarEvents(ctx, st, calID, events, storedMax)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	if newMax > storedMax {
+		if err := st.SetSyncState(ctx, calendarMaxEditPrefix+calID, strconv.FormatInt(newMax, 10)); err != nil {
+			return upserted, deleted, fmt.Errorf("save calendar high-water for %s: %w", calID, err)
+		}
+	}
+	return upserted, deleted, nil
+}
+
 // applyCalendarEvents upserts events whose LastEditTime exceeds storedMax,
 // reconciles deletions against the live set, and returns the new
 // high-water mark plus counts. It is pure with respect to the network
@@ -234,8 +310,21 @@ func readMaxEdit(ctx context.Context, st *store.Store, calID string) int64 {
 	return n
 }
 
-func toStoreCalendar(c gpa.Calendar) store.Calendar {
-	return store.Calendar{
+// toStoreCalendar maps a calendar plus our own member record onto the
+// mirror row.
+//
+// The live API returns display metadata on the member, not the calendar —
+// `GET /calendar/v1` carries only ID and Type, so gpa.Calendar's Name /
+// Description / Color / Flags decode empty and a mirrored calendar ends
+// up blank and inactive. When we have the member record it is
+// authoritative for those fields, matching what Proton's own web client
+// does in getVisualCalendar(). See internal/proton/calendar_members.go.
+//
+// member may be nil — the members call failed, or a future SDK/API starts
+// populating the calendar object again — in which case we fall back to
+// the calendar's own fields and behave exactly as before.
+func toStoreCalendar(c gpa.Calendar, member *protonclient.CalendarMemberFull) store.Calendar {
+	out := store.Calendar{
 		ID:          c.ID,
 		Name:        c.Name,
 		Description: c.Description,
@@ -243,6 +332,14 @@ func toStoreCalendar(c gpa.Calendar) store.Calendar {
 		Type:        int(c.Type),
 		Active:      c.Flags&gpa.CalendarFlagActive != 0,
 	}
+	if member == nil {
+		return out
+	}
+	out.Name = member.Name
+	out.Description = member.Description
+	out.Color = member.Color
+	out.Active = gpa.CalendarFlag(member.Flags)&gpa.CalendarFlagActive != 0
+	return out
 }
 
 func toEnvelope(ev gpa.CalendarEvent) store.CalendarEventEnvelope {

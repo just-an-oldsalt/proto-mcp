@@ -193,6 +193,13 @@ type Session struct {
 	AccessToken  string
 	RefreshToken string
 
+	// calMembers caches the full calendar-member records captured by the
+	// post-request hook, keyed by calendar ID. The SDK's own
+	// CalendarMember type drops the name and flags; see
+	// calendar_members.go.
+	calMu      sync.Mutex
+	calMembers map[string][]CalendarMemberFull
+
 	// OnAuthUpdate, if set, fires whenever the SDK hands us a rotated
 	// auth bundle. Session.AccessToken / RefreshToken have already been
 	// updated by the time this is called. Callers wire this to persist
@@ -428,6 +435,7 @@ func Login(ctx context.Context, mgr *gpa.Manager, creds *Credentials) (*Session,
 		TwoFA:        auth.TwoFA.Enabled,
 	}
 	sess.installAuthHandler()
+	sess.installCalendarMemberHook()
 
 	// Use a detached context for revoke. The caller's ctx may be cancelled
 	// (Ctrl-C mid-login), and AuthDelete on a cancelled context would
