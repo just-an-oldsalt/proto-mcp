@@ -62,16 +62,37 @@ func (d *debugTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 // dump still tells you which headers were present.
 var dumpHeaderRedactRE = regexp.MustCompile(`(?im)^(Authorization|Cookie|Set-Cookie|X-Pm-Uid|X-Pm-Human-Verification-Token|Proxy-Authorization):.*$`)
 
-// dumpBodyTokenRE matches JSON-shaped credential fields likely to
-// appear in /auth/v4 responses: AccessToken, RefreshToken, TwoFactorCode,
-// SaltedKeyPass*, etc. The value is replaced with "[REDACTED]" while
-// the key is preserved so the dump still tells you which fields were
-// in the payload.
-var dumpBodyTokenRE = regexp.MustCompile(`"(AccessToken|RefreshToken|TwoFactorCode|TwoFA|Password|MailboxPassword|SaltedKeyPass[A-Za-z]*|ClientProof|ClientEphemeral|ServerProof|UID)"\s*:\s*"[^"]*"`)
+// dumpBodyTokenRE matches JSON-shaped credential fields appearing in
+// Proton responses. The value is replaced with "[REDACTED]" while the key
+// is preserved so the dump still tells you which fields were in the
+// payload.
+//
+// Beyond the /auth/v4 tokens, this covers the key material that
+// /core/v4/users, /core/v4/addresses and /core/v4/salts return on every
+// session bootstrap — PrivateKey (an armored PGP private key block),
+// RecoverySecret, the Token that unwraps an address key, and KeySalt.
+// These are passphrase-protected rather than bare, but they are still the
+// user's key material and have no business in a debug log.
+//
+// The quoted-name-then-colon anchoring keeps prefixes unambiguous:
+// "RecoverySecret" cannot match inside "RecoverySecretSignature", because
+// the pattern requires a closing quote immediately after the name.
+var dumpBodyTokenRE = regexp.MustCompile(`"(AccessToken|RefreshToken|TwoFactorCode|TwoFA|Password|MailboxPassword|SaltedKeyPass[A-Za-z]*|ClientProof|ClientEphemeral|ServerProof|UID|PrivateKey|RecoverySecret|RecoverySecretSignature|KeySalt|Token|Passphrase)"\s*:\s*"[^"]*"`)
 
-// redactDump scrubs an httputil.Dump* output before printing. Two
-// passes: header-line regex and JSON-body field regex. Both preserve
-// the field/header name so the dump remains diagnostically useful.
+// dumpArmoredKeyRE matches an armored PGP private key block anywhere in
+// the dump. This is a backstop, not the primary defence: dumpBodyTokenRE
+// catches the field names we know about, and this catches a private key
+// that arrives under a field name we haven't enumerated — which is
+// exactly how the PrivateKey leak went unnoticed in the first place.
+// Matches the JSON-escaped form too, since "\n" inside a JSON string is a
+// literal backslash-n and never breaks the run.
+var dumpArmoredKeyRE = regexp.MustCompile(`(?s)-----BEGIN PGP PRIVATE KEY BLOCK-----.*?-----END PGP PRIVATE KEY BLOCK-----`)
+
+// redactDump scrubs an httputil.Dump* output before printing. Three
+// passes: header lines, known JSON credential fields, then a sweep for
+// any armored private key the field pass didn't already cover. All
+// preserve the field/header name so the dump remains diagnostically
+// useful.
 func redactDump(b []byte) []byte {
 	b = dumpHeaderRedactRE.ReplaceAllFunc(b, func(line []byte) []byte {
 		// Find the colon separator.
@@ -88,6 +109,7 @@ func redactDump(b []byte) []byte {
 		}
 		return append(append([]byte{}, match[:idx]...), []byte(`: "[REDACTED]"`)...)
 	})
+	b = dumpArmoredKeyRE.ReplaceAll(b, []byte("[REDACTED PGP PRIVATE KEY]"))
 	return b
 }
 
