@@ -262,6 +262,19 @@ func collectCredentials(ctx context.Context) (*protonclient.Credentials, error) 
 		AskMailboxPassword: func(ctx context.Context) (secret.Secret, error) {
 			return cli.PromptSecret(ctx, "Mailbox password (two-password mode): ")
 		},
+		AskHVBrowserConfirm: func(ctx context.Context, webURL string) error {
+			// Built as one PromptLine label rather than fmt.Print + prompt:
+			// the cli helpers write to /dev/tty on purpose, so `protonmcp
+			// login > log.txt` would otherwise put the link the user needs
+			// in the file and only the bare "Press Enter" on screen.
+			msg := "Proton needs to verify you're human. Open this link and complete verification there:\n  " + webURL + "\n"
+			if webURL == "" {
+				msg = "Proton needs to verify you're human, but didn't return a verification link.\n" +
+					"Log in at https://mail.proton.me to clear the prompt there.\n"
+			}
+			_, err := cli.PromptLine(ctx, msg+"Press Enter once verification is complete: ")
+			return err
+		},
 	}
 
 	if v := os.Getenv("PROTONMCP_PASSWORD"); v != "" {
