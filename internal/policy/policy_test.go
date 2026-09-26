@@ -164,3 +164,73 @@ func TestSnapshotYAMLIsValid(t *testing.T) {
 		t.Errorf("SnapshotYAML output didn't round-trip: %v\n%s", err, out)
 	}
 }
+
+// #127: top-level settings in the override must take effect, after
+// both New and Reload, and show up in Snapshot.
+func TestOverrideTopLevelSettings(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "policy.yaml")
+	if err := os.WriteFile(path, []byte("idle_lock_minutes: 30\nmax_attachment_bytes: 1048576\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	e, err := New(context.Background(), path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	check := func(stage string) {
+		t.Helper()
+		if got := e.IdleLockMinutes(); got != 30 {
+			t.Errorf("%s: IdleLockMinutes = %d, want 30", stage, got)
+		}
+		if got := e.MaxAttachmentBytes(); got != 1048576 {
+			t.Errorf("%s: MaxAttachmentBytes = %d, want 1048576", stage, got)
+		}
+		snap := e.Snapshot()
+		if snap.IdleLockMinutes != 30 || snap.MaxAttachmentBytes != 1048576 {
+			t.Errorf("%s: Snapshot idle=%d maxatt=%d, want 30 / 1048576",
+				stage, snap.IdleLockMinutes, snap.MaxAttachmentBytes)
+		}
+		out, err := e.SnapshotYAML()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, want := range []string{"idle_lock_minutes: 30", "max_attachment_bytes: 1048576"} {
+			if !strings.Contains(string(out), want) {
+				t.Errorf("%s: SnapshotYAML missing %q", stage, want)
+			}
+		}
+	}
+	check("New")
+	if err := e.Reload(); err != nil {
+		t.Fatal(err)
+	}
+	check("Reload")
+}
+
+// #127: an explicit 0 in the override beats a nonzero base value; an
+// absent key leaves the base value alone.
+func TestOverrideExplicitZeroWins(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "policy.yaml")
+	e := &Engine{override: path}
+
+	if err := os.WriteFile(path, []byte("idle_lock_minutes: 0\nmax_attachment_bytes: 0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	base := document{IdleLockMinutes: 15, MaxAttachmentBytes: 1 << 20}
+	if err := e.applyOverrideInto(&base); err != nil {
+		t.Fatal(err)
+	}
+	if base.IdleLockMinutes != 0 || base.MaxAttachmentBytes != 0 {
+		t.Errorf("explicit 0: idle=%d maxatt=%d, want 0 / 0", base.IdleLockMinutes, base.MaxAttachmentBytes)
+	}
+
+	if err := os.WriteFile(path, []byte("tools:\n  mail_list: { decision: deny }\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	base = document{IdleLockMinutes: 15, MaxAttachmentBytes: 1 << 20}
+	if err := e.applyOverrideInto(&base); err != nil {
+		t.Fatal(err)
+	}
+	if base.IdleLockMinutes != 15 || base.MaxAttachmentBytes != 1<<20 {
+		t.Errorf("absent keys: idle=%d maxatt=%d, want 15 / %d", base.IdleLockMinutes, base.MaxAttachmentBytes, 1<<20)
+	}
+}

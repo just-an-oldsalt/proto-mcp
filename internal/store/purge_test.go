@@ -129,6 +129,71 @@ func TestPurgeAlsoCleansFTSIndex(t *testing.T) {
 	}
 }
 
+// #130 — invalidating a cached body (what sync does on a message
+// update) must remove the plaintext and its FTS tokens, not just the
+// freshness stamp the retention purge keys on.
+func TestInvalidateBodyCacheRemovesPlaintext(t *testing.T) {
+	ctx := context.Background()
+	s := newPurgeStore(t)
+	seedBody(t, s, "m1", time.Now().UTC().Add(-60*24*time.Hour))
+
+	if err := s.InvalidateBodyCache(ctx, "m1"); err != nil {
+		t.Fatal(err)
+	}
+	m, err := s.GetMessage(ctx, "m1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.BodyText != nil || m.BodyHTML != nil {
+		t.Errorf("plaintext survives invalidation: text=%v html=%v", m.BodyText, m.BodyHTML)
+	}
+	if ids, _ := s.SearchMessages(ctx, `"body-m1"`, 0); len(ids) != 0 {
+		t.Errorf("FTS still matches the invalidated body: %v", ids)
+	}
+	if ids, _ := s.SearchMessages(ctx, `"subj-m1"`, 0); len(ids) != 1 {
+		t.Errorf("subject should stay searchable after invalidation: %v", ids)
+	}
+}
+
+// #130 — rows orphaned by the old InvalidateBodyCache (body present,
+// body_cached_at NULL) must be purged and counted, whatever the cutoff.
+func TestPurgeOlderThan_ClearsOrphanedBodies(t *testing.T) {
+	ctx := context.Background()
+	s := newPurgeStore(t)
+	now := time.Now().UTC()
+	seedBody(t, s, "orphan", now)
+	seedBody(t, s, "fresh", now)
+	// Recreate the pre-fix invalidate: freshness stamp gone, body kept.
+	if _, err := s.DB.ExecContext(ctx, `UPDATE messages SET body_cached_at = NULL WHERE id = 'orphan'`); err != nil {
+		t.Fatal(err)
+	}
+
+	cutoff := now.Add(-24 * time.Hour)
+	stats, err := s.CountCachedBodies(ctx, cutoff)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.TotalCached != 2 || stats.WouldPurge != 1 {
+		t.Errorf("stats = total %d / would purge %d, want 2 / 1", stats.TotalCached, stats.WouldPurge)
+	}
+	n, err := s.PurgeOlderThan(ctx, cutoff)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Errorf("purged = %d, want 1 (the orphan only)", n)
+	}
+	if m, _ := s.GetMessage(ctx, "orphan"); m.BodyText != nil || m.BodyHTML != nil {
+		t.Errorf("orphaned plaintext survives purge")
+	}
+	if ids, _ := s.SearchMessages(ctx, `"body-orphan"`, 0); len(ids) != 0 {
+		t.Errorf("FTS still matches the purged orphan: %v", ids)
+	}
+	if _, err := s.GetCachedBody(ctx, "fresh"); err != nil {
+		t.Errorf("fresh body should survive: %v", err)
+	}
+}
+
 func TestCountCachedBodies_Stats(t *testing.T) {
 	s := newPurgeStore(t)
 	now := time.Now().UTC()

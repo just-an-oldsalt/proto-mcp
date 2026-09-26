@@ -341,7 +341,7 @@ func mailDraftList(deps Deps) mcp.Tool {
 				summaries = append(summaries, hitToSummary(h))
 			}
 			res := listResult{Messages: summaries}
-			if opts.Limit > 0 && len(hits) >= opts.Limit {
+			if len(hits) >= store.EffectiveSearchLimit(opts.Limit) {
 				res.NextCursor = encodeCursor(opts.Offset+len(hits), qhash)
 			}
 			return mcp.StructuredResult(res)

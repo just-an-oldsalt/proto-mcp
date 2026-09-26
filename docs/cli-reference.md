@@ -25,7 +25,7 @@ maintenance. When something isn't working, start with `protonmcp doctor`.
 | `daemon` | `install` / `uninstall` / `start` / `stop` / `restart` / `status` — manage the LaunchAgent. |
 | `policy` | `reload` / `show` / `validate` — see [configuration.md](./configuration.md). |
 | `lock` / `unlock` | Lock or Touch-ID-unlock the running daemon. |
-| `purge` | Trim the cached-body window. Flags: `--older-than`, `--vacuum`. |
+| `purge` | Trim the cached plaintext window (message bodies, attachments, decrypted calendar events). Flags: `--older-than`, `--vacuum`. |
 
 ## The 34 MCP tools
 

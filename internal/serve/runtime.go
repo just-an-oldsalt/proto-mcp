@@ -200,6 +200,13 @@ func (r *Runtime) Unlock(ctx context.Context) error {
 			Policy:  r.Policy,
 		}))
 	}
+	// #129: an unlock is activity. Without this the idle clock still
+	// reads the pre-lock timestamp and the next idle tick relocks with
+	// idle_timeout seconds after the user approved Touch ID. Bumped
+	// before locked flips so no tick can see "unlocked but stale".
+	if r.idleTracker != nil {
+		r.idleTracker.bumpActivity()
+	}
 	r.locked = false
 	r.lockReason = ""
 	r.mu.Unlock()
@@ -228,7 +235,18 @@ func SweepStaleBodies(ctx context.Context, st *store.Store) (int64, error) {
 	// staging dir at the same retention cutoff, so daemon startup also
 	// clears stale plaintext files (not just the SQLite cache rows).
 	_, _ = mcptools.SweepStagingOlderThan(cutoff)
-	return st.PurgeOlderThan(ctx, cutoff)
+	n, err := st.PurgeOlderThan(ctx, cutoff)
+	if err != nil {
+		return n, err
+	}
+	// #130 — decrypted calendar text shares the retention model.
+	// Best-effort like the staging sweep; the return stays body rows.
+	if calN, calErr := st.PurgeCalendarOlderThan(ctx, cutoff); calErr != nil {
+		slog.Warn("startup calendar purge failed", "err", calErr.Error())
+	} else if calN > 0 {
+		slog.Info("startup calendar purge", "events_cleared", calN)
+	}
+	return n, nil
 }
 
 // SetupConfig is the input to Setup. Callers fill it in based on

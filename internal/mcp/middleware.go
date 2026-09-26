@@ -344,8 +344,30 @@ func (m *Middleware) runTool(ctx context.Context, t Tool, args json.RawMessage, 
 		return nil, NewError(CodeInternalError,
 			fmt.Sprintf("tool %s returned nil result with no error", t.Name))
 	}
+	if res.IsError {
+		// #128: handlers report failures (a refused send, a failed
+		// SendDraft) as ErrorResult(...), nil. That is not a success.
+		outcome = audit.OutcomeError
+		errMsg = firstText(res)
+		if errMsg == "" {
+			errMsg = "tool returned an error result"
+		}
+		return res, nil
+	}
 	outcome = audit.OutcomeOK
 	return res, nil
+}
+
+// firstText returns the first non-empty text content of res, for the
+// audit error_msg of an IsError result. Redaction happens in runTool's
+// deferred Complete, like every other errMsg.
+func firstText(res *ToolResult) string {
+	for _, c := range res.Content {
+		if c.Type == "text" && c.Text != "" {
+			return c.Text
+		}
+	}
+	return ""
 }
 
 // resolveLock handles a tool call that arrived while the daemon was

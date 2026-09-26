@@ -124,6 +124,48 @@ func TestApplyMessageUpdateInvalidatesBody(t *testing.T) {
 	if _, err := st.GetCachedBody(ctx, "m1"); err == nil {
 		t.Error("expected body cache to be invalidated after update")
 	}
+	// #130: and the plaintext itself is gone, not just the stamp.
+	if m, _ := st.GetMessage(ctx, "m1"); m.BodyText != nil {
+		t.Errorf("body_text survives invalidation: %q", *m.BodyText)
+	}
+}
+
+// #130 — a flag-only update (read/unread, star; reading a message
+// emits one) can't change the body, so it must keep the cached body.
+func TestApplyMessageUpdateFlagsKeepsBody(t *testing.T) {
+	st := mustOpen(t)
+	ctx := context.Background()
+
+	if err := st.UpsertMessage(ctx, store.Message{ID: "m1", ThreadID: "m1", Unread: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetCachedBody(ctx, "m1", store.CachedBody{Text: "body", HTML: "<p>body</p>"}); err != nil {
+		t.Fatal(err)
+	}
+
+	e := gpa.Event{
+		Messages: []gpa.MessageEvent{
+			{
+				EventItem: gpa.EventItem{ID: "m1", Action: gpa.EventUpdateFlags},
+				Message: gpa.MessageMetadata{
+					ID:        "m1",
+					AddressID: "a-1",
+					Subject:   "subject",
+					Time:      1,
+					Unread:    false,
+				},
+			},
+		},
+	}
+	if err := applyEvent(ctx, st, e, &RunResult{}); err != nil {
+		t.Fatalf("applyEvent: %v", err)
+	}
+	if _, err := st.GetCachedBody(ctx, "m1"); err != nil {
+		t.Errorf("flag-only update dropped the cached body: %v", err)
+	}
+	if m, _ := st.GetMessage(ctx, "m1"); m.Unread {
+		t.Error("flag update not applied: still unread")
+	}
 }
 
 func TestApplyLabelCRUD(t *testing.T) {
