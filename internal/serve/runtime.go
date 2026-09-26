@@ -200,6 +200,13 @@ func (r *Runtime) Unlock(ctx context.Context) error {
 			Policy:  r.Policy,
 		}))
 	}
+	// #129: an unlock is activity. Without this the idle clock still
+	// reads the pre-lock timestamp and the next idle tick relocks with
+	// idle_timeout seconds after the user approved Touch ID. Bumped
+	// before locked flips so no tick can see "unlocked but stale".
+	if r.idleTracker != nil {
+		r.idleTracker.bumpActivity()
+	}
 	r.locked = false
 	r.lockReason = ""
 	r.mu.Unlock()
