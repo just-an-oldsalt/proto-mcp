@@ -117,16 +117,8 @@ const blobVersion = 3
 // Phase-7/D SecAccessControl path is intentionally NOT called here
 // — see the blobVersion comment for why (restricted-entitlement wall).
 func Save(l Live) error {
-	if l.Email == "" || l.UID == "" || l.RefreshToken == "" {
-		return errors.New("keystore: refusing to save incomplete session (need email, uid, refresh_token)")
-	}
-	// SECURITY D16 / B-14: refuse to write a blob whose
-	// SaltedKeyPass got zeroed mid-flight. Without this guard, a
-	// Close-vs-OnAuthUpdate race silently corrupts the Keychain
-	// entry — next Resume fails at the key-unlock step with no
-	// diagnostic clue. Pair with C-4 (OnAuthUpdate guard).
-	if len(l.SaltedKeyPass.Bytes()) == 0 {
-		return errors.New("keystore: refusing to save empty SaltedKeyPass (D16: likely Close/OnAuthUpdate race)")
+	if err := l.validate(); err != nil {
+		return err
 	}
 	blob := savedBlob{
 		Email:         l.Email,
@@ -278,4 +270,38 @@ func zero(b []byte) {
 	for i := range b {
 		b[i] = 0
 	}
+}
+
+// allZero reports whether every byte of b is zero.
+func allZero(b []byte) bool {
+	for _, c := range b {
+		if c != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// validate holds Save's refusal checks. Kept separate from the
+// Keychain write so tests can exercise the guards without any path to
+// the real Keychain item (there is one per machine — see Service).
+func (l Live) validate() error {
+	if l.Email == "" || l.UID == "" || l.RefreshToken == "" {
+		return errors.New("keystore: refusing to save incomplete session (need email, uid, refresh_token)")
+	}
+	// SECURITY D16 / B-14: refuse to write a blob whose
+	// SaltedKeyPass got zeroed mid-flight. Without this guard, a
+	// Close-vs-OnAuthUpdate race silently corrupts the Keychain
+	// entry — next Resume fails at the key-unlock step with no
+	// diagnostic clue. Pair with C-4 (OnAuthUpdate guard).
+	if len(l.SaltedKeyPass.Bytes()) == 0 {
+		return errors.New("keystore: refusing to save empty SaltedKeyPass (D16: likely Close/OnAuthUpdate race)")
+	}
+	// Issue #123: a zeroed-but-not-detached pass (a value copy of a
+	// Secret whose sharer called Zero) keeps its length, so the check
+	// above misses it. A real salted pass is never all zero bytes.
+	if allZero(l.SaltedKeyPass.Bytes()) {
+		return errors.New("keystore: refusing to save all-zero SaltedKeyPass (#123: zeroed shared backing array)")
+	}
+	return nil
 }
