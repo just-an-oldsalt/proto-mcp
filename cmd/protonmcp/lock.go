@@ -15,8 +15,9 @@ import (
 // the in-memory session and flips Runtime.Locked = true; subsequent
 // tool calls return "daemon is locked" until `protonmcp unlock`.
 //
-// Phase 6/E. Same pgrep-by-executable mechanism as `policy reload`
-// (SECURITY D9 / D33) — no PID file, no race with stale lock files.
+// Phase 6/E. Same discovery mechanism as `policy reload`
+// (SECURITY D9 / D33), which unions pgrep with the PID file and
+// verifies each candidate's real executable before signalling it.
 func runLock(_ context.Context, args []string) error {
 	return signalRunning("lock", syscall.SIGUSR1, args)
 }
@@ -42,7 +43,8 @@ func signalRunning(verb string, sig syscall.Signal, args []string) error {
 	pids, err := policy.FindRunningPIDs()
 	if err != nil {
 		if errors.Is(err, policy.ErrNotRunning) {
-			return errors.New("no protonmcp serve-stdio or daemon appears to be running")
+			return errors.New("no protonmcp serve-stdio or daemon appears to be running\n" +
+				"       check with: protonmcp doctor")
 		}
 		return err
 	}

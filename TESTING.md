@@ -423,15 +423,32 @@ of, after D40's re-fix) the application-layer gate.
 
 ### 5.1 — Manual lock via CLI
 
+**Note.** `whoami` is NOT a probe of daemon lock state — it resumes
+the session from the Keychain in-process and never touches the
+daemon, so it succeeds against a fully locked daemon. (Earlier
+revisions of this document said otherwise.) Drive a real tool call
+through the shim instead:
+
 ```sh
 ./bin/protonmcp lock
-sleep 1
-./bin/protonmcp whoami
+
+# One tools/call over the shim, exactly as Claude Desktop does it.
+{
+  printf '%s\n' '{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}'
+  printf '%s\n' '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+  sleep 1
+  printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"account_whoami","arguments":{}}}'
+  sleep 75
+} | ./bin/protonmcp-shim 2>/dev/null | tail -1
 ```
 
-**Expected.** Lock command reports `sent SIGUSR1 to protonmcp pid
-<pid>`. `whoami` (which talks via the shim) fails with
-`daemon is locked (SIGUSR1); run \`protonmcp unlock\` to resume`.
+**Expected.** Lock reports `sent SIGUSR1 to protonmcp pid <pid>` —
+naming the **protonmcpd** PID when the daemon is what's running, not
+just serve-stdio instances (PROTO-152; see 5.6). The tool call raises
+a Touch ID prompt. Let it expire (or decline): the result is
+`isError: true` with `daemon is locked (SIGUSR1) and the unlock
+prompt was not approved: ...`. Approve it instead and the call
+returns the account summary.
 
 ### 5.2 — Manual unlock via CLI
 
@@ -452,12 +469,73 @@ by `make lockwatch` or `make all`).
 ```sh
 # Lock the screen: Control-Command-Q on macOS.
 # Wait a few seconds, then unlock the screen with your password.
-./bin/protonmcp whoami
+./bin/protonmcp doctor | grep 'lock state'
 ```
 
-**Expected.** `whoami` fails with `daemon is locked
-(screen_locked); run \`protonmcp unlock\` to resume`. Then run
-`protonmcp unlock` to bring it back.
+**Expected.** `[ warn ] lock state  LOCKED since ... (screen_locked)`
+— the daemon stays locked across the screen unlock by design, since a
+screen unlock isn't Touch ID. Recover either with `protonmcp unlock`
+or by making a tool call (5.1's shim snippet), which raises the
+prompt itself.
+
+### 5.6 — Lock/unlock actually reach the daemon (PROTO-152 regression)
+
+The bug this guards: discovery looked only for `protonmcp serve-stdio`
+in argv and then required the target to be the *same file* as the
+calling CLI. protonmcpd matches neither, so `lock`, `unlock`, and
+`policy reload` all reported "not running" against a healthy daemon
+and silently did nothing.
+
+**Prereq.** The daemon is running and no serve-stdio instance is.
+
+```sh
+pgrep -x protonmcpd          # note the PID
+./bin/protonmcp unlock       # must name that exact PID
+./bin/protonmcp policy reload
+```
+
+**Expected.** Both commands report the protonmcpd PID. Neither prints
+"no protonmcp serve-stdio or daemon appears to be running". The
+daemon log records the corresponding handler firing.
+
+**Also verify** no shim gets signalled — `protonmcp-shim` installs no
+SIGUSR handler, so a stray signal would kill it:
+
+```sh
+pgrep -f protonmcp-shim      # count before
+./bin/protonmcp unlock
+pgrep -f protonmcp-shim      # same count after
+```
+
+### 5.7 — Unlock prompts are rate-limited
+
+```sh
+./bin/protonmcp lock
+# Run 5.1's shim snippet once and DECLINE (or ignore) the prompt.
+# Then re-run it immediately, several times.
+```
+
+**Expected.** Exactly **one** Touch ID prompt. The retries fail fast
+with `an unlock prompt was not approved; not asking again for <n>s`.
+After 60s a fresh call prompts again; `protonmcp unlock` works
+immediately regardless of the cooldown.
+
+### 5.8 — doctor reports lock state
+
+```sh
+./bin/protonmcp lock
+./bin/protonmcp doctor
+```
+
+**Expected.** A `[ warn ] lock state  LOCKED since ... — every tool
+call is being refused` line, with `protonmcp unlock` in the "To fix"
+block. Doctor must **not** print "All good" while the daemon is
+locked — that was the original defect. After unlocking, the line
+reads `[  ok  ] lock state  unlocked`.
+
+Stop the daemon and re-run doctor: the lock-state line disappears
+rather than reporting a stale lock (the record is ignored once the
+PID that wrote it is gone).
 
 ### 5.4 — Idle timeout (requires policy override)
 

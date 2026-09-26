@@ -83,6 +83,19 @@ type Middleware struct {
 	rate             *rateLimiter
 	lockState        func() (bool, string) // Phase 6/E — nil = unlockable
 	onToolCallObserv func()                // Phase 7/A — idle activity bump
+
+	// PROTO-152 — agent-requested unlock. nil keeps the original
+	// behavior (a locked call is refused outright); when set, a
+	// locked call raises the Touch ID prompt through this callback
+	// and retries on approval. See internal/mcp/unlock.go.
+	requestUnlock func(context.Context) error
+	unlockGate    *unlockGate
+
+	// lookupTool re-resolves a tool from the server registry. Needed
+	// because an unlock mid-call rebinds every session-backed handler
+	// (PROTO-132) and the copy captured at dispatch is stale. Set by
+	// Server.New.
+	lookupTool func(string) (Tool, bool)
 }
 
 func (m *Middleware) ensureRate() {
@@ -134,19 +147,36 @@ func (m *Middleware) runTool(ctx context.Context, t Tool, args json.RawMessage, 
 		callerInfo = m.resolver.Resolve()
 	}
 
-	// Phase 6/E — locked daemon refuses every tool call until
-	// `protonmcp unlock` (or SIGUSR2). The check happens BEFORE
-	// the audit row so a locked-daemon flood doesn't write a
-	// row per attempt — only the first attempt per second is
-	// logged (logger.Warn-rate-limited at the caller level if
-	// needed). For now we log every locked call at Warn — the
-	// daemon is presumed to lock infrequently.
+	// Phase 6/E — locked daemon gates every tool call until it's
+	// unlocked. The check happens BEFORE the audit row so a
+	// locked-daemon flood doesn't write a row per attempt — only the
+	// first attempt per second is logged (logger.Warn-rate-limited at
+	// the caller level if needed). For now we log every locked call
+	// at Warn — the daemon is presumed to lock infrequently.
+	//
+	// PROTO-152 — when an unlock callback is wired, the call raises a
+	// Touch ID prompt and proceeds on approval instead of dead-ending
+	// on an instruction only a human at a terminal could follow.
 	if m.lockState != nil {
 		if locked, reason := m.lockState(); locked {
-			logger.Warn("tool call refused: daemon locked",
-				"tool", t.Name, "reason", reason,
+			if refusal := m.resolveLock(ctx, t.Name, reason, logger); refusal != "" {
+				logger.Warn("tool call refused: daemon locked",
+					"tool", t.Name, "reason", reason,
+					"caller_pid", callerInfo.PID)
+				return ErrorResult("%s", refusal), nil
+			}
+			// Unlocked. PROTO-132: Unlock rebinds every session-backed
+			// handler to the freshly acquired session, so re-resolve
+			// this tool — the copy captured at dispatch still points at
+			// the pre-lock session, which is now Closed.
+			if m.lookupTool != nil {
+				if fresh, ok := m.lookupTool(t.Name); ok {
+					t = fresh
+				}
+			}
+			logger.Warn("daemon unlocked on request; resuming tool call",
+				"tool", t.Name, "was_locked_for", reason,
 				"caller_pid", callerInfo.PID)
-			return ErrorResult("daemon is locked (%s); run `protonmcp unlock` to resume", reason), nil
 		}
 	}
 
@@ -302,6 +332,46 @@ func (m *Middleware) runTool(ctx context.Context, t Tool, args json.RawMessage, 
 	}
 	outcome = audit.OutcomeOK
 	return res, nil
+}
+
+// resolveLock handles a tool call that arrived while the daemon was
+// locked. Returns "" when the daemon is now unlocked and the call may
+// proceed; otherwise the message to hand back to the model.
+//
+// The returned strings are written for the model as much as the user:
+// each one says whether waiting will help, so Claude can decide
+// between retrying and telling the user to go tap the sensor, rather
+// than looping on a refusal it can't act on.
+func (m *Middleware) resolveLock(ctx context.Context, tool, reason string, logger Logger) string {
+	if m.requestUnlock == nil {
+		return fmt.Sprintf("daemon is locked (%s); run `protonmcp unlock` to resume", reason)
+	}
+	if m.unlockGate == nil {
+		m.unlockGate = newUnlockGate()
+	}
+
+	ok, why := m.unlockGate.begin()
+	if !ok {
+		return fmt.Sprintf("daemon is locked (%s); %s", reason, why)
+	}
+
+	logger.Warn("locked daemon: raising Touch ID unlock prompt for a tool call",
+		"tool", tool, "reason", reason)
+	err := m.requestUnlock(ctx)
+	m.unlockGate.end(err)
+
+	if err != nil {
+		return fmt.Sprintf(
+			"daemon is locked (%s) and the unlock prompt was not approved: %v — "+
+				"approve the Touch ID prompt, or run `protonmcp unlock`", reason, err)
+	}
+	// Defensive: a nil error should mean unlocked, but re-read the
+	// authoritative flag rather than assume. A concurrent lock (the
+	// screen re-locking mid-prompt) lands here.
+	if locked, nowReason := m.lockState(); locked {
+		return fmt.Sprintf("daemon re-locked (%s) before the call could run; retry", nowReason)
+	}
+	return ""
 }
 
 // Logger is the minimal subset of *slog.Logger the middleware uses.

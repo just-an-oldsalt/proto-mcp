@@ -157,6 +157,32 @@ func WithLockState(fn func() (bool, string)) Option {
 	}
 }
 
+// WithUnlockRequest wires the callback the middleware invokes when a
+// tool call arrives at a locked daemon. It should raise the Touch ID
+// prompt and, on approval, restore the session — serve.Runtime.Unlock
+// is the intended implementation.
+//
+// PROTO-152. Without this the middleware refuses locked calls with an
+// instruction ("run `protonmcp unlock`") that the model cannot carry
+// out, which strands every client until a human opens a terminal.
+// With it, the model can ask for the unlock; Touch ID still decides.
+// Prompt frequency is bounded by unlockGate — see internal/mcp/unlock.go.
+//
+// Requires WithLockState; without a lock-state callback there's no
+// locked path to reach this from.
+func WithUnlockRequest(fn func(context.Context) error) Option {
+	return func(s *Server) {
+		if fn == nil {
+			return
+		}
+		if s.middleware == nil {
+			s.middleware = &Middleware{}
+		}
+		s.middleware.requestUnlock = fn
+		s.middleware.unlockGate = newUnlockGate()
+	}
+}
+
 // WithToolCallObserver registers a no-arg, non-blocking callback the
 // middleware fires at the start of every tool call (after the
 // lock-state check, before any audit / policy work). Phase 7/A —
@@ -193,7 +219,22 @@ func New(logger *slog.Logger, opts ...Option) *Server {
 	for _, opt := range opts {
 		opt(s)
 	}
+	if s.middleware != nil {
+		// PROTO-152 — lets the middleware re-resolve a tool after an
+		// unlock swapped the handler out from under an in-flight call.
+		s.middleware.lookupTool = s.lookupTool
+	}
 	return s
+}
+
+// lookupTool returns the currently registered definition for name.
+// Distinct from Tools() in that it doesn't copy the whole registry —
+// and it always reflects the latest ReplaceTools.
+func (s *Server) lookupTool(name string) (Tool, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	t, ok := s.tools[name]
+	return t, ok
 }
 
 // Register adds a tool to the server. Re-registering the same name
@@ -408,9 +449,7 @@ func (s *Server) handleToolsCall(ctx context.Context, raw json.RawMessage) (*Too
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return nil, NewError(CodeInvalidParams, "tools/call: "+err.Error())
 	}
-	s.mu.RLock()
-	t, ok := s.tools[p.Name]
-	s.mu.RUnlock()
+	t, ok := s.lookupTool(p.Name)
 	if !ok {
 		return nil, NewError(CodeMethodNotFound, "unknown tool: "+p.Name)
 	}

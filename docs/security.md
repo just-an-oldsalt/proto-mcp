@@ -18,9 +18,19 @@ layers of protection:
    keychain is unlocked.
 2. **Touch ID at session-acquire time** — the daemon prompts for
    biometric (or password fallback via Apple's
-   `.deviceOwnerAuthentication`) on every startup and every
-   `protonmcp unlock` after a manual or automatic lock. The prompt is
-   issued at the application layer by the Swift helper.
+   `.deviceOwnerAuthentication`) on every startup and every unlock
+   after a manual or automatic lock. The prompt is issued at the
+   application layer by the Swift helper.
+
+   An unlock can be requested either by `protonmcp unlock` or by a tool
+   call arriving at a locked daemon. Who *asks* is not a security
+   boundary — the sensor is, and it can't be satisfied by software. What
+   the request path does expose is the prompt itself: content the model
+   reads (mail bodies above all) can try to steer it into a tool call,
+   and each locked call is an opportunity to raise a dialog. The threat
+   is prompt fatigue, not unauthorized access, so it's bounded by rate
+   rather than forbidden — one prompt in flight at a time, and a 60s
+   cooldown after any prompt the user doesn't approve.
 3. **Per-call approval** — every write tool fires a custom prompt + Touch
    ID showing the **literal** recipients and subject before anything
    happens. Approvals expire per policy TTL; `mail_send` has TTL 0, so
