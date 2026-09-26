@@ -117,18 +117,9 @@ func mailSendDraft(deps Deps) mcp.Tool {
 		// allowed_recipients enforcement still works once the
 		// handler runs and validates recipients before SendDraft.
 		Recipients: nil,
-		PromptBody: func(args json.RawMessage) (string, string) {
-			var in input
-			_ = json.Unmarshal(args, &in)
-			body := "Send draft " + sanitizeField(in.DraftID)
-			if recips := lookupDraftRecipients(deps, in.DraftID); recips != "" {
-				body += "\n" + recips
-			} else {
-				body += " to its stored recipients (could not resolve addresses for display)."
-			}
-			return mcp.SanitizePromptText("Approve mail_send_draft?", 120),
-				mcp.SanitizePromptText(body, 4000)
-		},
+		// Issue #116 — the dialog and the send share one fetch of the
+		// draft; sendDraftByID refuses if it changed after approval.
+		PromptSnapshot: draftPromptSnapshot(deps),
 		Handler: func(ctx mcp.Context, raw json.RawMessage) (*mcp.ToolResult, error) {
 			var in input
 			if err := json.Unmarshal(raw, &in); err != nil {
@@ -169,24 +160,8 @@ func mailReply(deps Deps) mcp.Tool {
 		// For reply, the recipient comes from the original message
 		// — needs a network fetch to extract. Skip server-side
 		// allowlist check; the handler validates before SendDraft.
-		Recipients: nil,
-		PromptBody: func(args json.RawMessage) (string, string) {
-			var in input
-			_ = json.Unmarshal(args, &in)
-			body := "Reply to message " + sanitizeField(in.InReplyTo)
-			if recips := lookupReplyRecipients(deps, in.InReplyTo, false); recips != "" {
-				body += "\n" + recips
-			} else {
-				body += " (recipient = original sender)."
-			}
-			if decoded, err := decodeAndValidateAttachments(deps, in.Attachments); err == nil {
-				if s := attachmentsSummary(decoded); s != "" {
-					body += "\n" + s
-				}
-			}
-			return mcp.SanitizePromptText("Approve mail_reply?", 120),
-				mcp.SanitizePromptText(body, 4000)
-		},
+		Recipients:     nil,
+		PromptSnapshot: replyPromptSnapshot(deps, "mail_reply", false),
 		Handler: func(ctx mcp.Context, raw json.RawMessage) (*mcp.ToolResult, error) {
 			var in input
 			if err := json.Unmarshal(raw, &in); err != nil {
@@ -224,25 +199,9 @@ func mailReplyAll(deps Deps) mcp.Tool {
 			"required": ["in_reply_to"],
 			"additionalProperties": false
 		}`),
-		OutputSchema: json.RawMessage(sendResultSchema),
-		Recipients:   nil,
-		PromptBody: func(args json.RawMessage) (string, string) {
-			var in input
-			_ = json.Unmarshal(args, &in)
-			body := "Reply-all to message " + sanitizeField(in.InReplyTo)
-			if recips := lookupReplyRecipients(deps, in.InReplyTo, true); recips != "" {
-				body += "\n" + recips
-			} else {
-				body += " (sender + original To/CC minus you)."
-			}
-			if decoded, err := decodeAndValidateAttachments(deps, in.Attachments); err == nil {
-				if s := attachmentsSummary(decoded); s != "" {
-					body += "\n" + s
-				}
-			}
-			return mcp.SanitizePromptText("Approve mail_reply_all?", 120),
-				mcp.SanitizePromptText(body, 4000)
-		},
+		OutputSchema:   json.RawMessage(sendResultSchema),
+		Recipients:     nil,
+		PromptSnapshot: replyPromptSnapshot(deps, "mail_reply_all", true),
 		Handler: func(ctx mcp.Context, raw json.RawMessage) (*mcp.ToolResult, error) {
 			var in input
 			if err := json.Unmarshal(raw, &in); err != nil {
@@ -468,10 +427,23 @@ func sendCompose(ctx mcp.Context, deps Deps, toolName, parentID string, in sendI
 // the server; we just need to recover their session keys via the
 // sender keyring so AddTextPackage can re-encrypt them per
 // recipient. No new upload, no attachment input on this tool.
+//
+// Issue #116 — held under draftLocks from the fetch through SendDraft
+// so mail_draft_update can't interleave, and refused if the draft no
+// longer matches the snapshot the approval dialog was rendered from.
 func sendDraftByID(ctx mcp.Context, deps Deps, toolName, draftID string) (*mcp.ToolResult, error) {
+	unlock := draftLocks.Lock(draftID)
+	defer unlock()
+
 	draft, err := deps.Session.Client.GetMessage(ctx.Std, draftID)
 	if err != nil {
 		return mcp.ErrorResult("%s: fetch draft: %v", toolName, err), nil
+	}
+	if approved, ok := ctx.Snapshot.(gpa.Message); ok {
+		if what := draftChange(approved, draft); what != "" {
+			return mcp.ErrorResult("%s refused: the draft's %s changed after the approval dialog was shown, so what you approved is not what would be sent. Nothing was sent; review the draft and call %s again.",
+				toolName, what, toolName), nil
+		}
 	}
 	_, addrKR, err := senderKeyring(deps)
 	if err != nil {
@@ -546,39 +518,19 @@ func recoverDraftAttachmentKeys(addrKR *crypto.KeyRing, draft gpa.Message) (map[
 // Phase 8/B — accepts attachments and forwards them through
 // sendCompose's upload + send path.
 func sendReply(ctx mcp.Context, deps Deps, toolName, parentID string, replyAll bool, bodyText, bodyHTML string, attachments []sendAttachmentInput) (*mcp.ToolResult, error) {
-	parent, err := deps.Session.Client.GetMessage(ctx.Std, parentID)
-	if err != nil {
-		return mcp.ErrorResult("%s: fetch parent: %v", toolName, err), nil
-	}
-
-	// Subject — prefix Re: if not already.
-	subject := parent.Subject
-	if !strings.HasPrefix(strings.ToLower(subject), "re:") {
-		subject = "Re: " + subject
-	}
-
-	// Recipients.
-	to := []string{}
-	if parent.Sender != nil {
-		to = append(to, parent.Sender.Address)
-	}
-	cc := []string{}
-	if replyAll {
-		self := selfAddresses(deps)
-		for _, a := range parent.ToList {
-			if a != nil && !contains(self, strings.ToLower(a.Address)) && !contains(to, a.Address) {
-				cc = append(cc, a.Address)
-			}
-		}
-		for _, a := range parent.CCList {
-			if a != nil && !contains(self, strings.ToLower(a.Address)) && !contains(to, a.Address) {
-				cc = append(cc, a.Address)
-			}
+	// Issue #116 — reply from the parent the approval dialog was
+	// rendered from; fetch only when no dialog ran (policy: allow).
+	parent, ok := ctx.Snapshot.(gpa.Message)
+	if !ok || parent.ID != parentID {
+		var err error
+		if parent, err = deps.Session.Client.GetMessage(ctx.Std, parentID); err != nil {
+			return mcp.ErrorResult("%s: fetch parent: %v", toolName, err), nil
 		}
 	}
+	to, cc := replyRecipients(deps, parent, replyAll)
 
 	return sendCompose(ctx, deps, toolName, parentID, sendInput{
-		Subject:     subject,
+		Subject:     replySubject(parent.Subject),
 		To:          to,
 		CC:          cc,
 		BodyText:    bodyText,

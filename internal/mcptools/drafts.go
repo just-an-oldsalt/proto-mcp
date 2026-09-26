@@ -163,6 +163,12 @@ func mailDraftUpdate(deps Deps) mcp.Tool {
 				return nil, mcp.NewError(mcp.CodeInvalidParams, "mail_draft_update: draft_id is required")
 			}
 
+			// Issue #116 — hold the draft's lock across fetch, update
+			// and attachment upload so an in-flight mail_send_draft's
+			// verify-then-send can't interleave with this edit.
+			unlock := draftLocks.Lock(in.DraftID)
+			defer unlock()
+
 			// Fetch the current draft so unspecified fields persist.
 			current, err := deps.Session.Client.GetMessage(ctx.Std, in.DraftID)
 			if err != nil {

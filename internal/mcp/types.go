@@ -129,6 +129,17 @@ type Tool struct {
 	// the generic "tool was requested with these (redacted) args"
 	// body.
 	PromptBody func(args json.RawMessage) (title, body string) `json:"-"`
+
+	// PromptSnapshot replaces PromptBody for tools whose dialog is
+	// rendered from mutable server state (a stored draft, a parent
+	// message). It fetches that state ONCE, renders the dialog from
+	// it, and returns it as snap; the middleware hands snap to the
+	// handler via Context.Snapshot so the handler acts on exactly
+	// what the user approved rather than a second, independent fetch
+	// (issue #116). A non-nil err denies the call before any prompt:
+	// a dialog that can't show what will happen is not approvable.
+	// Only consulted when policy says prompt.
+	PromptSnapshot func(ctx context.Context, args json.RawMessage) (title, body string, snap any, err error) `json:"-"`
 }
 
 // Handler is the tool's actual implementation. params is the raw
@@ -159,6 +170,11 @@ type Context struct {
 	// construct mcp.New without options). Phase 5 write tools may
 	// inspect this for per-caller allowed-recipients enforcement.
 	Caller CallerInfo
+
+	// Snapshot is the state the approval dialog was rendered from,
+	// as returned by Tool.PromptSnapshot. nil when the tool has no
+	// PromptSnapshot or policy didn't prompt for this call.
+	Snapshot any
 }
 
 // CallerInfo is the bag of fields handlers see about who called

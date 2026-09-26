@@ -128,6 +128,7 @@ func (m *Middleware) runTool(ctx context.Context, t Tool, args json.RawMessage, 
 		outcome        = audit.OutcomeError // pessimistic default — flip on success
 		errMsg         string
 		approvalSource string
+		snapshot       any // Tool.PromptSnapshot state, passed to the handler
 		started        = time.Now()
 	)
 
@@ -279,7 +280,18 @@ func (m *Middleware) runTool(ctx context.Context, t Tool, args json.RawMessage, 
 		// a literal "To: ... Subject: ..." string so the user reads
 		// exactly what they're approving in the NSAlert.
 		title, body := defaultPromptTitle(t.Name), defaultPromptBody(t.Name, args, pol)
-		if t.PromptBody != nil {
+		switch {
+		case t.PromptSnapshot != nil:
+			// Issue #116 — render the dialog from one fetch and hand
+			// that same snapshot to the handler below.
+			var serr error
+			title, body, snapshot, serr = t.PromptSnapshot(ctx, args)
+			if serr != nil {
+				outcome = audit.OutcomeDenied
+				errMsg = "prompt snapshot: " + serr.Error()
+				return ErrorResult("%s: could not load what this call would do, so it can't be shown for approval: %v (safe to retry)", t.Name, serr), nil
+			}
+		case t.PromptBody != nil:
 			title, body = t.PromptBody(args)
 		}
 		src, perr := m.broker.Request(ctx, approval.Request{
@@ -311,6 +323,7 @@ func (m *Middleware) runTool(ctx context.Context, t Tool, args json.RawMessage, 
 			UID:    callerInfo.UID,
 			Binary: callerInfo.Binary,
 		},
+		Snapshot: snapshot,
 	}, args)
 	if herr != nil {
 		var jr *Error
