@@ -1,10 +1,13 @@
 package proton
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
+	"net/textproto"
 	"strings"
+	"unicode/utf8"
 
 	gpa "github.com/ProtonMail/go-proton-api"
 
@@ -24,6 +27,13 @@ type MessageBody struct {
 	Text       string // plaintext (snippet-ready, no HTML)
 	HTML       string // sanitized HTML (no scripts/iframes/anchors)
 	MIMEType   string // "text/html", "text/plain", "multipart/*"
+
+	// ListUnsubscribe / ListUnsubscribePost are the raw RFC 2369 /
+	// RFC 8058 header values, control-stripped and capped at
+	// maxListHeaderBytes but otherwise unparsed. Sender-controlled:
+	// mcptools.parseUnsubscribe filters them before exposure.
+	ListUnsubscribe     string
+	ListUnsubscribePost string
 }
 
 // FetchAndDecryptMessage pulls a single full message from the API,
@@ -64,6 +74,7 @@ func (s *Session) FetchAndDecryptMessage(ctx context.Context, msgID string) (*Me
 		References: parseReferences(m.ParsedHeaders),
 		ThreadHint: parseInReplyTo(m.ParsedHeaders),
 	}
+	out.ListUnsubscribe, out.ListUnsubscribePost = listUnsubscribeHeaders(m.ParsedHeaders, m.Header)
 	if m.Sender != nil {
 		out.From = m.Sender.Address
 	}
@@ -107,6 +118,46 @@ func parseReferences(h gpa.Headers) []string {
 		out = append(out, extractMessageIDs(raw)...)
 	}
 	return out
+}
+
+// maxListHeaderBytes caps each captured List-Unsubscribe* value. A
+// legitimate header carries a couple of URIs; anything past 4 KiB is
+// junk we don't want to cache or parse.
+const maxListHeaderBytes = 4096
+
+// listUnsubscribeHeaders returns the List-Unsubscribe and
+// List-Unsubscribe-Post values (#102). ParsedHeaders is preferred;
+// if it carries neither, the raw header block is parsed as a
+// fallback (Proton doesn't document which headers ParsedHeaders
+// includes). Values are flattened to one control-free line and capped.
+func listUnsubscribeHeaders(parsed gpa.Headers, rawHeader string) (listUnsub, listUnsubPost string) {
+	unsub := headerValues(parsed, "List-Unsubscribe")
+	post := headerValues(parsed, "List-Unsubscribe-Post")
+	if len(unsub) == 0 && len(post) == 0 && rawHeader != "" {
+		r := textproto.NewReader(bufio.NewReader(strings.NewReader(
+			strings.TrimRight(rawHeader, "\r\n") + "\r\n\r\n")))
+		// ReadMIMEHeader returns what it parsed alongside a
+		// malformed-line error; take whatever it got.
+		h, _ := r.ReadMIMEHeader()
+		unsub = h.Values("List-Unsubscribe")
+		post = h.Values("List-Unsubscribe-Post")
+	}
+	return cleanListHeader(unsub), cleanListHeader(post)
+}
+
+// cleanListHeader joins repeated header instances with ", " (the
+// RFC 2369 list separator), flattens control characters, and
+// truncates to maxListHeaderBytes on a rune boundary.
+func cleanListHeader(vals []string) string {
+	v := sanitize.HeaderValue(strings.Join(vals, ", "))
+	if len(v) <= maxListHeaderBytes {
+		return v
+	}
+	cut := maxListHeaderBytes
+	for cut > 0 && !utf8.RuneStart(v[cut]) {
+		cut--
+	}
+	return v[:cut]
 }
 
 // headerValues is a case-insensitive lookup over the Headers map.

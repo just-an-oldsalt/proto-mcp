@@ -39,7 +39,7 @@ deny-by-default and Touch-ID gated (see [security.md](./security.md)).
 | `account_whoami` | Account summary for the active session. |
 | `mail_list` | List messages with filters (folder, label, read state…). |
 | `mail_search` | Full-text + structured search over the local mirror. |
-| `mail_read` | Read one message (decrypted text + sanitized HTML). |
+| `mail_read` | Read one message (decrypted text + sanitized HTML). If the sender set `List-Unsubscribe`, also returns `unsubscribe: {https, mailto, one_click}`: sender-controlled targets filtered to https/mailto, never acted on by the server. |
 | `mail_read_thread` | Reconstruct and read a full conversation. |
 | `mail_list_attachments` | List a message's attachments (names, sizes, types). |
 | `labels_list` | List labels. |

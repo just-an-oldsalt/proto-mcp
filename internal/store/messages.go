@@ -282,7 +282,7 @@ func (s *Store) DeleteMessage(ctx context.Context, messageID string) error {
 // until the message is read again; subject/sender stay indexed.
 func (s *Store) InvalidateBodyCache(ctx context.Context, messageID string) error {
 	_, err := s.DB.ExecContext(ctx,
-		`UPDATE messages SET body_text = NULL, body_html = NULL, body_cached_at = NULL WHERE id = ?`, messageID)
+		`UPDATE messages SET body_text = NULL, body_html = NULL, list_unsubscribe = NULL, list_unsubscribe_post = NULL, body_cached_at = NULL WHERE id = ?`, messageID)
 	if err != nil {
 		return fmt.Errorf("invalidate body cache %s: %w", messageID, err)
 	}
@@ -319,7 +319,9 @@ func (s *Store) PurgeOlderThan(ctx context.Context, cutoff time.Time) (int64, er
 UPDATE messages
    SET body_text       = NULL,
        body_html       = NULL,
-       body_cached_at  = NULL
+       body_cached_at  = NULL,
+       list_unsubscribe      = NULL,
+       list_unsubscribe_post = NULL
  WHERE `+purgeableBodyWhere, cutoff.Unix())
 	if err != nil {
 		return 0, fmt.Errorf("purge bodies: %w", err)
@@ -336,7 +338,7 @@ UPDATE messages
 // full purge predicate; it takes the cutoff (unix seconds) as its one
 // bound parameter.
 const (
-	orphanBodyWhere    = `(body_cached_at IS NULL AND (body_text IS NOT NULL OR body_html IS NOT NULL))`
+	orphanBodyWhere    = `(body_cached_at IS NULL AND (body_text IS NOT NULL OR body_html IS NOT NULL OR list_unsubscribe IS NOT NULL OR list_unsubscribe_post IS NOT NULL))`
 	purgeableBodyWhere = `((body_cached_at IS NOT NULL AND body_cached_at < ?) OR ` + orphanBodyWhere + `)`
 )
 
@@ -410,6 +412,13 @@ type CachedBody struct {
 	// threading from RFC 2822 In-Reply-To / References headers after
 	// the body fetch.
 	ThreadID string
+
+	// ListUnsubscribe / ListUnsubscribePost are the raw (control-
+	// stripped, capped) RFC 2369 / 8058 header values (#102). They
+	// carry per-recipient tokens, so PurgeOlderThan clears them with
+	// the body.
+	ListUnsubscribe     string
+	ListUnsubscribePost string
 }
 
 // SetCachedBody writes the decrypted-and-sanitized body for a message.
@@ -421,8 +430,8 @@ func (s *Store) SetCachedBody(ctx context.Context, msgID string, b CachedBody) e
 	}
 	if b.ThreadID == "" {
 		_, err := s.DB.ExecContext(ctx,
-			`UPDATE messages SET body_text = ?, body_html = ?, body_cached_at = ? WHERE id = ?`,
-			b.Text, b.HTML, b.CachedAt.Unix(), msgID,
+			`UPDATE messages SET body_text = ?, body_html = ?, body_cached_at = ?, list_unsubscribe = ?, list_unsubscribe_post = ? WHERE id = ?`,
+			b.Text, b.HTML, b.CachedAt.Unix(), b.ListUnsubscribe, b.ListUnsubscribePost, msgID,
 		)
 		if err != nil {
 			return fmt.Errorf("set cached body %s: %w", msgID, err)
@@ -430,8 +439,8 @@ func (s *Store) SetCachedBody(ctx context.Context, msgID string, b CachedBody) e
 		return nil
 	}
 	_, err := s.DB.ExecContext(ctx,
-		`UPDATE messages SET body_text = ?, body_html = ?, body_cached_at = ?, thread_id = ? WHERE id = ?`,
-		b.Text, b.HTML, b.CachedAt.Unix(), b.ThreadID, msgID,
+		`UPDATE messages SET body_text = ?, body_html = ?, body_cached_at = ?, list_unsubscribe = ?, list_unsubscribe_post = ?, thread_id = ? WHERE id = ?`,
+		b.Text, b.HTML, b.CachedAt.Unix(), b.ListUnsubscribe, b.ListUnsubscribePost, b.ThreadID, msgID,
 	)
 	if err != nil {
 		return fmt.Errorf("set cached body %s: %w", msgID, err)
@@ -445,14 +454,16 @@ func (s *Store) SetCachedBody(ctx context.Context, msgID string, b CachedBody) e
 // is expected to fall through to a fresh fetch.
 func (s *Store) GetCachedBody(ctx context.Context, msgID string) (CachedBody, error) {
 	var (
-		text     sql.NullString
-		html     sql.NullString
-		cachedAt sql.NullInt64
+		text      sql.NullString
+		html      sql.NullString
+		cachedAt  sql.NullInt64
+		unsub     sql.NullString
+		unsubPost sql.NullString
 	)
 	err := s.DB.QueryRowContext(ctx,
-		`SELECT body_text, body_html, body_cached_at FROM messages WHERE id = ?`,
+		`SELECT body_text, body_html, body_cached_at, list_unsubscribe, list_unsubscribe_post FROM messages WHERE id = ?`,
 		msgID,
-	).Scan(&text, &html, &cachedAt)
+	).Scan(&text, &html, &cachedAt, &unsub, &unsubPost)
 	if errors.Is(err, sql.ErrNoRows) {
 		return CachedBody{}, ErrNotFound
 	}
@@ -466,7 +477,13 @@ func (s *Store) GetCachedBody(ctx context.Context, msgID string) (CachedBody, er
 	if time.Since(ts) > BodyTTL {
 		return CachedBody{}, ErrNotFound
 	}
-	return CachedBody{Text: text.String, HTML: html.String, CachedAt: ts}, nil
+	return CachedBody{
+		Text:                text.String,
+		HTML:                html.String,
+		CachedAt:            ts,
+		ListUnsubscribe:     unsub.String,
+		ListUnsubscribePost: unsubPost.String,
+	}, nil
 }
 
 func boolToInt(b bool) int {
