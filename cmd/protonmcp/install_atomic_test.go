@@ -61,9 +61,13 @@ func TestWriteConfigAtomicBacksUpPrevious(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	bak, err := os.ReadFile(path + ".bak")
+	baks := configBackups(t, path)
+	if len(baks) != 1 {
+		t.Fatalf("backups = %v, want exactly one", baks)
+	}
+	bak, err := os.ReadFile(baks[0])
 	if err != nil {
-		t.Fatalf("no backup written: %v", err)
+		t.Fatalf("read backup: %v", err)
 	}
 	if string(bak) != string(original) {
 		t.Errorf("backup = %q, want the pre-write contents %q", bak, original)
