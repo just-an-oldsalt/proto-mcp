@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+	"time"
 )
 
 // Claude clients we know how to install into. Each writes to its
@@ -138,13 +140,12 @@ func installInto(t clientTarget, cmdPath string, cmdArgs []string, dryRun bool) 
 	if err != nil {
 		return err
 	}
-	if cfg.MCPServers == nil {
-		cfg.MCPServers = map[string]mcpServerEntry{}
-	}
-	cfg.MCPServers["protonmcp"] = mcpServerEntry{
+	if err := cfg.setServer("protonmcp", mcpServerEntry{
 		Type:    "stdio",
 		Command: cmdPath,
 		Args:    cmdArgs,
+	}); err != nil {
+		return err
 	}
 
 	out, err := json.MarshalIndent(cfg, "", "  ")
@@ -178,8 +179,8 @@ func installInto(t clientTarget, cmdPath string, cmdArgs []string, dryRun bool) 
 // disk between truncate and write destroys all of it.
 //
 // Write to a temp file in the same directory (same filesystem, so the
-// rename is atomic), fsync it, keep the previous contents as a .bak,
-// then rename over the target. A reader either sees the old file or the
+// rename is atomic), fsync it, keep the previous contents as a
+// timestamped backup (see backupConfig), then rename over the target. A reader either sees the old file or the
 // new one, never a partial.
 func writeConfigAtomic(path string, data []byte) error {
 	dir := filepath.Dir(path)
@@ -215,14 +216,60 @@ func writeConfigAtomic(path string, data []byte) error {
 	// Best-effort backup of what we're about to replace. Never fatal —
 	// failing to back up a file is not a reason to refuse to install,
 	// and the atomic rename already guarantees we don't corrupt it.
-	if prev, err := os.ReadFile(path); err == nil {
-		_ = os.WriteFile(path+".bak", prev, 0o600)
-	}
+	backupConfig(path)
 
 	if err := os.Rename(tmpName, path); err != nil {
 		return fmt.Errorf("replace %s: %w", path, err)
 	}
 	return nil
+}
+
+// configBackupsKept is how many timestamped backups backupConfig
+// leaves next to a config. ~/.claude.json can run to megabytes, so the
+// count is bounded; five covers repeated install / uninstall / setup
+// runs without the newest write pushing out the last good copy.
+const configBackupsKept = 5
+
+// backupConfig copies path's current contents to
+// <path>.bak-<UTC timestamp> and prunes all but the newest
+// configBackupsKept of those. Each run gets its own file (O_EXCL, never
+// an overwrite), so a second run can no longer replace the only good
+// copy the way a single fixed .bak did. A plain .bak left by older
+// versions is not touched. Best-effort: every error is ignored.
+func backupConfig(path string) {
+	prev, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	// Fixed-width stamp, so lexical order is chronological order.
+	stamp := time.Now().UTC().Format("20060102T150405.000000000Z")
+	f, err := os.OpenFile(path+".bak-"+stamp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return
+	}
+	_, werr := f.Write(prev)
+	if cerr := f.Close(); werr != nil || cerr != nil {
+		_ = os.Remove(f.Name())
+		return
+	}
+
+	dir := filepath.Dir(path)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	prefix := filepath.Base(path) + ".bak-"
+	var baks []string
+	for _, e := range entries {
+		if e.Type().IsRegular() && strings.HasPrefix(e.Name(), prefix) {
+			baks = append(baks, e.Name())
+		}
+	}
+	sort.Strings(baks)
+	for len(baks) > configBackupsKept {
+		_ = os.Remove(filepath.Join(dir, baks[0]))
+		baks = baks[1:]
+	}
 }
 
 // runUninstall removes our entry from the selected client configs.
@@ -299,8 +346,15 @@ func pickTargets(client string) ([]clientTarget, error) {
 // keys are preserved verbatim via the extra field — Claude Code
 // stores project history in the same file, and dropping it would
 // stomp on the user's other state.
+//
+// MCPServers keeps each entry as raw JSON for the same reason. Other
+// servers carry fields mcpServerEntry doesn't model (url and headers
+// on HTTP servers, cwd, disabled, whatever the clients add next), and
+// decoding them through the struct silently dropped those fields
+// (#126). Only our own entry goes through mcpServerEntry, via server /
+// setServer.
 type claudeDesktopConfig struct {
-	MCPServers map[string]mcpServerEntry `json:"mcpServers,omitempty"`
+	MCPServers map[string]json.RawMessage `json:"mcpServers,omitempty"`
 
 	// Extra is everything else in the file — preserved on read /
 	// re-emitted on write.
@@ -312,6 +366,34 @@ type mcpServerEntry struct {
 	Command string            `json:"command"`
 	Args    []string          `json:"args,omitempty"`
 	Env     map[string]string `json:"env,omitempty"`
+}
+
+// server decodes the named mcpServers entry. ok is false when there is
+// no such entry; err is non-nil when there is one but it can't be read
+// as a server object.
+func (c claudeDesktopConfig) server(name string) (e mcpServerEntry, ok bool, err error) {
+	raw, ok := c.MCPServers[name]
+	if !ok {
+		return e, false, nil
+	}
+	if err := json.Unmarshal(raw, &e); err != nil {
+		return e, true, fmt.Errorf("decode mcpServers.%s: %w", name, err)
+	}
+	return e, true, nil
+}
+
+// setServer replaces the named mcpServers entry and leaves every other
+// entry's raw JSON as it was.
+func (c *claudeDesktopConfig) setServer(name string, e mcpServerEntry) error {
+	raw, err := json.Marshal(e)
+	if err != nil {
+		return fmt.Errorf("encode mcpServers.%s: %w", name, err)
+	}
+	if c.MCPServers == nil {
+		c.MCPServers = map[string]json.RawMessage{}
+	}
+	c.MCPServers[name] = raw
+	return nil
 }
 
 // MarshalJSON / UnmarshalJSON preserve unknown top-level fields so

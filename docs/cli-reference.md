@@ -20,8 +20,8 @@ maintenance. When something isn't working, start with `protonmcp doctor`.
 | `search` | Query the local mirror. DSL: `from:`, `to:`, `subject:`, `in:`, `before:`, `after:`, `has:attachment`, plus bare full-text terms. Flags: `--db`, `--limit`, `--offset`. |
 | `sync` | Drain pending events into the mirror (incremental) — mail and calendar. Flags: `--db`. |
 | `serve-stdio` | Run as an MCP server over stdin/stdout (single-process mode). Prefer `install`. |
-| `install` | Register proto-mcp with Claude Desktop and/or Claude Code. Flags: `--client {desktop\|code\|all}`, `--dry-run`. |
-| `uninstall` | Remove proto-mcp from the selected client config(s). |
+| `install` | Register proto-mcp with Claude Desktop and/or Claude Code. Flags: `--client {desktop\|code\|all}`, `--dry-run`. Only the `protonmcp` entry under `mcpServers` is changed; other servers and top-level keys are kept as they are. Before each write, the previous file is saved as `<config>.bak-<UTC timestamp>` (e.g. `~/.claude.json.bak-20260926T101500.000000000Z`), and the newest 5 backups are kept. |
+| `uninstall` | Remove proto-mcp from the selected client config(s). Same guarantees and backups as `install`. |
 | `daemon` | `install` / `uninstall` / `start` / `stop` / `restart` / `status` — manage the LaunchAgent. |
 | `policy` | `reload` / `show` / `validate` — see [configuration.md](./configuration.md). |
 | `lock` / `unlock` | Lock or Touch-ID-unlock the running daemon. |
