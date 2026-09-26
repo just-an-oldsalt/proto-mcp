@@ -288,6 +288,49 @@ func TestMiddlewareAllowRecordsOK(t *testing.T) {
 	}
 }
 
+// TestMiddlewareIsErrorResultRecordsError — #128: a handler that
+// reports failure the codebase way (ErrorResult(...), nil) must be
+// audited as outcome=error with its message (redacted), not ok.
+func TestMiddlewareIsErrorResultRecordsError(t *testing.T) {
+	w, st := newTestAudit(t)
+	pol := newTestPolicy(t, `tools:
+  echo: { decision: allow }
+`)
+	srv := New(nil, WithPolicy(pol), WithAudit(w))
+	const token = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUV0123456789"
+	srv.Register(Tool{
+		Name:        "echo",
+		Description: "echo",
+		InputSchema: json.RawMessage(`{"type":"object"}`),
+		Handler: func(Context, json.RawMessage) (*ToolResult, error) {
+			return ErrorResult("mail_send denied: recipient x@evil.com not on allowlist (tok %s)", token), nil
+		},
+	})
+	resps := roundtrip(t, srv,
+		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}`,
+		`{"jsonrpc":"2.0","method":"notifications/initialized"}`,
+		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"echo","arguments":{}}}`,
+	)
+	result := resps[1]["result"].(map[string]any)
+	if result["isError"] != true {
+		t.Fatalf("handler's error result should reach the client unchanged: %+v", result)
+	}
+	var outcome, errMsg string
+	if err := st.DB.QueryRow(`SELECT outcome, COALESCE(error_msg, '') FROM audit_log WHERE tool = 'echo'`).
+		Scan(&outcome, &errMsg); err != nil {
+		t.Fatal(err)
+	}
+	if outcome != "error" {
+		t.Errorf("audit outcome = %q, want error", outcome)
+	}
+	if !strings.Contains(errMsg, "not on allowlist") {
+		t.Errorf("audit error_msg = %q, want the result's text", errMsg)
+	}
+	if strings.Contains(errMsg, token) {
+		t.Errorf("audit error_msg not redacted: %q", errMsg)
+	}
+}
+
 // TestMiddlewareContextCallerOverridesResolver — Phase 6/D. The
 // daemon stashes peer-cred via caller.WithCaller(ctx, peer) so the
 // audit row gets the connecting client's identity, not the
