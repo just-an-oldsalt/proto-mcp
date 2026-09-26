@@ -9,10 +9,12 @@ package proton
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httputil"
+	"net/url"
 	"os"
 	"regexp"
 	"sync"
@@ -174,6 +176,22 @@ type Credentials struct {
 
 	AskTOTP            func(context.Context) (secret.Secret, error)
 	AskMailboxPassword func(context.Context) (secret.Secret, error)
+
+	// AskHVBrowserConfirm is invoked when Proton's human-verification gate
+	// (API code 9001) blocks a call. webURL is Proton's own
+	// verify.proton.me link (from the error's WebUrl field) for completing
+	// ownership-email/ownership-sms verification in a browser; it may be
+	// empty if Proton's response didn't include one. The callback should
+	// display webURL, wait for the user to complete verification there,
+	// and return once they confirm — protonmcp then retries with the same
+	// verification token Proton originally issued. Never invoked for a
+	// captcha-only offer, which this CLI can't satisfy.
+	//
+	// webURL is only ever a https://verify.proton.me link; anything else
+	// in the response is withheld as "". again is true when the previous
+	// confirmation was followed by another 9001 — typically Enter pressed
+	// before the browser flow finished — so the prompt can say so.
+	AskHVBrowserConfirm func(ctx context.Context, webURL string, again bool) error
 }
 
 // Zero wipes every secret field. Idempotent.
@@ -514,7 +532,9 @@ func Login(ctx context.Context, mgr *gpa.Manager, creds *Credentials) (*Session,
 		mailboxBytes = creds.Password.Bytes()
 	}
 
-	user, err := client.GetUser(ctx)
+	user, err := tryWithHV(ctx, creds, func(hv *gpa.APIHVDetails) (gpa.User, error) {
+		return client.GetUserWithHV(ctx, hv)
+	})
 	if err != nil {
 		cleanup()
 		return nil, fmt.Errorf("get user: %w", err)
@@ -568,4 +588,121 @@ func Login(ctx context.Context, mgr *gpa.Manager, creds *Credentials) (*Session,
 	// constructed above; if the SDK rotated them during the API calls
 	// the AuthHandler has already kept them current under the mutex.
 	return sess, nil
+}
+
+// tryWithHV runs call(nil); if Proton responds with a 9001
+// human-verification error, it sends the user to Proton's own
+// verify.proton.me page (via WebUrl in the error response) to complete
+// verification in a browser, then retries once with the *same*
+// HumanVerificationToken/Methods Proton issued in the original error.
+//
+// The 9001 response's HumanVerificationToken identifies a verification
+// session on Proton's side — it is not a code for us to solve and is not
+// replaced by one. verify.proton.me handles proving ownership of
+// whatever recovery email/phone is on the account (which may itself
+// involve Proton emailing a short-lived code, entirely within their
+// page); once that page reports success, the same token Proton handed
+// us becomes valid to echo back via the X-Pm-Human-Verification-Token /
+// X-Pm-Human-Verification-Token-Type headers (see go-proton-api's
+// addHVToRequest). A prior version of this function tried to run its
+// own parallel email-code flow via SendVerificationCode and swap in the
+// user-typed code as the token — that's a different, legacy API, and
+// mixing the two gets "Invalid or expired verification token" (Code
+// 12087) because the token that comes back never matches what
+// verify.proton.me actually validated.
+//
+// Captcha-only offers aren't supported: solving a captcha needs a
+// browser-embedded challenge widget, not a URL a human can just visit.
+func tryWithHV[T any](ctx context.Context, creds *Credentials, call func(*gpa.APIHVDetails) (T, error)) (T, error) {
+	result, err := call(nil)
+	for attempt := 1; ; attempt++ {
+		if err == nil {
+			return result, nil
+		}
+		var apiErr *gpa.APIError
+		if !errors.As(err, &apiErr) || !apiErr.IsHVError() {
+			return result, err
+		}
+		if attempt > maxHVAttempts {
+			return result, fmt.Errorf("proton: human verification still required after %d attempts: %w", maxHVAttempts, err)
+		}
+
+		hv, hvErr := apiErr.GetHVDetails()
+		if hvErr != nil {
+			return result, fmt.Errorf("%w (also failed to parse HV details: %v)", err, hvErr)
+		}
+		if !hasOwnershipMethod(hv.Methods) {
+			return result, fmt.Errorf(
+				"proton: account requires human verification via %v, which protonmcp only supports through the browser-based ownership-email/ownership-sms flow (not captcha). "+
+					"Log into mail.proton.me (or Proton Bridge) from this device/network once to establish trust, then retry: %w",
+				hv.Methods, err)
+		}
+
+		webURL := hvWebURL(apiErr.Details)
+		if creds.AskHVBrowserConfirm == nil {
+			if webURL == "" {
+				return result, fmt.Errorf("proton: human verification required, but no prompt is available (log in at https://mail.proton.me to clear it, then retry): %w", err)
+			}
+			return result, fmt.Errorf("proton: human verification required, but no prompt is available (open %s manually, then retry): %w", webURL, err)
+		}
+		if confirmErr := creds.AskHVBrowserConfirm(ctx, webURL, attempt > 1); confirmErr != nil {
+			return result, fmt.Errorf("prompt browser verification: %w", confirmErr)
+		}
+
+		// Echo back exactly what Proton issued alongside the link the
+		// user just completed. On a repeat 9001 that's the *latest*
+		// challenge's token — still never one we minted or modified.
+		result, err = call(hv)
+	}
+}
+
+// maxHVAttempts bounds the browser round-trips in tryWithHV. A repeat
+// 9001 usually means Enter was pressed before verify.proton.me
+// finished; re-prompting beats failing the login (which would mean
+// re-entering password and TOTP), but not indefinitely.
+const maxHVAttempts = 3
+
+// hvWebURL extracts Details.WebUrl from a 9001 response, returning it
+// only if it's an https link to verify.proton.me made of printable
+// ASCII. It is written straight to the user's terminal as the thing to
+// open, so anything else — another host, escape sequences, lookalike
+// Unicode — is withheld and the caller falls back to "log in at
+// mail.proton.me".
+func hvWebURL(details []byte) string {
+	var raw struct {
+		WebURL string `json:"WebUrl"`
+	}
+	if len(details) == 0 || json.Unmarshal(details, &raw) != nil {
+		return ""
+	}
+	for _, r := range raw.WebURL {
+		if r <= ' ' || r > '~' {
+			return ""
+		}
+	}
+	u, err := url.Parse(raw.WebURL)
+	if err != nil || u.Scheme != "https" || u.Host != "verify.proton.me" || u.User != nil {
+		return ""
+	}
+	return raw.WebURL
+}
+
+// hasOwnershipMethod reports whether methods offers the browser-based
+// ownership-email/ownership-sms verification protonmcp supports, as
+// opposed to (or in addition to) a captcha-only offer.
+//
+// Matched by exact name rather than an "ownership" prefix check: the
+// contract we can actually honour is "a URL a human opens and completes",
+// and a future ownership-* method needn't be that (an ownership-captcha
+// would still need an embedded challenge widget). Failing closed on an
+// unrecognised method gives a clear error instead of a browser round-trip
+// that can't succeed.
+func hasOwnershipMethod(methods []string) bool {
+	for _, m := range methods {
+		switch m {
+		case "ownership-email", "ownership-sms":
+			return true
+		}
+	}
+	return false
 }
