@@ -17,6 +17,29 @@ type SearchHit struct {
 	Date        time.Time
 	Folder      string
 	Snippet     string // up to ~200 chars from body_text
+
+	Unread         bool
+	HasAttachments bool
+}
+
+// Search result page-size bounds. See EffectiveSearchLimit.
+const (
+	DefaultSearchLimit = 50
+	MaxSearchLimit     = 200
+)
+
+// EffectiveSearchLimit is the page size Search actually applies for a
+// requested SearchOpts.Limit: 0 or negative → DefaultSearchLimit, capped
+// at MaxSearchLimit. Callers deciding whether another page may exist
+// must compare against this, not the raw request (#131).
+func EffectiveSearchLimit(limit int) int {
+	if limit <= 0 {
+		return DefaultSearchLimit
+	}
+	if limit > MaxSearchLimit {
+		return MaxSearchLimit
+	}
+	return limit
 }
 
 // SearchOpts narrows the search and pages results.
@@ -64,12 +87,7 @@ type ListFilter struct {
 func (s *Store) Search(ctx context.Context, query string, opts SearchOpts) ([]SearchHit, error) {
 	parsed := parseQuery(query)
 
-	if opts.Limit <= 0 {
-		opts.Limit = 50
-	}
-	if opts.Limit > 200 {
-		opts.Limit = 200
-	}
+	opts.Limit = EffectiveSearchLimit(opts.Limit)
 	// SECURITY C-8. Limit / Offset are user-controllable once the
 	// Phase 3 MCP layer passes them straight through from a tool
 	// call. Negative Offset produces a confusing SQLite error
@@ -155,7 +173,8 @@ func (s *Store) Search(ctx context.Context, query string, opts SearchOpts) ([]Se
 	// orderBy is one of two hard-coded literals (the FTS-rank or the
 	// plain date-DESC variants above), NOT user input.
 	q := fmt.Sprintf(`
-SELECT id, thread_id, subject, from_address, from_name, date, folder, body_text
+SELECT id, thread_id, subject, from_address, from_name, date, folder, body_text,
+       unread, has_attachments
   FROM messages
  WHERE %s
  ORDER BY %s
@@ -175,12 +194,17 @@ SELECT id, thread_id, subject, from_address, from_name, date, folder, body_text
 			h        SearchHit
 			dateUnix int64
 			bodyText *string
+			unread   int
+			hasAtt   int
 		)
 		if err := rows.Scan(&h.MessageID, &h.ThreadID, &h.Subject,
-			&h.FromAddress, &h.FromName, &dateUnix, &h.Folder, &bodyText); err != nil {
+			&h.FromAddress, &h.FromName, &dateUnix, &h.Folder, &bodyText,
+			&unread, &hasAtt); err != nil {
 			return nil, fmt.Errorf("search scan: %w", err)
 		}
 		h.Date = time.Unix(dateUnix, 0).UTC()
+		h.Unread = unread != 0
+		h.HasAttachments = hasAtt != 0
 		if bodyText != nil {
 			h.Snippet = snippet(*bodyText, 200)
 		}
