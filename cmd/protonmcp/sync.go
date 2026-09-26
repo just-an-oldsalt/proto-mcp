@@ -9,6 +9,7 @@ import (
 	"os"
 	"time"
 
+	protonclient "github.com/just-an-oldsalt/proto-mcp/internal/proton"
 	"github.com/just-an-oldsalt/proto-mcp/internal/store"
 	syncpkg "github.com/just-an-oldsalt/proto-mcp/internal/sync"
 )
@@ -62,11 +63,16 @@ func runSync(ctx context.Context, args []string) error {
 	// Calendar rides the same one-shot. A calendar failure is reported
 	// but doesn't fail the mail sync (which already succeeded).
 	var calUpserted, calDeleted int
+	var calBlocked bool
 	if calRes, calErr := syncpkg.RunCalendarOnce(ctx, bundle.Session, st); calErr != nil {
 		fmt.Fprintf(os.Stderr, "warning: calendar sync failed (mail sync succeeded): %v\n", calErr)
 	} else if calRes != nil {
 		calUpserted = calRes.EventsUpserted
 		calDeleted = calRes.EventsDeleted
+		calBlocked = calRes.EventsBlocked
+		if calBlocked {
+			fmt.Fprintln(os.Stderr, "note: calendars synced; "+protonclient.CalendarScopeNotice)
+		}
 	}
 
 	out := struct {
@@ -79,6 +85,7 @@ func runSync(ctx context.Context, args []string) error {
 		LabelsDeleted        int    `json:"labels_deleted"`
 		CalendarEventsUpsert int    `json:"calendar_events_upserted"`
 		CalendarEventsDelete int    `json:"calendar_events_deleted"`
+		CalendarEventsBlock  bool   `json:"calendar_events_blocked,omitempty"`
 		ElapsedMS            int64  `json:"elapsed_ms"`
 	}{
 		StartCursor:          res.StartCursor,
@@ -90,6 +97,7 @@ func runSync(ctx context.Context, args []string) error {
 		LabelsDeleted:        res.LabelsDeleted,
 		CalendarEventsUpsert: calUpserted,
 		CalendarEventsDelete: calDeleted,
+		CalendarEventsBlock:  calBlocked,
 		ElapsedMS:            res.Elapsed.Milliseconds(),
 	}
 	enc := json.NewEncoder(os.Stdout)

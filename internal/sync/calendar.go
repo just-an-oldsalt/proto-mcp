@@ -30,6 +30,14 @@ type CalendarRunResult struct {
 	EventsDeleted     int
 	EventsDecrypted   int // populated only by RunCalendarBackfill(decrypt=true)
 	Elapsed           time.Duration
+
+	// EventsBlocked is set when the events phase stopped because Proton
+	// refused event access with Code 9100 (the session lacks the
+	// calendar scope, issue #110). Calendars are still mirrored; the
+	// run returns a nil error so callers can tell "blocked" from
+	// "broken". MissingScopes carries what the API reported.
+	EventsBlocked bool
+	MissingScopes []string
 }
 
 // RunCalendarOnce polls every calendar and reconciles the local mirror.
@@ -82,16 +90,8 @@ func RunCalendarOnce(ctx context.Context, sess *protonclient.Session, st *store.
 	fetch := func(ctx context.Context, calID string) ([]gpa.CalendarEvent, error) {
 		return sess.Client.GetAllCalendarEvents(ctx, calID, nil)
 	}
-	for _, c := range cals {
-		if err := ctx.Err(); err != nil {
-			return res, err
-		}
-		upserted, deleted, err := syncCalendarEvents(ctx, st, c.ID, fetch)
-		if err != nil {
-			return res, err
-		}
-		res.EventsUpserted += upserted
-		res.EventsDeleted += deleted
+	if err := syncAllCalendarEvents(ctx, st, cals, fetch, res); err != nil {
+		return res, err
 	}
 
 	res.Elapsed = time.Since(start)
@@ -99,8 +99,49 @@ func RunCalendarOnce(ctx context.Context, sess *protonclient.Session, st *store.
 		"calendars", res.CalendarsUpserted,
 		"events_upserted", res.EventsUpserted,
 		"events_deleted", res.EventsDeleted,
+		"events_blocked", res.EventsBlocked,
 		"elapsed_ms", res.Elapsed.Milliseconds())
 	return res, nil
+}
+
+// syncAllCalendarEvents is phase 2 of RunCalendarOnce: mirror each
+// calendar's events, and keep the events-blocked flag in sync_state
+// current.
+//
+// A Code 9100 (missing scope) stops the phase rather than failing it.
+// The scope belongs to the session, not the calendar, so every
+// remaining calendar would 403 the same way; there's no point asking.
+// The block is recorded so calendar_events can say why the mirror is
+// empty instead of reporting "no events". The flag is cleared only
+// after a pass in which every calendar's events were fetched; any other
+// error returns early and leaves it as it was.
+func syncAllCalendarEvents(
+	ctx context.Context,
+	st *store.Store,
+	cals []gpa.Calendar,
+	fetch func(context.Context, string) ([]gpa.CalendarEvent, error),
+	res *CalendarRunResult,
+) error {
+	for _, c := range cals {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		upserted, deleted, err := syncCalendarEvents(ctx, st, c.ID, fetch)
+		if errors.Is(err, protonclient.ErrMissingScope) {
+			res.EventsBlocked = true
+			res.MissingScopes = protonclient.MissingScopes(err)
+			if serr := st.SetCalendarEventsBlocked(ctx, res.MissingScopes); serr != nil {
+				return serr
+			}
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		res.EventsUpserted += upserted
+		res.EventsDeleted += deleted
+	}
+	return st.ClearCalendarEventsBlocked(ctx)
 }
 
 // RunCalendarBackfill seeds the mirror from scratch: it runs the normal
@@ -115,7 +156,9 @@ func RunCalendarBackfill(ctx context.Context, sess *protonclient.Session, st *st
 	if err != nil {
 		return res, err
 	}
-	if !decrypt {
+	// Events are unreachable on this session (issue #110): the decrypt
+	// pass would only re-fetch and 403 again.
+	if !decrypt || res.EventsBlocked {
 		return res, nil
 	}
 
@@ -227,7 +270,7 @@ func syncCalendarEvents(
 ) (upserted, deleted int, err error) {
 	events, err := fetch(ctx, calID)
 	if err != nil {
-		return 0, 0, fmt.Errorf("get events for calendar %s: %w", calID, err)
+		return 0, 0, fmt.Errorf("get events for calendar %s: %w", calID, protonclient.WrapMissingScope(err))
 	}
 
 	storedMax := readMaxEdit(ctx, st, calID)

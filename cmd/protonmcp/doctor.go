@@ -256,6 +256,9 @@ func checkStore(ctx context.Context, r *report, dbPath string) {
 		return
 	}
 	defer st.Close()
+	// Deferred so the calendar line follows the mirror line on every
+	// return path below, and runs before Close.
+	defer checkCalendar(ctx, r, st)
 
 	var messages int64
 	if err := st.DB.QueryRowContext(ctx, "SELECT count(*) FROM messages").Scan(&messages); err != nil {
@@ -282,6 +285,24 @@ func checkStore(ctx context.Context, r *report, dbPath string) {
 	default:
 		r.add("local mirror", stateOK,
 			fmt.Sprintf("%d messages, sync cursor set (%s)", messages, path), "")
+	}
+}
+
+// checkCalendar reports a calendar-events block recorded by calendar
+// sync (Proton Code 9100, issue #110). Every other check passes on such
+// an account while Claude can't see a single event, so this is the line
+// that explains it. Silent when nothing is recorded, so mail-only users
+// see no change. There's no fix line: re-login doesn't help, the cause
+// is the client identity Proton scopes the session to.
+func checkCalendar(ctx context.Context, r *report, st *store.Store) {
+	blk, ok, err := st.CalendarEventsBlocked(ctx)
+	switch {
+	case err != nil:
+		r.add("calendar", stateWarn, "cannot read calendar sync state: "+err.Error(), "")
+	case ok:
+		r.add("calendar", stateWarn,
+			"calendar scope not granted — events unavailable (issue #110); since "+
+				blk.Since.Local().Format("Jan 2 15:04"), "")
 	}
 }
 
