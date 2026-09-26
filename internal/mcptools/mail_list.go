@@ -132,7 +132,7 @@ func mailList(deps Deps) mcp.Tool {
 			}
 
 			res := listResult{Messages: summaries}
-			if len(hits) == opts.Limit || (len(hits) > 0 && opts.Limit > 0 && len(hits) >= opts.Limit) {
+			if len(hits) >= store.EffectiveSearchLimit(opts.Limit) {
 				res.NextCursor = encodeCursor(opts.Offset+len(hits), qhash)
 			}
 			return mcp.StructuredResult(res)
@@ -162,6 +162,9 @@ func hitToSummary(h store.SearchHit) messageSummary {
 		Date:        h.Date,
 		Folder:      h.Folder,
 		Snippet:     h.Snippet,
+
+		Unread:         h.Unread,
+		HasAttachments: h.HasAttachments,
 	}
 }
 

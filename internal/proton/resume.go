@@ -82,14 +82,7 @@ func Resume(ctx context.Context, mgr *gpa.Manager, args ResumeArgs) (*Session, e
 	// our handler keeps Session.AccessToken / RefreshToken current and
 	// the OnAuthUpdate hook (wired by the caller) writes the new pair
 	// back to the Keychain.
-	sess := &Session{
-		Client:        client,
-		Email:         args.Email,
-		UID:           args.UID,
-		AccessToken:   args.AccessToken,
-		RefreshToken:  args.RefreshToken,
-		SaltedKeyPass: args.SaltedKeyPass,
-	}
+	sess := newResumedSession(client, args)
 	sess.installAuthHandler()
 	sess.installCalendarMemberHook()
 
@@ -161,4 +154,23 @@ func isAuthExpired(err error) bool {
 		return sc >= 400 && sc < 500
 	}
 	return false
+}
+
+// newResumedSession builds the Session Resume returns from the stored
+// fields. Split out so the #123 ownership contract is testable without
+// a network round-trip.
+func newResumedSession(client *gpa.Client, args ResumeArgs) *Session {
+	return &Session{
+		Client:       client,
+		Email:        args.Email,
+		UID:          args.UID,
+		AccessToken:  args.AccessToken,
+		RefreshToken: args.RefreshToken,
+		// Issue #123: own a private copy. Callers (session.TryResume,
+		// logout) defer Zero() on the Secret they passed in, and a value
+		// copy shares its backing array — without Clone the live
+		// session's pass became 32 zero bytes the moment they returned,
+		// and the next OnAuthUpdate persisted that to the Keychain.
+		SaltedKeyPass: args.SaltedKeyPass.Clone(),
+	}
 }

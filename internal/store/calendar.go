@@ -128,9 +128,15 @@ func (s *Store) DeleteCalendar(ctx context.Context, calendarID string) error {
 }
 
 // UpsertCalendarEventEnvelope writes plaintext metadata only. The
-// ON CONFLICT clause deliberately leaves the decrypted columns untouched
-// so a re-sync never drops a cached decryption (same trick as
-// UpsertMessage with body_text/body_html).
+// ON CONFLICT clause leaves the decrypted columns untouched so a
+// re-sync of an unchanged event never drops a cached decryption (same
+// trick as UpsertMessage with body_text/body_html).
+//
+// #130: when the incoming last_edit is newer, the event was edited
+// server-side and the cached decryption is stale, so it's cleared
+// (decrypted_at NULL → the read path re-decrypts). SQLite evaluates
+// every SET expression against the pre-update row, so the CASEs see
+// the old last_edit regardless of order.
 func (s *Store) UpsertCalendarEventEnvelope(ctx context.Context, e CalendarEventEnvelope) error {
 	const q = `
 INSERT INTO calendar_events (
@@ -147,7 +153,17 @@ ON CONFLICT(id) DO UPDATE SET
     all_day      = excluded.all_day,
     author       = excluded.author,
     created_unix = excluded.created_unix,
-    last_edit    = excluded.last_edit
+    last_edit    = excluded.last_edit,
+    summary        = CASE WHEN excluded.last_edit > calendar_events.last_edit THEN NULL ELSE summary END,
+    location       = CASE WHEN excluded.last_edit > calendar_events.last_edit THEN NULL ELSE location END,
+    description    = CASE WHEN excluded.last_edit > calendar_events.last_edit THEN NULL ELSE description END,
+    organizer      = CASE WHEN excluded.last_edit > calendar_events.last_edit THEN NULL ELSE organizer END,
+    status         = CASE WHEN excluded.last_edit > calendar_events.last_edit THEN NULL ELSE status END,
+    rrule          = CASE WHEN excluded.last_edit > calendar_events.last_edit THEN NULL ELSE rrule END,
+    is_recurring   = CASE WHEN excluded.last_edit > calendar_events.last_edit THEN 0 ELSE is_recurring END,
+    attendees_json = CASE WHEN excluded.last_edit > calendar_events.last_edit THEN NULL ELSE attendees_json END,
+    raw_ical       = CASE WHEN excluded.last_edit > calendar_events.last_edit THEN NULL ELSE raw_ical END,
+    decrypted_at   = CASE WHEN excluded.last_edit > calendar_events.last_edit THEN NULL ELSE decrypted_at END
 `
 	_, err := s.DB.ExecContext(ctx, q,
 		e.ID, e.CalendarID, e.UID, e.StartUnix, e.StartTZ, e.EndUnix, e.EndTZ,
@@ -305,7 +321,8 @@ func (s *Store) ReconcileCalendarEvents(ctx context.Context, calendarID string, 
 // PurgeCalendarOlderThan NULLs the decrypted columns on events whose
 // decrypted_at < cutoff, keeping the envelope. Parallel to messages
 // PurgeOlderThan; the FTS trigger re-indexes the cleared text. Returns
-// rows affected.
+// rows affected. Run wherever PurgeOlderThan runs: `protonmcp purge`
+// and both startup sweeps (#130).
 func (s *Store) PurgeCalendarOlderThan(ctx context.Context, cutoff time.Time) (int64, error) {
 	res, err := s.DB.ExecContext(ctx, `
 UPDATE calendar_events
@@ -330,6 +347,22 @@ UPDATE calendar_events
 		return 0, fmt.Errorf("purge calendar rows-affected: %w", err)
 	}
 	return n, nil
+}
+
+// CountDecryptedCalendarEvents returns how many events hold decrypted
+// plaintext and how many of those PurgeCalendarOlderThan(cutoff) would
+// clear. For `protonmcp purge --dry-run`.
+func (s *Store) CountDecryptedCalendarEvents(ctx context.Context, cutoff time.Time) (total, wouldPurge int64, err error) {
+	err = s.DB.QueryRowContext(ctx, `
+SELECT COUNT(*),
+       COALESCE(SUM(CASE WHEN decrypted_at < ? THEN 1 ELSE 0 END), 0)
+  FROM calendar_events
+ WHERE decrypted_at IS NOT NULL
+`, cutoff.Unix()).Scan(&total, &wouldPurge)
+	if err != nil {
+		return 0, 0, fmt.Errorf("count decrypted calendar events: %w", err)
+	}
+	return total, wouldPurge, nil
 }
 
 // rowScanner is satisfied by both *sql.Row and *sql.Rows.

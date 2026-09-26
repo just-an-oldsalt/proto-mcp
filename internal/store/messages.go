@@ -271,13 +271,18 @@ func (s *Store) DeleteMessage(ctx context.Context, messageID string) error {
 	return nil
 }
 
-// InvalidateBodyCache zeroes body_cached_at on a single row so the
+// InvalidateBodyCache drops the cached body on a single row so the
 // next GetCachedBody returns ErrNotFound and triggers a refetch.
-// body_text / body_html stay populated (search still works against
-// the stale text); only the freshness signal changes.
+//
+// #130: body_text / body_html are cleared along with body_cached_at.
+// A body with no cached_at can't be served and has no age the
+// retention purge could compare against, so keeping it only left
+// decrypted plaintext (and its FTS tokens, which the update trigger
+// now drops) on disk forever. Full-text search stops matching the body
+// until the message is read again; subject/sender stay indexed.
 func (s *Store) InvalidateBodyCache(ctx context.Context, messageID string) error {
 	_, err := s.DB.ExecContext(ctx,
-		`UPDATE messages SET body_cached_at = NULL WHERE id = ?`, messageID)
+		`UPDATE messages SET body_text = NULL, body_html = NULL, list_unsubscribe = NULL, list_unsubscribe_post = NULL, body_cached_at = NULL WHERE id = ?`, messageID)
 	if err != nil {
 		return fmt.Errorf("invalidate body cache %s: %w", messageID, err)
 	}
@@ -303,15 +308,21 @@ func (s *Store) InvalidateBodyCache(ctx context.Context, messageID string) error
 // rowsAffected is best-effort: modernc/sqlite returns it correctly
 // for our UPDATE; if a driver behind-this-interface ever didn't,
 // the count would be -1 and we'd still have purged successfully.
+//
+// #130: also clears orphaned bodies — body_text/body_html present with
+// body_cached_at NULL — whatever the cutoff. Before InvalidateBodyCache
+// cleared the body columns, every invalidation left one of these;
+// they can never be served (GetCachedBody needs cached_at) and have
+// no age to compare, so they are always past retention.
 func (s *Store) PurgeOlderThan(ctx context.Context, cutoff time.Time) (int64, error) {
 	res, err := s.DB.ExecContext(ctx, `
 UPDATE messages
    SET body_text       = NULL,
        body_html       = NULL,
-       body_cached_at  = NULL
- WHERE body_cached_at IS NOT NULL
-   AND body_cached_at  < ?
-`, cutoff.Unix())
+       body_cached_at  = NULL,
+       list_unsubscribe      = NULL,
+       list_unsubscribe_post = NULL
+ WHERE `+purgeableBodyWhere, cutoff.Unix())
 	if err != nil {
 		return 0, fmt.Errorf("purge bodies: %w", err)
 	}
@@ -321,6 +332,15 @@ UPDATE messages
 	}
 	return n, nil
 }
+
+// orphanBodyWhere matches rows still holding decrypted body text with
+// no cache timestamp (see PurgeOlderThan). purgeableBodyWhere is the
+// full purge predicate; it takes the cutoff (unix seconds) as its one
+// bound parameter.
+const (
+	orphanBodyWhere    = `(body_cached_at IS NULL AND (body_text IS NOT NULL OR body_html IS NOT NULL OR list_unsubscribe IS NOT NULL OR list_unsubscribe_post IS NOT NULL))`
+	purgeableBodyWhere = `((body_cached_at IS NOT NULL AND body_cached_at < ?) OR ` + orphanBodyWhere + `)`
+)
 
 // PurgeStats reports how many rows have cached bodies AND how many
 // would be removed by a purge with the given cutoff. Used by
@@ -338,14 +358,13 @@ type PurgeStats struct {
 func (s *Store) CountCachedBodies(ctx context.Context, cutoff time.Time) (PurgeStats, error) {
 	var stats PurgeStats
 	err := s.DB.QueryRowContext(ctx, `
-SELECT COUNT(*) FROM messages WHERE body_cached_at IS NOT NULL
-`).Scan(&stats.TotalCached)
+SELECT COUNT(*) FROM messages
+ WHERE body_cached_at IS NOT NULL OR `+orphanBodyWhere).Scan(&stats.TotalCached)
 	if err != nil {
 		return stats, fmt.Errorf("count cached bodies: %w", err)
 	}
 	err = s.DB.QueryRowContext(ctx, `
-SELECT COUNT(*) FROM messages WHERE body_cached_at IS NOT NULL AND body_cached_at < ?
-`, cutoff.Unix()).Scan(&stats.WouldPurge)
+SELECT COUNT(*) FROM messages WHERE `+purgeableBodyWhere, cutoff.Unix()).Scan(&stats.WouldPurge)
 	if err != nil {
 		return stats, fmt.Errorf("count would-purge bodies: %w", err)
 	}
@@ -393,6 +412,13 @@ type CachedBody struct {
 	// threading from RFC 2822 In-Reply-To / References headers after
 	// the body fetch.
 	ThreadID string
+
+	// ListUnsubscribe / ListUnsubscribePost are the raw (control-
+	// stripped, capped) RFC 2369 / 8058 header values (#102). They
+	// carry per-recipient tokens, so PurgeOlderThan clears them with
+	// the body.
+	ListUnsubscribe     string
+	ListUnsubscribePost string
 }
 
 // SetCachedBody writes the decrypted-and-sanitized body for a message.
@@ -404,8 +430,8 @@ func (s *Store) SetCachedBody(ctx context.Context, msgID string, b CachedBody) e
 	}
 	if b.ThreadID == "" {
 		_, err := s.DB.ExecContext(ctx,
-			`UPDATE messages SET body_text = ?, body_html = ?, body_cached_at = ? WHERE id = ?`,
-			b.Text, b.HTML, b.CachedAt.Unix(), msgID,
+			`UPDATE messages SET body_text = ?, body_html = ?, body_cached_at = ?, list_unsubscribe = ?, list_unsubscribe_post = ? WHERE id = ?`,
+			b.Text, b.HTML, b.CachedAt.Unix(), b.ListUnsubscribe, b.ListUnsubscribePost, msgID,
 		)
 		if err != nil {
 			return fmt.Errorf("set cached body %s: %w", msgID, err)
@@ -413,8 +439,8 @@ func (s *Store) SetCachedBody(ctx context.Context, msgID string, b CachedBody) e
 		return nil
 	}
 	_, err := s.DB.ExecContext(ctx,
-		`UPDATE messages SET body_text = ?, body_html = ?, body_cached_at = ?, thread_id = ? WHERE id = ?`,
-		b.Text, b.HTML, b.CachedAt.Unix(), b.ThreadID, msgID,
+		`UPDATE messages SET body_text = ?, body_html = ?, body_cached_at = ?, list_unsubscribe = ?, list_unsubscribe_post = ?, thread_id = ? WHERE id = ?`,
+		b.Text, b.HTML, b.CachedAt.Unix(), b.ListUnsubscribe, b.ListUnsubscribePost, b.ThreadID, msgID,
 	)
 	if err != nil {
 		return fmt.Errorf("set cached body %s: %w", msgID, err)
@@ -428,14 +454,16 @@ func (s *Store) SetCachedBody(ctx context.Context, msgID string, b CachedBody) e
 // is expected to fall through to a fresh fetch.
 func (s *Store) GetCachedBody(ctx context.Context, msgID string) (CachedBody, error) {
 	var (
-		text     sql.NullString
-		html     sql.NullString
-		cachedAt sql.NullInt64
+		text      sql.NullString
+		html      sql.NullString
+		cachedAt  sql.NullInt64
+		unsub     sql.NullString
+		unsubPost sql.NullString
 	)
 	err := s.DB.QueryRowContext(ctx,
-		`SELECT body_text, body_html, body_cached_at FROM messages WHERE id = ?`,
+		`SELECT body_text, body_html, body_cached_at, list_unsubscribe, list_unsubscribe_post FROM messages WHERE id = ?`,
 		msgID,
-	).Scan(&text, &html, &cachedAt)
+	).Scan(&text, &html, &cachedAt, &unsub, &unsubPost)
 	if errors.Is(err, sql.ErrNoRows) {
 		return CachedBody{}, ErrNotFound
 	}
@@ -449,7 +477,13 @@ func (s *Store) GetCachedBody(ctx context.Context, msgID string) (CachedBody, er
 	if time.Since(ts) > BodyTTL {
 		return CachedBody{}, ErrNotFound
 	}
-	return CachedBody{Text: text.String, HTML: html.String, CachedAt: ts}, nil
+	return CachedBody{
+		Text:                text.String,
+		HTML:                html.String,
+		CachedAt:            ts,
+		ListUnsubscribe:     unsub.String,
+		ListUnsubscribePost: unsubPost.String,
+	}, nil
 }
 
 func boolToInt(b bool) int {

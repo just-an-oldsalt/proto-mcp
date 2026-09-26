@@ -101,7 +101,7 @@ type document struct {
 	// IdleLockMinutes: lock the daemon after this many minutes
 	// without a tool call. 0 (or missing) disables the idle timer.
 	// Range-checked in parseDocument: must be 0–1440 (one day).
-	IdleLockMinutes int `yaml:"idle_lock_minutes,omitempty"`
+	IdleLockMinutes int `yaml:"idle_lock_minutes"`
 	// MaxAttachmentBytes: per-attachment size ceiling enforced by
 	// mail_download_attachment (before fetch) and mail_send.attachments
 	// (before upload). Phase 8/A. 0 / missing → DefaultMaxAttachmentBytes.
@@ -253,7 +253,31 @@ func (e *Engine) applyOverrideInto(into *document) error {
 	if override.Defaults.Decision != "" {
 		into.Defaults = override.Defaults
 	}
+
+	// Top-level settings (#127). The int fields in document can't tell
+	// "absent" from an explicit 0, and an explicit 0 must still win over
+	// a nonzero default (0 disables the idle timer). Re-read the same
+	// bytes into pointer fields to learn which keys the user wrote;
+	// parseDocument above has already range-checked the values.
+	var set overrideSettings
+	if err := yaml.Unmarshal(data, &set); err != nil {
+		return fmt.Errorf("parse override: %w", err)
+	}
+	if set.IdleLockMinutes != nil {
+		into.IdleLockMinutes = *set.IdleLockMinutes
+	}
+	if set.MaxAttachmentBytes != nil {
+		into.MaxAttachmentBytes = *set.MaxAttachmentBytes
+	}
 	return nil
+}
+
+// overrideSettings mirrors document's top-level scalar settings as
+// pointers, so applyOverrideInto can merge exactly the keys present in
+// the override file.
+type overrideSettings struct {
+	IdleLockMinutes    *int   `yaml:"idle_lock_minutes"`
+	MaxAttachmentBytes *int64 `yaml:"max_attachment_bytes"`
 }
 
 // DefaultOverridePath returns the canonical user-override location
@@ -274,8 +298,15 @@ func (e *Engine) Snapshot() document {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	out := document{
-		Defaults: e.doc.Defaults,
-		Tools:    make(map[string]ToolPolicy, len(e.doc.Tools)),
+		Defaults:        e.doc.Defaults,
+		Tools:           make(map[string]ToolPolicy, len(e.doc.Tools)),
+		IdleLockMinutes: e.doc.IdleLockMinutes,
+		// Show the ceiling actually enforced, not a 0 that means
+		// "use the default".
+		MaxAttachmentBytes: e.doc.MaxAttachmentBytes,
+	}
+	if out.MaxAttachmentBytes <= 0 {
+		out.MaxAttachmentBytes = DefaultMaxAttachmentBytes
 	}
 	for k, v := range e.doc.Tools {
 		out.Tools[k] = v

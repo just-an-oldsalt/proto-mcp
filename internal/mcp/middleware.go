@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/text/unicode/norm"
 
@@ -289,7 +290,7 @@ func (m *Middleware) runTool(ctx context.Context, t Tool, args json.RawMessage, 
 			if serr != nil {
 				outcome = audit.OutcomeDenied
 				errMsg = "prompt snapshot: " + serr.Error()
-				return ErrorResult("%s: could not load what this call would do, so it can't be shown for approval: %v (safe to retry)", t.Name, serr), nil
+				return ErrorResult("%s: could not show this call for approval, so it was not run: %v", t.Name, serr), nil
 			}
 		case t.PromptBody != nil:
 			title, body = t.PromptBody(args)
@@ -343,8 +344,30 @@ func (m *Middleware) runTool(ctx context.Context, t Tool, args json.RawMessage, 
 		return nil, NewError(CodeInternalError,
 			fmt.Sprintf("tool %s returned nil result with no error", t.Name))
 	}
+	if res.IsError {
+		// #128: handlers report failures (a refused send, a failed
+		// SendDraft) as ErrorResult(...), nil. That is not a success.
+		outcome = audit.OutcomeError
+		errMsg = firstText(res)
+		if errMsg == "" {
+			errMsg = "tool returned an error result"
+		}
+		return res, nil
+	}
 	outcome = audit.OutcomeOK
 	return res, nil
+}
+
+// firstText returns the first non-empty text content of res, for the
+// audit error_msg of an IsError result. Redaction happens in runTool's
+// deferred Complete, like every other errMsg.
+func firstText(res *ToolResult) string {
+	for _, c := range res.Content {
+		if c.Type == "text" && c.Text != "" {
+			return c.Text
+		}
+	}
+	return ""
 }
 
 // resolveLock handles a tool call that arrived while the daemon was
@@ -439,6 +462,38 @@ func SanitizePromptText(in string, maxRunes int) string {
 	if maxRunes <= 0 {
 		maxRunes = 4000
 	}
+	out := sanitizePromptRunes(in)
+	r := []rune(out)
+	if len(r) > maxRunes {
+		out = string(r[:maxRunes]) + "…[truncated]"
+	}
+	return out
+}
+
+// ErrPromptTooLong is returned by SanitizePromptTextStrict when the
+// sanitized text is over the cap.
+var ErrPromptTooLong = errors.New("approval dialog text is too long to show in full")
+
+// SanitizePromptTextStrict is SanitizePromptText for dialogs that
+// must never be truncated (issue #125). Truncation can cut off the
+// fields that decide the call, such as a trailing BCC line on a send,
+// so a dialog over maxRunes is refused with ErrPromptTooLong instead.
+// The length is measured after normalization and stripping, on the
+// exact text the user would see.
+func SanitizePromptTextStrict(in string, maxRunes int) (string, error) {
+	if maxRunes <= 0 {
+		maxRunes = 4000
+	}
+	out := sanitizePromptRunes(in)
+	if n := utf8.RuneCountInString(out); n > maxRunes {
+		return "", fmt.Errorf("%w (%d characters, limit %d)", ErrPromptTooLong, n, maxRunes)
+	}
+	return out, nil
+}
+
+// sanitizePromptRunes is the normalize-and-strip half of
+// SanitizePromptText, without the length cap.
+func sanitizePromptRunes(in string) string {
 	in = norm.NFKC.String(in)
 	var b strings.Builder
 	b.Grow(len(in))
@@ -448,24 +503,29 @@ func SanitizePromptText(in string, maxRunes int) string {
 			b.WriteRune(r)
 		case r < 0x20:
 			// C0 controls — drop.
+		case r == 0x85:
+			// NEL (next line). Inside the C1 range below, but named
+			// on its own: it renders as a line break (issue #125).
 		case r >= 0x7f && r <= 0x9f:
 			// DEL + C1 controls — drop.
+		case r == 0x2028 || r == 0x2029:
+			// LINE / PARAGRAPH SEPARATOR. They render as line
+			// breaks, so a value could fake an extra dialog line
+			// such as "To: …" (issue #125). Only '\n' separates
+			// dialog lines.
 		case r == 0x200e || r == 0x200f, // LRM / RLM
+			r == 0x061c,                                                     // ARABIC LETTER MARK
 			r == 0x202a, r == 0x202b, r == 0x202c, r == 0x202d, r == 0x202e, // bidi embed / override
 			r == 0x2066, r == 0x2067, r == 0x2068, r == 0x2069: // bidi isolate
 			// Drop bidi-control codepoints entirely.
-		case r == 0x200b || r == 0x200c || r == 0x200d || r == 0xfeff:
-			// Zero-width joiners / non-joiners / BOM — drop.
+		case r == 0x200b || r == 0x200c || r == 0x200d || r == 0xfeff,
+			r >= 0x2060 && r <= 0x2064: // word joiner, invisible operators
+			// Zero-width / invisible characters — drop.
 		default:
 			b.WriteRune(r)
 		}
 	}
-	out := b.String()
-	r := []rune(out)
-	if len(r) > maxRunes {
-		out = string(r[:maxRunes]) + "…[truncated]"
-	}
-	return out
+	return b.String()
 }
 
 // updateDecision backfills policy_decision into the audit row that

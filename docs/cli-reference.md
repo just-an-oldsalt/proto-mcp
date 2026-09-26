@@ -20,12 +20,12 @@ maintenance. When something isn't working, start with `protonmcp doctor`.
 | `search` | Query the local mirror. DSL: `from:`, `to:`, `subject:`, `in:`, `before:`, `after:`, `has:attachment`, plus bare full-text terms. Flags: `--db`, `--limit`, `--offset`. |
 | `sync` | Drain pending events into the mirror (incremental) — mail and calendar. Flags: `--db`. |
 | `serve-stdio` | Run as an MCP server over stdin/stdout (single-process mode). Prefer `install`. |
-| `install` | Register proto-mcp with Claude Desktop and/or Claude Code. Flags: `--client {desktop\|code\|all}`, `--dry-run`. |
-| `uninstall` | Remove proto-mcp from the selected client config(s). |
+| `install` | Register proto-mcp with Claude Desktop and/or Claude Code. Flags: `--client {desktop\|code\|all}`, `--dry-run`. Only the `protonmcp` entry under `mcpServers` is changed; other servers and top-level keys are kept as they are. Before each write, the previous file is saved as `<config>.bak-<UTC timestamp>` (e.g. `~/.claude.json.bak-20260926T101500.000000000Z`), and the newest 5 backups are kept. |
+| `uninstall` | Remove proto-mcp from the selected client config(s). Same guarantees and backups as `install`. |
 | `daemon` | `install` / `uninstall` / `start` / `stop` / `restart` / `status` — manage the LaunchAgent. |
 | `policy` | `reload` / `show` / `validate` — see [configuration.md](./configuration.md). |
 | `lock` / `unlock` | Lock or Touch-ID-unlock the running daemon. |
-| `purge` | Trim the cached-body window. Flags: `--older-than`, `--vacuum`. |
+| `purge` | Trim the cached plaintext window (message bodies, attachments, decrypted calendar events). Flags: `--older-than`, `--vacuum`. |
 
 ## The 34 MCP tools
 
@@ -39,7 +39,7 @@ deny-by-default and Touch-ID gated (see [security.md](./security.md)).
 | `account_whoami` | Account summary for the active session. |
 | `mail_list` | List messages with filters (folder, label, read state…). |
 | `mail_search` | Full-text + structured search over the local mirror. |
-| `mail_read` | Read one message (decrypted text + sanitized HTML). |
+| `mail_read` | Read one message (decrypted text + sanitized HTML). If the sender set `List-Unsubscribe`, also returns `unsubscribe: {https, mailto, one_click}`: sender-controlled targets filtered to https/mailto, never acted on by the server. |
 | `mail_read_thread` | Reconstruct and read a full conversation. |
 | `mail_list_attachments` | List a message's attachments (names, sizes, types). |
 | `labels_list` | List labels. |

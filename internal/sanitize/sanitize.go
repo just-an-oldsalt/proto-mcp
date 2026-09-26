@@ -164,6 +164,20 @@ func Text(input string) string {
 	return strings.TrimSpace(out)
 }
 
+// HeaderValue flattens a raw, sender-controlled header value to a
+// single line: CR / LF / TAB (folding whitespace) become spaces and
+// every other C0 / DEL / C1 control byte is dropped, then the result
+// is trimmed. It does no length capping; callers bound it themselves.
+func HeaderValue(s string) string {
+	s = strings.Map(func(r rune) rune {
+		if r == '\r' || r == '\n' || r == '\t' {
+			return ' '
+		}
+		return r
+	}, s)
+	return strings.TrimSpace(stripControlChars(s))
+}
+
 // stripControlChars drops C0 (< 0x20, excluding \n and \t) and C1
 // (0x80–0x9F) control bytes from s. SECURITY C-2: terminal escape
 // sequences and zero-width control bytes embedded in mail bodies

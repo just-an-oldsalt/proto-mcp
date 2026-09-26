@@ -135,8 +135,8 @@ func RunOnce(ctx context.Context, sess *protonclient.Session, st *store.Store) (
 
 // applyEvent walks a single Event and applies every diff to the
 // store. Message bodies are NOT re-fetched here — Update events
-// invalidate the cached body by zeroing body_cached_at, so the next
-// `protonmcp read` triggers a fresh decrypt.
+// (not flag-only UpdateFlags) invalidate the cached body, clearing it,
+// so the next `protonmcp read` triggers a fresh decrypt.
 func applyEvent(ctx context.Context, st *store.Store, e gpa.Event, res *RunResult) error {
 	for _, m := range e.Messages {
 		switch m.Action {
@@ -158,8 +158,10 @@ func applyEvent(ctx context.Context, st *store.Store, e gpa.Event, res *RunResul
 			}
 			// Update events potentially mean the body changed (drafts
 			// in particular). Invalidate the body cache so the next
-			// read fetches fresh.
-			if m.Action != gpa.EventCreate {
+			// read fetches fresh. UpdateFlags (read/unread, star,
+			// labels) can't change the body, and reading a message
+			// emits one, so it must not throw the cached body away.
+			if m.Action == gpa.EventUpdate {
 				if err := st.InvalidateBodyCache(ctx, m.ID); err != nil {
 					return err
 				}

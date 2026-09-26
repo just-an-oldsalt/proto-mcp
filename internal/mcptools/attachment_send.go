@@ -205,7 +205,7 @@ func attachmentsSummary(decoded []decodedAttachment) string {
 		if i >= max {
 			break
 		}
-		parts = append(parts, fmt.Sprintf("%s (%s)", d.Filename, humanBytes(int64(len(d.Plain)))))
+		parts = append(parts, fmt.Sprintf("%s (%s)", capField(d.Filename, promptNameMaxRunes), humanBytes(int64(len(d.Plain)))))
 	}
 	out := "Attachments: " + strings.Join(parts, ", ")
 	if len(decoded) > max {

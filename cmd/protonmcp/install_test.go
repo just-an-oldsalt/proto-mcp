@@ -29,10 +29,12 @@ func TestConfigPreservesUnknownKeys(t *testing.T) {
 		t.Fatalf("filesystem server lost during parse: %+v", c.MCPServers)
 	}
 
-	c.MCPServers["protonmcp"] = mcpServerEntry{
+	if err := c.setServer("protonmcp", mcpServerEntry{
 		Type:    "stdio",
 		Command: "/usr/local/bin/protonmcp",
 		Args:    []string{"serve-stdio"},
+	}); err != nil {
+		t.Fatalf("setServer: %v", err)
 	}
 
 	out, err := json.Marshal(c)

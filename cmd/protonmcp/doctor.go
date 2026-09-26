@@ -438,7 +438,12 @@ func checkClients(r *report) {
 			r.add(t.name, stateWarn, "cannot read "+cfgPath+": "+err.Error(), "")
 			continue
 		}
-		entry, ok := cfg.MCPServers["protonmcp"]
+		entry, ok, err := cfg.server("protonmcp")
+		if err != nil {
+			r.add(t.name, stateFail, "cannot read protonmcp entry in "+cfgPath+": "+err.Error(),
+				"protonmcp install --client "+t.id)
+			continue
+		}
 		if !ok {
 			r.add(t.name, stateWarn, "protonmcp not registered",
 				"protonmcp install --client "+t.id)

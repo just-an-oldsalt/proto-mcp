@@ -138,9 +138,12 @@ func WithRateLimitPersister(p RateLimitPersister) Option {
 
 // WithLockState wires a callback the middleware checks before every
 // tool call. Returning (true, reason) makes the middleware short-
-// circuit with ErrorResult "daemon_locked: <reason>"; no audit row
-// for handler execution is written (the deny is recorded with
-// outcome=denied + error_msg=daemon_locked).
+// circuit with an ErrorResult naming the lock reason (or, with
+// WithUnlockRequest, raise the unlock prompt first). The lock check
+// runs before audit.Begin, so a call refused while locked writes NO
+// audit row — deliberately, so a client hammering a locked daemon
+// can't flood the log. It is logged at Warn instead. A call that
+// unlocks on request and then runs is audited like any other.
 //
 // Phase 6/E. The serve.Runtime hands its Locked() method here so
 // SIGUSR1 / `protonmcp lock` immediately gates every connected

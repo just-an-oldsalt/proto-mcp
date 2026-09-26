@@ -68,8 +68,9 @@ func (t *idleTracker) run(ctx context.Context, minutesFn func() int, lockFn func
 					"idle_minutes", int(since.Minutes()),
 					"threshold_minutes", minutes)
 				lockFn("idle_timeout")
-				// Don't reset lastActivity here. Unlock re-acquires
-				// the session and the next tool call will bump it.
+				// Don't reset lastActivity here. A successful
+				// Runtime.Unlock bumps it (#129), as does every
+				// tool call.
 				// Locking from already-locked is a no-op so the
 				// next tick won't re-fire.
 			}
