@@ -171,9 +171,10 @@ func calendarEvents(deps Deps) mcp.Tool {
 			// Issue #110: on a session without the calendar scope the
 			// mirror is empty because sync can't fetch events, not
 			// because there are none. An empty list here would be read
-			// as "you have no events", so say why instead.
+			// as "you have no events", so say why instead. First page
+			// only: an empty later page is just the end of the list.
 			blocked := eventsBlocked(ctx, deps)
-			if blocked && len(rows) == 0 {
+			if blocked && len(rows) == 0 && in.Cursor == "" {
 				return mcp.ErrorResult("%s", protonclient.CalendarScopeNotice), nil
 			}
 

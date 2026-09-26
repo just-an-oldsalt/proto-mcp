@@ -229,6 +229,25 @@ func TestCalendarEventsTool_BlockedWithMirroredEventsAddsNotice(t *testing.T) {
 	if !strings.Contains(out.Notice, "#110") || !strings.Contains(out.Notice, "out of date") {
 		t.Errorf("notice = %q", out.Notice)
 	}
+
+	// A full page emits a cursor; the empty page after it is the end of
+	// the list, not "events unavailable".
+	res, err = calendarEvents(Deps{Store: st}).Handler(mcp.Context{Std: context.Background()}, json.RawMessage(`{"limit":1}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cursor := res.StructuredContent.(calendarEventsResult).NextCursor
+	if cursor == "" {
+		t.Fatal("no next_cursor on a full page")
+	}
+	res, err = calendarEvents(Deps{Store: st}).Handler(mcp.Context{Std: context.Background()},
+		json.RawMessage(`{"limit":1,"cursor":"`+cursor+`"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.IsError {
+		t.Errorf("empty follow-up page reported as an error: %s", resultText(res))
+	}
 }
 
 func TestCalendarListTool_BlockedAddsNotice(t *testing.T) {

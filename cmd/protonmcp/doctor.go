@@ -300,11 +300,9 @@ func checkCalendar(ctx context.Context, r *report, st *store.Store) {
 	case err != nil:
 		r.add("calendar", stateWarn, "cannot read calendar sync state: "+err.Error(), "")
 	case ok:
-		detail := "calendar scope not granted — events unavailable (issue #110)"
-		if !blk.Since.IsZero() {
-			detail += "; since " + blk.Since.Local().Format("Jan 2 15:04")
-		}
-		r.add("calendar", stateWarn, detail, "")
+		r.add("calendar", stateWarn,
+			"calendar scope not granted — events unavailable (issue #110); since "+
+				blk.Since.Local().Format("Jan 2 15:04"), "")
 	}
 }
 
