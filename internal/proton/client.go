@@ -134,13 +134,20 @@ func detachedShutdownCtx() (context.Context, context.CancelFunc) {
 // proton-bridge ships with.
 const HostURL = "https://mail-api.proton.me"
 
-// AppVersion intentionally impersonates Proton Bridge. The Proton API
-// validates this header against a known allowlist; an unknown value gets
-// rejected. The design spec calls for "same envelope the official client
-// uses" — we hold to that here.
+// AppVersion intentionally impersonates Proton Bridge. This is our
+// choice, not the SDK's: go-proton-api defaults to "go-proton-api"
+// (DefaultAppVersion in its manager_builder.go). The design spec calls
+// for "same envelope the official client uses" — we hold to that here.
+//
+// Whether the API rejects other values is unverified. Code 5001/5003
+// (AppVersionMissing/AppVersionBad) exist, but hydroxide sends the
+// generic "Other" and logs in, reportedly at the cost of more captcha
+// challenges. What is verified is the cost of this value: Proton scopes
+// the session to the client identity, and a Bridge session has no
+// "calendar" scope, so calendar events 403 with Code 9100 (issue #110).
 //
 // TODO(v1.1): apply for a Proton-issued client identifier so we can stop
-// pretending to be Bridge.
+// pretending to be Bridge (docs/proton-appversion-request.md).
 const AppVersion = "macos-bridge@3.24.2"
 
 // UserAgent is the User-Agent header sent on every API request.
