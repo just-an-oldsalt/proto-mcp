@@ -11,8 +11,6 @@ import (
 	"time"
 
 	gpa "github.com/ProtonMail/go-proton-api"
-
-	"github.com/just-an-oldsalt/proto-mcp/internal/mcp"
 )
 
 // --- Issue #116: the approval dialog and the send act on one snapshot ---
@@ -104,36 +102,48 @@ func draftPromptSnapshot(deps Deps) func(context.Context, json.RawMessage) (stri
 		if err != nil {
 			return "", "", nil, fmt.Errorf("fetch draft: %w", err)
 		}
-		return mcp.SanitizePromptText("Approve mail_send_draft?", 120),
-			mcp.SanitizePromptText(draftPromptBody(draft), 4000),
-			draft, nil
+		title, body, err := sendApprovalDialog("mail_send_draft", draftPromptBody(draft))
+		if err != nil {
+			return "", "", nil, err
+		}
+		return title, body, draft, nil
 	}
 }
 
 // draftPromptBody renders everything about a draft that decides where
-// it goes and what rides along: subject, every recipient, and every
-// attachment (not truncated — the snapshot check compares all of them,
-// so the dialog shows all of them).
+// it goes and what rides along: every recipient, the subject, and
+// every attachment (all of them — the snapshot check compares all of
+// them, so the dialog shows all of them). Recipients come first and
+// as bare addresses (issue #125).
 func draftPromptBody(d gpa.Message) string {
-	parts := []string{
-		"Send draft " + sanitizeField(d.ID),
-		"Subject: " + sanitizeField(d.Subject),
-		"To: " + joinAddrs(addressStrings(d.ToList)),
-	}
-	if cc := addressStrings(d.CCList); len(cc) > 0 {
-		parts = append(parts, "CC: "+joinAddrs(cc))
-	}
-	if bcc := addressStrings(d.BCCList); len(bcc) > 0 {
-		parts = append(parts, "BCC: "+joinAddrs(bcc))
-	}
-	if len(d.Attachments) > 0 {
-		atts := make([]string, 0, len(d.Attachments))
-		for _, a := range d.Attachments {
-			atts = append(atts, fmt.Sprintf("%s (%s)", sanitizeField(a.Name), humanBytes(a.Size)))
-		}
-		parts = append(parts, "Attachments: "+strings.Join(atts, ", "))
+	parts := []string{"Send draft " + capField(d.ID, promptNameMaxRunes)}
+	parts = append(parts, recipientLines(
+		joinAddrs(addressStrings(d.ToList)),
+		joinAddrs(addressStrings(d.CCList)),
+		joinAddrs(addressStrings(d.BCCList)),
+	)...)
+	parts = append(parts, "Subject: "+capField(d.Subject, promptSubjectMaxRunes))
+	if s := messageAttachmentsList(d.Attachments); s != "" {
+		parts = append(parts, "Attachments: "+s)
 	}
 	return strings.Join(parts, "\n")
+}
+
+// recipientLines renders the To / CC / BCC lines of a send dialog from
+// already-joined bare-address lists. All three always appear, "(none)"
+// when empty, so the user can see there is no BCC.
+func recipientLines(to, cc, bcc string) []string {
+	return []string{"To: " + orNone(to), "CC: " + orNone(cc), "BCC: " + orNone(bcc)}
+}
+
+// messageAttachmentsList renders every attachment already on a server
+// message as "name (size), …", each name capped. "" when none.
+func messageAttachmentsList(atts []gpa.Attachment) string {
+	out := make([]string, 0, len(atts))
+	for _, a := range atts {
+		out = append(out, fmt.Sprintf("%s (%s)", capField(a.Name, promptNameMaxRunes), humanBytes(a.Size)))
+	}
+	return strings.Join(out, ", ")
 }
 
 // draftChange names the first thing that differs between the draft
@@ -206,26 +216,83 @@ func replyPromptSnapshot(deps Deps, toolName string, replyAll bool) func(context
 		if err != nil {
 			return "", "", nil, fmt.Errorf("fetch parent: %w", err)
 		}
-		verb := "Reply to"
-		if replyAll {
-			verb = "Reply-all to"
+		title, body, err := sendApprovalDialog(toolName,
+			replyPromptBody(deps, parent, in.InReplyTo, replyAll, in.Attachments))
+		if err != nil {
+			return "", "", nil, err
 		}
-		to, cc := replyRecipients(deps, parent, replyAll)
-		body := verb + " message " + sanitizeField(in.InReplyTo) +
-			"\nSubject: " + sanitizeField(replySubject(parent.Subject)) +
-			"\nTo: " + joinAddrs(to)
-		if len(cc) > 0 {
-			body += "\nCC: " + joinAddrs(cc)
-		}
-		if decoded, err := decodeAndValidateAttachments(deps, in.Attachments); err == nil {
-			if s := attachmentsSummary(decoded); s != "" {
-				body += "\n" + s
-			}
-		}
-		return mcp.SanitizePromptText("Approve "+toolName+"?", 120),
-			mcp.SanitizePromptText(body, 4000),
-			parent, nil
+		return title, body, parent, nil
 	}
+}
+
+// replyPromptBody renders a reply dialog from the fetched parent:
+// recipients first (issue #125), then the subject the reply will
+// carry, then any new attachments.
+func replyPromptBody(deps Deps, parent gpa.Message, parentID string, replyAll bool, attachments []sendAttachmentInput) string {
+	verb := "Reply to"
+	if replyAll {
+		verb = "Reply-all to"
+	}
+	to, cc := replyRecipients(deps, parent, replyAll)
+	parts := []string{verb + " message " + capField(parentID, promptNameMaxRunes)}
+	parts = append(parts, recipientLines(joinAddrs(to), joinAddrs(cc), "")...)
+	parts = append(parts, "Subject: "+capField(replySubject(parent.Subject), promptSubjectMaxRunes))
+	if decoded, err := decodeAndValidateAttachments(deps, attachments); err == nil {
+		if s := attachmentsSummary(decoded); s != "" {
+			parts = append(parts, s)
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
+// forwardPromptSnapshot is mail_forward's PromptSnapshot (issue #125).
+// It fetches the parent once so the dialog can say what is being
+// forwarded (its subject and, when include_parent_attachments is set,
+// its attachments); sendForward then forwards that same parent.
+func forwardPromptSnapshot(deps Deps) func(context.Context, json.RawMessage) (string, string, any, error) {
+	return func(ctx context.Context, args json.RawMessage) (string, string, any, error) {
+		var in forwardInput
+		_ = json.Unmarshal(args, &in)
+		if in.ForwardOf == "" {
+			return "", "", nil, errors.New("forward_of is required")
+		}
+		parent, err := fetchForPrompt(ctx, deps, in.ForwardOf)
+		if err != nil {
+			return "", "", nil, fmt.Errorf("fetch parent: %w", err)
+		}
+		title, body, err := sendApprovalDialog("mail_forward", forwardPromptBody(deps, parent, in))
+		if err != nil {
+			return "", "", nil, err
+		}
+		return title, body, parent, nil
+	}
+}
+
+// forwardPromptBody renders a forward dialog: recipients (bare
+// addresses, from args), the subject the forward will carry, new
+// attachments, and — when the call carries them over — every one of
+// the parent's attachments.
+func forwardPromptBody(deps Deps, parent gpa.Message, in forwardInput) string {
+	parts := []string{"Forward message " + capField(in.ForwardOf, promptNameMaxRunes)}
+	parts = append(parts, recipientLines(promptAddrs(in.To), promptAddrs(in.CC), promptAddrs(in.BCC))...)
+	parts = append(parts, "Subject: "+capField(forwardSubject(parent.Subject), promptSubjectMaxRunes))
+	if decoded, err := decodeAndValidateAttachments(deps, in.Attachments); err == nil {
+		if s := attachmentsSummary(decoded); s != "" {
+			parts = append(parts, s)
+		}
+	}
+	if in.IncludeParentAttachments {
+		parts = append(parts, "Forwarded attachments: "+orNone(messageAttachmentsList(parent.Attachments)))
+	}
+	return strings.Join(parts, "\n")
+}
+
+// forwardSubject prefixes Fwd: unless already present.
+func forwardSubject(s string) string {
+	if strings.HasPrefix(strings.ToLower(s), "fwd:") {
+		return s
+	}
+	return "Fwd: " + s
 }
 
 // replySubject prefixes Re: unless already present.

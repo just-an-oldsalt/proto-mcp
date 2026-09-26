@@ -82,7 +82,9 @@ func mailSend(deps Deps) mcp.Tool {
 		}`),
 		OutputSchema: json.RawMessage(sendResultSchema),
 		Recipients:   extractSendRecipients,
-		PromptBody:   sendPromptBodyWithDeps(deps, "mail_send"),
+		// Issue #125 — a snapshot (with no server state) so a dialog
+		// too long to show in full can refuse the call.
+		PromptSnapshot: sendPromptSnapshot(deps, "mail_send"),
 		Handler: func(ctx mcp.Context, raw json.RawMessage) (*mcp.ToolResult, error) {
 			var in sendInput
 			if err := json.Unmarshal(raw, &in); err != nil {
@@ -248,22 +250,10 @@ func mailForward(deps Deps) mcp.Tool {
 			}
 			return append(append(append([]string{}, in.To...), in.CC...), in.BCC...)
 		},
-		PromptBody: func(args json.RawMessage) (string, string) {
-			var in forwardInput
-			_ = json.Unmarshal(args, &in)
-			body := fmt.Sprintf("Forward message %s\nTo: %s\nCC: %s\nBCC: %s",
-				sanitizeField(in.ForwardOf),
-				joinAddrs(in.To),
-				joinAddrs(in.CC),
-				joinAddrs(in.BCC))
-			if decoded, err := decodeAndValidateAttachments(deps, in.Attachments); err == nil {
-				if s := attachmentsSummary(decoded); s != "" {
-					body += "\n" + s
-				}
-			}
-			return mcp.SanitizePromptText("Approve mail_forward?", 120),
-				mcp.SanitizePromptText(body, 4000)
-		},
+		// Issue #125 — one fetch of the parent renders the dialog
+		// (its subject, and its attachments when carried over) and
+		// is what sendForward forwards.
+		PromptSnapshot: forwardPromptSnapshot(deps),
 		Handler: func(ctx mcp.Context, raw json.RawMessage) (*mcp.ToolResult, error) {
 			var in forwardInput
 			if err := json.Unmarshal(raw, &in); err != nil {
@@ -353,41 +343,36 @@ func normalizeRecipientList(s string) []string {
 	return out
 }
 
-// sendPromptBody returns a PromptBody func that formats the literal
-// To / CC / BCC / Subject lines the user sees in the NSAlert.
-// Body content is replaced with sha256+bytes via the redact path
-// — recipient list, subject, and counts are what matter at approval
-// time. Phase 8/B — also appends an attachment summary line when
-// the call carries attachments.
-func sendPromptBody(toolName string) func(json.RawMessage) (string, string) {
-	return sendPromptBodyWithDeps(Deps{}, toolName)
-}
-
-// sendPromptBodyWithDeps is the Phase 8/B variant — passes Deps so
-// the closure can validate + summarize the attachments list for
-// display. Validation errors are swallowed (the handler will
-// surface them with a better message); the closure best-efforts
-// the prompt-body fields and lets the user approve based on what
-// did parse.
-func sendPromptBodyWithDeps(deps Deps, toolName string) func(json.RawMessage) (string, string) {
-	return func(args json.RawMessage) (string, string) {
+// sendPromptSnapshot is mail_send's PromptSnapshot. There is no server
+// state to fetch (snap is nil); it is a snapshot only so that a dialog
+// too long to show in full refuses the call (issue #125).
+func sendPromptSnapshot(deps Deps, toolName string) func(context.Context, json.RawMessage) (string, string, any, error) {
+	return func(_ context.Context, args json.RawMessage) (string, string, any, error) {
 		var in sendInput
 		_ = json.Unmarshal(args, &in)
-		body := fmt.Sprintf(
-			"To: %s\nCC: %s\nBCC: %s\nSubject: %s",
-			joinAddrs(in.To),
-			joinAddrs(in.CC),
-			joinAddrs(in.BCC),
-			sanitizeField(in.Subject),
-		)
-		if decoded, err := decodeAndValidateAttachments(deps, in.Attachments); err == nil {
-			if s := attachmentsSummary(decoded); s != "" {
-				body += "\n" + s
-			}
+		title, body, err := sendApprovalDialog(toolName, sendPromptBody(deps, in))
+		if err != nil {
+			return "", "", nil, err
 		}
-		return mcp.SanitizePromptText("Approve "+toolName+"?", 120),
-			mcp.SanitizePromptText(body, 4000)
+		return title, body, nil, nil
 	}
+}
+
+// sendPromptBody renders the literal To / CC / BCC / Subject lines the
+// user sees in the Touch ID dialog. Recipients come first, as bare
+// addresses (issue #125). Body content isn't shown: recipients,
+// subject, and attachments are what matter at approval time. Phase
+// 8/B — also appends an attachment summary line; attachment
+// validation errors are swallowed here (the handler reports them).
+func sendPromptBody(deps Deps, in sendInput) string {
+	parts := recipientLines(promptAddrs(in.To), promptAddrs(in.CC), promptAddrs(in.BCC))
+	parts = append(parts, "Subject: "+capField(in.Subject, promptSubjectMaxRunes))
+	if decoded, err := decodeAndValidateAttachments(deps, in.Attachments); err == nil {
+		if s := attachmentsSummary(decoded); s != "" {
+			parts = append(parts, s)
+		}
+	}
+	return strings.Join(parts, "\n")
 }
 
 // sendCompose is mail_send: create a draft, send it, return.
@@ -545,14 +530,16 @@ func sendReply(ctx mcp.Context, deps Deps, toolName, parentID string, replyAll b
 // parent attachments over via re-encrypted session keys (no
 // byte-level round-trip).
 func sendForward(ctx mcp.Context, deps Deps, in forwardInput) (*mcp.ToolResult, error) {
-	parent, err := deps.Session.Client.GetMessage(ctx.Std, in.ForwardOf)
-	if err != nil {
-		return mcp.ErrorResult("mail_forward: fetch parent: %v", err), nil
+	// Issue #125 — forward the parent the approval dialog was
+	// rendered from; fetch only when no dialog ran (policy: allow).
+	parent, ok := ctx.Snapshot.(gpa.Message)
+	if !ok || parent.ID != in.ForwardOf {
+		var err error
+		if parent, err = deps.Session.Client.GetMessage(ctx.Std, in.ForwardOf); err != nil {
+			return mcp.ErrorResult("mail_forward: fetch parent: %v", err), nil
+		}
 	}
-	subject := parent.Subject
-	if !strings.HasPrefix(strings.ToLower(subject), "fwd:") {
-		subject = "Fwd: " + subject
-	}
+	subject := forwardSubject(parent.Subject)
 
 	// Fast path: no parent-attachment carryover. Reuse sendCompose
 	// — identical behavior to the 8/B contract.
