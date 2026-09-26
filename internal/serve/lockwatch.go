@@ -103,8 +103,14 @@ func runLockwatchOnce(ctx context.Context, binPath string, lockFn func(reason st
 		case "sleep":
 			lockFn("sleep")
 		case "screen_unlocked", "wake":
-			// Informational — daemon stays locked. The user must
-			// run `protonmcp unlock` (Touch ID) to resume.
+			// Informational — the daemon deliberately stays locked.
+			// Unlocking the screen is not authentication we can hand
+			// the session keys back on; that needs Touch ID.
+			//
+			// It resumes either from `protonmcp unlock` or, since
+			// PROTO-152, from the next tool call raising the prompt
+			// itself (internal/mcp/unlock.go) — so this is no longer
+			// a dead end requiring a terminal.
 			logger.Debug("lockwatch event (informational)", "event", line)
 		default:
 			logger.Debug("lockwatch unknown line", "line", line)

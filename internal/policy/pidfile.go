@@ -26,11 +26,11 @@ func DefaultPIDPath() (string, error) {
 // and writes os.Getpid() to it (mode 0o600).
 //
 // **Multi-instance friendly**: as of D9 fix, we no longer take an
-// advisory exclusive flock. The PID file is informational — useful
-// for `lsof` / debugging — and last-writer-wins. `policy reload`
-// uses pgrep to find every live serve-stdio process and signals
-// them all, so multiple concurrent clients (Claude Desktop +
-// Claude Code, for example) each receive the SIGHUP.
+// advisory exclusive flock. The PID file is last-writer-wins, so it
+// names only one of the running runtimes; FindRunningPIDs treats it
+// as one discovery source among several and signals every instance
+// it finds, so multiple concurrent clients (Claude Desktop + Claude
+// Code, for example) each receive the SIGHUP.
 //
 // The previous flock-based "only one serve-stdio at a time"
 // semantics broke the Claude Desktop + Claude Code coexistence
@@ -61,92 +61,177 @@ func WritePIDFile(path string) (cleanup func(), err error) {
 	}, nil
 }
 
-// FindRunningPIDs returns the PIDs of every live `protonmcp
-// serve-stdio` process. Used by `protonmcp policy reload` to signal
-// every running instance — the PID file's last-writer-wins shape
-// can't be relied on for "find the running daemon" anymore, and
-// pgrep is the natural macOS-side discovery primitive.
+// Executable basenames that host a serve.Runtime and therefore have
+// the SIGHUP (policy reload) / SIGUSR1 (lock) / SIGUSR2 (unlock)
+// handlers installed.
 //
-// Excludes os.Getpid() from the result so a `policy reload` invoked
-// from inside an MCP-tool handler doesn't signal itself (which
-// would race with the engine.Reload SIGHUP handler).
+// protonmcp-shim is deliberately absent. It forwards over the Unix
+// socket and installs no SIGUSR handler, so signalling it would not
+// lock or unlock anything — it would kill it, since SIGUSR1/SIGUSR2
+// terminate by default.
+const (
+	// DaemonBinary is the long-lived background daemon.
+	DaemonBinary = "protonmcpd"
+	// ServeStdioBinary is the CLI, which hosts a runtime when invoked
+	// as `protonmcp serve-stdio`.
+	ServeStdioBinary = "protonmcp"
+)
+
+// FindRunningPIDs returns the PIDs of every live process hosting a
+// signal-handling protonmcp runtime: `protonmcp serve-stdio`
+// instances AND the long-lived protonmcpd daemon. Used by `protonmcp
+// policy reload`, `protonmcp lock`, and `protonmcp unlock`.
 //
-// SECURITY D33 / D34: pgrep -f matches on the full command line, so
-// it picks up wrappers (Claude.app/Contents/Helpers/disclaimer
+// PROTO-152: protonmcpd was previously undiscoverable, so all three
+// commands reported "not running" against a perfectly healthy daemon
+// — which left a screen-locked daemon with no route back short of a
+// restart, and made `policy reload` silently no-op while printing
+// success. Two independent bugs caused it, either fatal alone:
+//
+//  1. Discovery was a lone `pgrep -f "protonmcp serve-stdio"`. The
+//     daemon's argv is just its binary path, with no subcommand to
+//     match, so pgrep never returned it.
+//  2. Survivors were filtered by os.SameFile against the *calling*
+//     binary. The CLI that signals is a different file from the
+//     daemon it signals, so that test excluded protonmcpd by
+//     construction even when pgrep did find it.
+//
+// Three sources are now unioned, each with its own identity check.
+//
+// Excludes os.Getpid() so a `policy reload` invoked from inside an
+// MCP-tool handler doesn't signal itself (which would race with the
+// engine.Reload SIGHUP handler).
+//
+// SECURITY D33 / D34: pgrep -f matches the full command line, so it
+// also picks up wrappers (Claude.app/Contents/Helpers/disclaimer
 // invokes protonmcp with serve-stdio in argv) and editor processes
-// with this filename open. We post-filter each PID by verifying its
-// actual executable path via proc_pidpath equals the running
-// protonmcp binary. PIDs whose path can't be resolved (permission
-// denied / gone) are dropped from the result — better to miss one
-// than to send SIGHUP to a wrapper that ignores it and produce a
-// misleading success log.
+// holding a file of that name open. Every candidate is still post-
+// filtered against its real executable via proc_pidpath, and PIDs
+// whose path can't be resolved are dropped — better to miss one than
+// to signal a stranger, which for SIGUSR1/2 means killing it.
 //
 // Returns ErrNotRunning if no matching process exists.
 func FindRunningPIDs() ([]int, error) {
-	out, err := exec.Command("pgrep", "-f", "protonmcp serve-stdio").Output()
-	if err != nil {
-		var ee *exec.ExitError
-		if errors.As(err, &ee) {
-			return nil, ErrNotRunning
-		}
-		return nil, fmt.Errorf("pgrep: %w", err)
-	}
-	self := os.Getpid()
-	selfExe, _ := os.Executable()
-	selfExe, _ = filepath.Abs(selfExe)
-
+	found := map[int]struct{}{os.Getpid(): {}}
 	var pids []int
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		if line == "" {
-			continue
+	collect := func(pid int, allowed ...string) {
+		if pid <= 0 {
+			return
 		}
-		pid, err := strconv.Atoi(strings.TrimSpace(line))
-		if err != nil || pid == self {
-			continue
+		if _, dup := found[pid]; dup {
+			return
 		}
-		// D33/D34: verify the PID's actual executable matches ours.
-		// caller.BinaryFor returns "" on can't-determine (permission /
-		// non-darwin); drop those rather than SIGHUP a stranger.
-		if !matchesExecutable(pid, selfExe) {
-			continue
+		if !hasExecutableNamed(pid, allowed...) {
+			return
 		}
+		found[pid] = struct{}{}
 		pids = append(pids, pid)
 	}
+
+	// Source 1 — serve-stdio instances, one per connected client.
+	for _, pid := range pgrepPIDs("-f", ServeStdioBinary+" serve-stdio") {
+		collect(pid, ServeStdioBinary)
+	}
+	// Source 2 — the daemon, matched on exact process name because
+	// its argv carries no distinguishing subcommand.
+	for _, pid := range pgrepPIDs("-x", DaemonBinary) {
+		collect(pid, DaemonBinary)
+	}
+	// Source 3 — the PID file, written by serve.Setup in whichever
+	// process owns the runtime. Last-writer-wins across serve-stdio
+	// and the daemon, so it may name either; the executable check
+	// sorts that out. Kept as a backstop for the case where pgrep is
+	// missing or its output is truncated.
+	if path, err := DefaultPIDPath(); err == nil {
+		collect(readPIDFile(path), DaemonBinary, ServeStdioBinary)
+	}
+
 	if len(pids) == 0 {
 		return nil, ErrNotRunning
 	}
 	return pids, nil
 }
 
-// matchesExecutable returns true if the process at pid is running
-// the same executable as us. Lives here rather than in
-// internal/caller because it's specifically the SIGHUP-filtering
-// rule — a future caller might want a looser match.
+// IsRuntimeProcess reports whether pid is a live process running one
+// of the binaries that host a protonmcp runtime.
 //
-// Comparison uses os.SameFile (st_dev + st_ino) so symlinks /
-// resolved-vs-raw paths between os.Executable() and proc_pidpath
-// don't cause false negatives. proc_pidpath returns the
-// canonical resolved path; os.Executable on a symlinked install
-// may return the symlink. Without SameFile, the strings differ
-// and the filter rejects legitimate matches.
-func matchesExecutable(pid int, selfExe string) bool {
-	if selfExe == "" {
-		// We don't know our own path either — fall through to the
-		// previous behavior of "trust the pgrep match." Conservative
-		// but not strictly wrong.
-		return true
-	}
-	bin := procExeFor(pid)
-	if bin == "" {
-		return false
-	}
-	selfInfo, serr := os.Stat(selfExe)
-	binInfo, berr := os.Stat(bin)
-	if serr != nil || berr != nil {
-		return false
-	}
-	return os.SameFile(selfInfo, binInfo)
+// Exported for readers of the records a runtime leaves on disk — the
+// PID file and the lock state — so they can tell a live claim from
+// one an unclean shutdown left behind. A recorded PID may since have
+// been recycled by an unrelated process, which this rejects.
+func IsRuntimeProcess(pid int) bool {
+	return hasExecutableNamed(pid, DaemonBinary, ServeStdioBinary)
 }
 
-// ErrNotRunning is returned when no live serve-stdio is detected.
-var ErrNotRunning = errors.New("no protonmcp serve-stdio is running")
+// pgrepPIDs runs pgrep with the given arguments and returns the PIDs
+// it printed. A non-zero exit (pgrep's "no match") yields nil rather
+// than an error: callers union several sources, and one source
+// finding nothing is not a failure of the search.
+func pgrepPIDs(args ...string) []int {
+	out, err := exec.Command("pgrep", args...).Output()
+	if err != nil {
+		return nil
+	}
+	var pids []int
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if pid, err := strconv.Atoi(line); err == nil {
+			pids = append(pids, pid)
+		}
+	}
+	return pids
+}
+
+// readPIDFile returns the PID recorded at path, or 0 when the file is
+// absent or malformed. Liveness isn't checked here — the caller's
+// executable check subsumes it, since a dead PID resolves to no
+// executable path at all and is dropped.
+func readPIDFile(path string) int {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		return 0
+	}
+	return pid
+}
+
+// hasExecutableNamed reports whether the process at pid is running one
+// of the named product binaries.
+//
+// This replaces the old os.SameFile-against-our-own-path check, which
+// only ever held for the single-binary serve-stdio topology. The
+// daemon is a different executable from the CLI that signals it, so
+// "is it the same file as me" was the wrong question — see the
+// PROTO-152 note on FindRunningPIDs. Comparing basenames against the
+// binaries we ship keeps the property that actually matters (never
+// signal a wrapper or an editor) while spanning the two-binary
+// layout.
+//
+// Deliberately does NOT pin the directory: a source-built CLI in
+// ./bin is expected to be able to signal a Homebrew-installed daemon,
+// which is exactly the mixed layout developers run.
+func hasExecutableNamed(pid int, allowed ...string) bool {
+	bin := procExeFor(pid)
+	if bin == "" {
+		// Can't determine: process is gone, permission denied, or a
+		// non-darwin build where proc_pidpath has no equivalent.
+		return false
+	}
+	base := filepath.Base(bin)
+	for _, name := range allowed {
+		if base == name {
+			return true
+		}
+	}
+	return false
+}
+
+// ErrNotRunning is returned when no live serve-stdio or protonmcpd
+// process is detected.
+var ErrNotRunning = errors.New("no protonmcp serve-stdio or protonmcpd process is running")

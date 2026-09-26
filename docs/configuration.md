@@ -50,9 +50,21 @@ The daemon also auto-locks on:
 - system sleep (`NSWorkspaceWillSleepNotification`)
 - idle timeout (`idle_lock_minutes`; default `0` = disabled)
 
-While locked, every tool call returns `daemon is locked (<reason>); run
-protonmcp unlock to resume`. No audit row is written for the blocked
-attempt (it's logged at WARN instead).
+Unlocking your Mac's screen does **not** unlock the daemon — handing the
+session keys back needs Touch ID, and a screen unlock isn't that.
+
+While locked, a tool call raises the Touch ID prompt itself and proceeds
+once you approve, so you don't have to reach for a terminal. The model
+can ask for the unlock; only the sensor grants it. Prompts are bounded:
+one at a time, and after a prompt you don't approve, no further ones for
+60 seconds. `protonmcp unlock` bypasses that cooldown.
+
+If the prompt is declined or suppressed, the call returns `daemon is
+locked (<reason>); ...` with the reason it couldn't proceed. No audit row
+is written for the blocked attempt (it's logged at WARN instead).
+
+`protonmcp doctor` reports lock state, so a locked daemon shows up as a
+`warn` line rather than looking healthy.
 
 ## Observability
 

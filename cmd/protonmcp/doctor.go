@@ -13,6 +13,7 @@ import (
 	"github.com/just-an-oldsalt/proto-mcp/internal/approval"
 	"github.com/just-an-oldsalt/proto-mcp/internal/buildinfo"
 	"github.com/just-an-oldsalt/proto-mcp/internal/keystore"
+	"github.com/just-an-oldsalt/proto-mcp/internal/policy"
 	"github.com/just-an-oldsalt/proto-mcp/internal/serve"
 	"github.com/just-an-oldsalt/proto-mcp/internal/store"
 )
@@ -95,6 +96,7 @@ func runDoctor(ctx context.Context, args []string) error {
 	checkLogin(&r)
 	checkStore(ctx, &r, *dbPath)
 	checkDaemon(&r)
+	checkLockState(&r)
 	checkIntegrity(&r)
 	checkClients(&r)
 
@@ -311,6 +313,48 @@ func checkDaemon(r *report) {
 		detail = fmt.Sprintf("running (pid %d), socket healthy", pid)
 	}
 	r.add("daemon", stateOK, detail, "")
+}
+
+// checkLockState reports whether the running runtime is locked.
+//
+// PROTO-152: a locked daemon refuses every tool call while every
+// other check here still passes — process up, socket healthy,
+// keychain populated, mirror full. Doctor printed "All good" against
+// exactly the state the user ran it to diagnose. The runtime now
+// publishes the flag (internal/serve/lockstate.go) and we read it.
+//
+// The record is advisory, so it's only trusted when the PID that
+// wrote it is still a live protonmcp runtime; otherwise it's a
+// leftover from a crashed daemon and checkDaemon already covers the
+// real problem.
+func checkLockState(r *report) {
+	st, err := serve.ReadLockState()
+	if err != nil {
+		if errors.Is(err, serve.ErrNoLockState) {
+			// No runtime has recorded state: either nothing is
+			// running (checkDaemon says so) or the running daemon
+			// predates this feature and needs a restart to publish.
+			return
+		}
+		r.add("lock state", stateWarn, "cannot read: "+err.Error(), "")
+		return
+	}
+	if !policy.IsRuntimeProcess(st.PID) {
+		// Stale record from a process that's gone.
+		return
+	}
+	if !st.Locked {
+		r.add("lock state", stateOK, "unlocked", "")
+		return
+	}
+
+	detail := fmt.Sprintf("LOCKED (%s) — every tool call is being refused", st.Reason)
+	if !st.Since.IsZero() {
+		detail = fmt.Sprintf("LOCKED since %s (%s) — every tool call is being refused",
+			st.Since.Local().Format("15:04 on Jan 2"), st.Reason)
+	}
+	r.add("lock state", stateWarn, detail,
+		"protonmcp unlock   — prompts Touch ID, then Claude works again")
 }
 
 // checkIntegrity compares the recorded SHA-256 against the protonmcpd

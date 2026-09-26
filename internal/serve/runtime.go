@@ -105,8 +105,8 @@ func (r *Runtime) Locked() (bool, string) {
 // the lock was manual, idle, or signal-driven.
 func (r *Runtime) Lock(reason string) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	if r.locked {
+		r.mu.Unlock()
 		return
 	}
 	r.locked = true
@@ -123,7 +123,29 @@ func (r *Runtime) Lock(reason string) {
 	if r.Broker != nil {
 		r.Broker.Invalidate()
 	}
+	r.mu.Unlock()
+
 	slog.Info("daemon locked", "reason", reason)
+	// Published outside r.mu: the tool-call hot path takes RLock on
+	// every call, and a slow disk shouldn't stall it (PROTO-152).
+	r.publishLockState(true, reason)
+}
+
+// publishLockState mirrors the in-memory flag to disk for
+// out-of-process readers — `protonmcp doctor` in particular. Purely
+// advisory: a failure here costs visibility, never correctness, so it
+// warns rather than propagating. See internal/serve/lockstate.go.
+func (r *Runtime) publishLockState(locked bool, reason string) {
+	err := WriteLockState(LockState{
+		PID:    os.Getpid(),
+		Locked: locked,
+		Reason: reason,
+		Since:  time.Now(),
+	})
+	if err != nil {
+		slog.Warn("could not publish lock state; doctor won't see it",
+			"err", err.Error())
+	}
 }
 
 // Unlock re-acquires the session by calling the same callback that
@@ -158,9 +180,9 @@ func (r *Runtime) Unlock(ctx context.Context) error {
 	sess := bundle.GetSession()
 
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	if !r.locked {
 		// Lost a race with a concurrent unlock; discard our acquire.
+		r.mu.Unlock()
 		bundle.Close()
 		sess.Close()
 		return nil
@@ -180,7 +202,10 @@ func (r *Runtime) Unlock(ctx context.Context) error {
 	}
 	r.locked = false
 	r.lockReason = ""
+	r.mu.Unlock()
+
 	slog.Info("daemon unlocked")
+	r.publishLockState(false, "")
 	return nil
 }
 
@@ -410,6 +435,7 @@ func Setup(ctx context.Context, cfg SetupConfig) (*Runtime, error) {
 		mcp.WithCallerResolver(resolver),
 		mcp.WithRateLimitPersister(newRateLimitStoreAdapter(st)),
 		mcp.WithLockState(rt.Locked),
+		mcp.WithUnlockRequest(rt.Unlock),
 		mcp.WithToolCallObserver(rt.idleTracker.bumpActivity),
 	}
 	if broker != nil {
@@ -497,6 +523,12 @@ func Setup(ctx context.Context, cfg SetupConfig) (*Runtime, error) {
 	bgSyncCtx, bgSyncCancel := context.WithCancel(context.Background())
 	rt.bgSyncCancel = bgSyncCancel
 	go rt.runBackgroundSync(bgSyncCtx, logger)
+
+	// PROTO-152 — publish the starting (unlocked) state last, once
+	// Setup can no longer fail. This also overwrites any record a
+	// previous daemon left behind after an unclean shutdown, so
+	// doctor never reports a stale lock against a fresh process.
+	rt.publishLockState(false, "")
 
 	return rt, nil
 }
@@ -604,6 +636,7 @@ func (r *Runtime) Close() {
 	if r.pidUnlink != nil {
 		r.pidUnlink()
 	}
+	removeLockState()
 	if r.Bundle != nil {
 		r.Bundle.Close()
 	}
