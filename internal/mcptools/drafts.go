@@ -239,7 +239,7 @@ func mailDraftDelete(deps Deps) mcp.Tool {
 	}
 	return mcp.Tool{
 		Name:        "mail_draft_delete",
-		Description: "Delete a draft. This is a Proton DeleteMessage on the draft, which trashes it (recoverable from Trash).",
+		Description: "Delete a draft by moving it to Trash (recoverable from Trash).",
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {"draft_id": {"type": "string"}},
@@ -270,10 +270,14 @@ func mailDraftDelete(deps Deps) mcp.Tool {
 			if in.DraftID == "" {
 				return nil, mcp.NewError(mcp.CodeInvalidParams, "mail_draft_delete: draft_id is required")
 			}
-			if err := deps.Session.Client.DeleteMessage(ctx.Std, in.DraftID); err != nil {
+			// Issue #122: trash via TrashLabel. Client.DeleteMessage is
+			// Proton's permanent delete, not a move to Trash.
+			if err := deps.Session.Client.LabelMessages(ctx.Std, []string{in.DraftID}, gpa.TrashLabel); err != nil {
 				return mcp.ErrorResult("mail_draft_delete: %v", err), nil
 			}
-			_ = deps.Store.DeleteMessage(ctx.Std, in.DraftID)
+			_ = updateMessageFlag(ctx.Std, deps, in.DraftID, func(m *store.Message) {
+				m.Folder = "trash"
+			})
 			return mcp.StructuredResult(map[string]any{
 				"draft_id": in.DraftID,
 				"deleted":  true,

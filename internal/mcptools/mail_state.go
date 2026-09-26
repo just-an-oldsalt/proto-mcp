@@ -265,6 +265,10 @@ func mailLabel(deps Deps) mcp.Tool {
 // original folder while the message still exists in trash. (Proton
 // has a separate "permanent delete" verb gated as deny by default —
 // see mail_delete_permanent in 5/D.)
+//
+// Issue #122: this is a label operation (TrashLabel), NOT
+// Client.DeleteMessage — that is PUT /mail/v4/messages/delete,
+// Proton's permanent delete.
 func mailTrash(deps Deps) mcp.Tool {
 	type input struct {
 		MessageID string `json:"message_id"`
@@ -297,9 +301,7 @@ func mailTrash(deps Deps) mcp.Tool {
 			if err := decodeMessageIDInput(raw, &in, &in.MessageID, "mail_trash"); err != nil {
 				return nil, err
 			}
-			// Proton's DeleteMessage moves to Trash (recoverable);
-			// the true permanent delete is a different endpoint.
-			if err := deps.Session.Client.DeleteMessage(ctx.Std, in.MessageID); err != nil {
+			if err := deps.Session.Client.LabelMessages(ctx.Std, []string{in.MessageID}, gpa.TrashLabel); err != nil {
 				return mcp.ErrorResult("mail_trash: %v", err), nil
 			}
 			_ = updateMessageFlag(ctx.Std, deps, in.MessageID, func(m *store.Message) {
