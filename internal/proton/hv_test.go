@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	gpa "github.com/ProtonMail/go-proton-api"
@@ -49,8 +50,11 @@ func TestTryWithHV_RetriesWithOriginalToken(t *testing.T) {
 	hvErr := newHVAPIError(t)
 	confirmCalls := 0
 	creds := &Credentials{
-		AskHVBrowserConfirm: func(_ context.Context, webURL string) error {
+		AskHVBrowserConfirm: func(_ context.Context, webURL string, again bool) error {
 			confirmCalls++
+			if again {
+				t.Error("first confirmation should not be flagged again")
+			}
 			if webURL != "https://verify.proton.me/?methods=ownership-email%2Cownership-sms&token=test-token-abc123" {
 				t.Errorf("unexpected webURL passed to confirm callback: %q", webURL)
 			}
@@ -98,7 +102,7 @@ func TestTryWithHV_RetriesWithOriginalToken(t *testing.T) {
 // all) doesn't invoke the browser-confirm callback or retry.
 func TestTryWithHV_NoRetryOnSuccess(t *testing.T) {
 	creds := &Credentials{
-		AskHVBrowserConfirm: func(context.Context, string) error {
+		AskHVBrowserConfirm: func(context.Context, string, bool) error {
 			t.Fatal("AskHVBrowserConfirm should not be called when the first call succeeds")
 			return nil
 		},
@@ -133,7 +137,7 @@ func TestTryWithHV_CaptchaOnlyRejected(t *testing.T) {
 		}`),
 	}
 	creds := &Credentials{
-		AskHVBrowserConfirm: func(context.Context, string) error {
+		AskHVBrowserConfirm: func(context.Context, string, bool) error {
 			t.Fatal("AskHVBrowserConfirm should not be called for a captcha-only offer")
 			return nil
 		},
@@ -165,7 +169,7 @@ func TestTryWithHV_NoPromptAvailable(t *testing.T) {
 func TestTryWithHV_NonHVErrorPassesThrough(t *testing.T) {
 	wantErr := errors.New("network exploded")
 	creds := &Credentials{
-		AskHVBrowserConfirm: func(context.Context, string) error {
+		AskHVBrowserConfirm: func(context.Context, string, bool) error {
 			t.Fatal("AskHVBrowserConfirm should not be called for a non-HV error")
 			return nil
 		},
@@ -201,5 +205,122 @@ func TestHasOwnershipMethod(t *testing.T) {
 		if got := hasOwnershipMethod(tt.methods); got != tt.want {
 			t.Errorf("hasOwnershipMethod(%v) = %v, want %v", tt.methods, got, tt.want)
 		}
+	}
+}
+
+// hvErrorWith builds a 9001 carrying the given token and WebUrl.
+func hvErrorWith(token, webURL string) *gpa.APIError {
+	d, _ := json.Marshal(map[string]any{
+		"HumanVerificationToken":   token,
+		"HumanVerificationMethods": []string{"ownership-email"},
+		"WebUrl":                   webURL,
+	})
+	return &gpa.APIError{Status: 422, Code: gpa.HumanVerificationRequired, Details: gpa.ErrDetails(d)}
+}
+
+// Pressing Enter before the browser flow finishes produces a second
+// 9001. That re-prompts (flagged again) instead of failing the whole
+// login, and the retry echoes the token from the challenge whose link
+// was just shown — the latest one, unmodified.
+func TestTryWithHV_RepromptsOnRepeatChallenge(t *testing.T) {
+	errs := []error{
+		hvErrorWith("tok-1", "https://verify.proton.me/?token=tok-1"),
+		hvErrorWith("tok-2", "https://verify.proton.me/?token=tok-2"),
+	}
+	var shown []string
+	var againFlags []bool
+	creds := &Credentials{
+		AskHVBrowserConfirm: func(_ context.Context, webURL string, again bool) error {
+			shown = append(shown, webURL)
+			againFlags = append(againFlags, again)
+			return nil
+		},
+	}
+	var tokens []string
+	calls := 0
+	result, err := tryWithHV(context.Background(), creds, func(hv *gpa.APIHVDetails) (string, error) {
+		calls++
+		if hv != nil {
+			tokens = append(tokens, hv.Token)
+		}
+		if calls <= len(errs) {
+			return "", errs[calls-1]
+		}
+		return "ok", nil
+	})
+	if err != nil || result != "ok" {
+		t.Fatalf("tryWithHV = %q, %v; want ok", result, err)
+	}
+	if strings.Join(tokens, ",") != "tok-1,tok-2" {
+		t.Errorf("retry tokens = %v, want [tok-1 tok-2]", tokens)
+	}
+	if len(shown) != 2 || shown[1] != "https://verify.proton.me/?token=tok-2" {
+		t.Errorf("links shown = %v", shown)
+	}
+	if len(againFlags) != 2 || againFlags[0] || !againFlags[1] {
+		t.Errorf("again flags = %v, want [false true]", againFlags)
+	}
+}
+
+func TestTryWithHV_GivesUpAfterMaxAttempts(t *testing.T) {
+	prompts := 0
+	creds := &Credentials{
+		AskHVBrowserConfirm: func(context.Context, string, bool) error {
+			prompts++
+			return nil
+		},
+	}
+	calls := 0
+	_, err := tryWithHV(context.Background(), creds, func(*gpa.APIHVDetails) (int, error) {
+		calls++
+		return 0, newHVAPIError(t)
+	})
+	if err == nil || !strings.Contains(err.Error(), "still required") {
+		t.Fatalf("err = %v, want a still-required error", err)
+	}
+	if prompts != maxHVAttempts || calls != maxHVAttempts+1 {
+		t.Errorf("prompts = %d, calls = %d; want %d and %d", prompts, calls, maxHVAttempts, maxHVAttempts+1)
+	}
+}
+
+func TestTryWithHV_ConfirmErrorStops(t *testing.T) {
+	canceled := errors.New("canceled")
+	creds := &Credentials{
+		AskHVBrowserConfirm: func(context.Context, string, bool) error { return canceled },
+	}
+	calls := 0
+	_, err := tryWithHV(context.Background(), creds, func(*gpa.APIHVDetails) (int, error) {
+		calls++
+		return 0, newHVAPIError(t)
+	})
+	if !errors.Is(err, canceled) || calls != 1 {
+		t.Errorf("err = %v, calls = %d; want the confirm error and no retry", err, calls)
+	}
+}
+
+// The link is written to the user's terminal as the thing to open, so
+// only a clean https://verify.proton.me URL gets through.
+func TestHVWebURL(t *testing.T) {
+	ok := "https://verify.proton.me/?methods=ownership-email%2Cownership-sms&token=abc"
+	tests := map[string]string{
+		ok:                                   ok,
+		"http://verify.proton.me/?token=abc": "",
+		"https://verify.proton.me.evil.com/?t=abc": "",
+		"https://evil.com/verify.proton.me":        "",
+		"https://user@verify.proton.me/":           "",
+		"https://verify.proton.me:8443/":           "",
+		"https://verify.proton.me/\x1b[2J":         "", // ESC: terminal control sequence
+		"https://verify.proton.me/\u202eevil":      "", // bidi override
+		"https://verify.proton.me/ ok":             "", // space
+		"":                                         "",
+	}
+	for in, want := range tests {
+		details, _ := json.Marshal(map[string]string{"WebUrl": in})
+		if got := hvWebURL(details); got != want {
+			t.Errorf("hvWebURL(%q) = %q, want %q", in, got, want)
+		}
+	}
+	if hvWebURL(nil) != "" || hvWebURL([]byte("not json")) != "" {
+		t.Error("hvWebURL should return empty for missing/garbage details")
 	}
 }
