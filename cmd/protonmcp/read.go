@@ -108,6 +108,10 @@ func runRead(ctx context.Context, args []string) error {
 		Text:     body.Text,
 		HTML:     body.HTML,
 		ThreadID: threadID,
+		// Keep the cached List-Unsubscribe in step so a later
+		// mail_read cache hit still reports it (#102).
+		ListUnsubscribe:     body.ListUnsubscribe,
+		ListUnsubscribePost: body.ListUnsubscribePost,
 	}); err != nil {
 		// Cache failure shouldn't block the user's read — log and continue.
 		fmt.Fprintf(os.Stderr, "warning: failed to cache body (%v)\n", err)

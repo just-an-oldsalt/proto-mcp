@@ -87,6 +87,17 @@ anything a sender chose to put in it.
   email exfiltrates nothing on its own, and any send it provokes still
   needs your fingerprint on a prompt that names the actual recipient.
   **Do not blanket-approve sends**, and treat message bodies as hostile.
+
+  The same applies to `mail_read`'s `unsubscribe` field, taken from the
+  `List-Unsubscribe` / `List-Unsubscribe-Post` headers. Those headers
+  are written by the sender, so the targets are attacker-controlled.
+  They are scheme-filtered (only `https` without userinfo and a single
+  `mailto` address survive; `http:`, `javascript:`, `data:` and the rest
+  are dropped), capped in count and length, and **only exposed**:
+  proto-mcp never fetches an unsubscribe URL or sends to an unsubscribe
+  address itself. Any mailto send goes through the normal Touch-ID-gated
+  `mail_send`. The raw values are cached next to the body and purged
+  with it, because the URLs carry per-recipient tokens.
 - **OS-level Keychain ACL is not enforced.** The biometric gate is
   enforced at the application layer, not sealed into the Keychain item
   with `SecAccessControl`. A process running as you, with the Keychain
