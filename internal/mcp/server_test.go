@@ -8,6 +8,8 @@ import (
 	"io"
 	"strings"
 	"testing"
+
+	"github.com/just-an-oldsalt/proto-mcp/internal/buildinfo"
 )
 
 // roundtrip drives one request/response cycle against a Server.
@@ -54,6 +56,12 @@ func TestInitializeHandshake(t *testing.T) {
 	info, ok := res["serverInfo"].(map[string]any)
 	if !ok || info["name"] != ServerName {
 		t.Errorf("serverInfo = %v", res["serverInfo"])
+	}
+	// The version is the build stamp, not a hand-bumped constant that
+	// drifts (it said "0.0.1" through v1.1.0).
+	if info["version"] != buildinfo.Version() {
+		t.Errorf("serverInfo.version = %v, want buildinfo.Version() = %q",
+			info["version"], buildinfo.Version())
 	}
 }
 

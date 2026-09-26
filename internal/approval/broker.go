@@ -165,6 +165,20 @@ func (b *Broker) runHelper(ctx context.Context, r Request) (string, error) {
 		return SourceTouchID, nil
 	}
 
+	// Check the timeout first: CommandContext kills the helper when
+	// subCtx expires, and a killed process also surfaces as an
+	// ExitError (code -1), which the switch below would report as
+	// "biometric authentication failed: helper exit -1".
+	// SECURITY D15: errors.Is(), not ==, so a future wrapper around
+	// the context error doesn't quietly misclassify a Touch ID
+	// timeout as ErrAuthFailed.
+	if errors.Is(subCtx.Err(), context.DeadlineExceeded) {
+		b.logger.Warn("approval helper timed out",
+			"tool", r.Tool, "timeout", b.helperTimeout)
+		return "", fmt.Errorf("%w: no response within %s",
+			mcperrors.ErrUserCanceled, b.helperTimeout)
+	}
+
 	// ExitError carries the helper's exit code. Map per spec.
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {
@@ -180,15 +194,6 @@ func (b *Broker) runHelper(ctx context.Context, r Request) (string, error) {
 		}
 	}
 
-	// Context timeout / non-exit error.
-	// SECURITY D15: errors.Is(), not ==, so a future wrapper around
-	// the context error doesn't quietly misclassify a Touch ID
-	// timeout as ErrAuthFailed.
-	if errors.Is(subCtx.Err(), context.DeadlineExceeded) {
-		b.logger.Warn("approval helper timed out",
-			"tool", r.Tool, "timeout", b.helperTimeout)
-		return "", mcperrors.ErrUserCanceled
-	}
 	return "", fmt.Errorf("%w: %v", mcperrors.ErrAuthFailed, err)
 }
 

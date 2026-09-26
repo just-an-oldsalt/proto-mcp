@@ -91,6 +91,38 @@ func TestBrokerExitCodeMapping(t *testing.T) {
 	}
 }
 
+// A helper killed for running past helperTimeout also exits non-zero
+// (-1). The broker must report that as a timed-out prompt, not as
+// "biometric authentication failed: helper exit -1".
+func TestBrokerHelperTimeoutIsNotAuthFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("posix helper fixture; broker is macOS-only anyway")
+	}
+	p := filepath.Join(t.TempDir(), "slow-touchid")
+	if err := os.WriteFile(p, []byte("#!/bin/sh\nexec sleep 5\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	b, err := New(p, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.helperTimeout = 100 * time.Millisecond
+	_, err = b.Request(context.Background(), Request{
+		Tool:   "test_tool",
+		Caller: caller.Caller{PID: 1},
+		Args:   json.RawMessage(`{}`),
+		Policy: policy.ToolPolicy{Decision: policy.DecisionPrompt},
+		Title:  "t",
+		Body:   "b",
+	})
+	if !errors.Is(err, mcperrors.ErrUserCanceled) {
+		t.Fatalf("got %v, want errors.Is(ErrUserCanceled)", err)
+	}
+	if errors.Is(err, mcperrors.ErrAuthFailed) {
+		t.Fatalf("timeout reported as auth failure: %v", err)
+	}
+}
+
 func TestBrokerCacheHonorsTTL(t *testing.T) {
 	helper := fixtureHelper(t, 0)
 	b, err := New(helper, nil)
