@@ -12,6 +12,7 @@ import (
 
 	"github.com/just-an-oldsalt/proto-mcp/internal/approval"
 	"github.com/just-an-oldsalt/proto-mcp/internal/audit"
+	"github.com/just-an-oldsalt/proto-mcp/internal/buildinfo"
 	"github.com/just-an-oldsalt/proto-mcp/internal/caller"
 	"github.com/just-an-oldsalt/proto-mcp/internal/policy"
 )
@@ -21,10 +22,6 @@ import (
 // out as the x-pm-appversion header to Proton); this string only
 // the MCP client sees.
 const ServerName = "protonmcp"
-
-// ServerVersion is bumped manually. The MCP spec doesn't require any
-// particular versioning scheme; clients use it only for diagnostics.
-const ServerVersion = "0.0.1"
 
 // Server is the registry-plus-loop for the JSON-RPC NDJSON
 // conversation. Build with New(), register tools with Register(),
@@ -436,7 +433,7 @@ func (s *Server) handleInitialize(raw json.RawMessage) (*InitializeResult, *Erro
 		Capabilities: ServerCapabilities{
 			Tools: &ToolsCapability{ListChanged: false},
 		},
-		ServerInfo: Implementation{Name: ServerName, Version: ServerVersion},
+		ServerInfo: Implementation{Name: ServerName, Version: buildinfo.Version()},
 	}, nil
 }
 
