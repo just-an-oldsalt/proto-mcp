@@ -179,14 +179,28 @@ func mailDraftUpdate(deps Deps) mcp.Tool {
 			to := pickAddrList(in.To, current.ToList)
 			cc := pickAddrList(in.CC, current.CCList)
 			bcc := pickAddrList(in.BCC, current.BCCList)
-			// body_text / body_html / nothing — if nothing supplied,
-			// keep the existing body via empty pass to buildDraftTemplate
-			// (which treats both empty as plain text "" — wrong).
-			// Instead, default to text version of current body so the
-			// SDK keeps the same content.
+			_, addrKR, err := senderKeyring(deps)
+			if err != nil {
+				return mcp.ErrorResult("mail_draft_update: %v", err), nil
+			}
+
+			// body_text / body_html / nothing — if nothing supplied, keep
+			// the existing body. Issue #124: current.Body is armored
+			// CIPHERTEXT (CreateDraft encrypted it to us), so decrypt it
+			// back to plaintext — as sendDraftByID does (PROTO-125) — and
+			// keep the draft's MIME type. Feeding the ciphertext through
+			// as text replaced the body with its own PGP armor.
 			text, html := in.BodyText, in.BodyHTML
 			if text == "" && html == "" {
-				text = sanitize.Text(current.Body)
+				plain, err := decryptDraftBody(addrKR, current.Body)
+				if err != nil {
+					return mcp.ErrorResult("mail_draft_update: decrypt current body: %v", err), nil
+				}
+				if string(current.MIMEType) == "text/html" {
+					html = plain
+				} else {
+					text = plain
+				}
 			}
 
 			toStrs := toEmailStrings(to)
@@ -202,10 +216,6 @@ func mailDraftUpdate(deps Deps) mcp.Tool {
 				return mcp.ErrorResult("mail_draft_update: %v", err), nil
 			}
 
-			_, addrKR, err := senderKeyring(deps)
-			if err != nil {
-				return mcp.ErrorResult("mail_draft_update: %v", err), nil
-			}
 			msg, err := deps.Session.Client.UpdateDraft(ctx.Std, in.DraftID, addrKR, gpa.UpdateDraftReq{
 				Message: tpl,
 			})

@@ -43,3 +43,41 @@ func TestTrashTools_MoveToTrashNotDelete(t *testing.T) {
 		})
 	}
 }
+
+// Issue #124: updating only recipients/subject must keep the draft's
+// body and MIME type. It used to re-encrypt the armored ciphertext as
+// the new plaintext body.
+func TestDraftUpdate_KeepsBodyWhenNoneGiven(t *testing.T) {
+	for _, tc := range []struct {
+		name, create, want string
+		mime               string
+	}{
+		{"text", `{"subject":"s","to":["a@b.com"],"body_text":"hello world"}`, "hello world", "text/plain"},
+		{"html", `{"subject":"s","to":["a@b.com"],"body_html":"<p>hello <b>world</b></p>"}`, "<p>hello <b>world</b></p>", "text/html"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			deps, c, kr := fakeProtonEnv(t)
+			id := createDraft(t, deps, tc.create)
+
+			callOK(t, mailDraftUpdate(deps), `{"draft_id":"`+id+`","to":["c@d.com"],"subject":"new"}`)
+
+			m, err := c.GetMessage(context.Background(), id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			plain, err := decryptDraftBody(kr, m.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if plain != tc.want {
+				t.Errorf("body after recipient-only update = %.120q, want %q", plain, tc.want)
+			}
+			if string(m.MIMEType) != tc.mime {
+				t.Errorf("MIME type after update = %q, want %q", m.MIMEType, tc.mime)
+			}
+			if m.Subject != "new" || len(m.ToList) != 1 || m.ToList[0].Address != "c@d.com" {
+				t.Errorf("update didn't apply: subject=%q to=%v", m.Subject, m.ToList)
+			}
+		})
+	}
+}
