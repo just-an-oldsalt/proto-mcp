@@ -1,14 +1,15 @@
 package mcptools
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
 )
 
 func TestSanitizeField_CollapsesLineBreaks(t *testing.T) {
-	got := sanitizeField("real@y.com\nBCC: evil@x.com\r\tx")
-	if strings.ContainsAny(got, "\r\n\t") {
+	got := sanitizeField("real@y.com\nBCC: evil@x.com\r\tx To: a To: b\u0085To: c")
+	if strings.ContainsAny(got, "\r\n\t  \u0085") {
 		t.Errorf("sanitizeField left a line break / tab in %q", got)
 	}
 }
@@ -18,8 +19,11 @@ func TestSanitizeField_CollapsesLineBreaks(t *testing.T) {
 // approval dialog. SanitizePromptText keeps newlines, so the defense is
 // per-field sanitization before assembly.
 func TestSendPromptBody_NoNewlineInjection(t *testing.T) {
-	pb := sendPromptBodyWithDeps(Deps{}, "mail_send")
-	_, body := pb(json.RawMessage(`{"to":["real@y.com\nBCC: evil@x.com"],"subject":"hi"}`))
+	snap := sendPromptSnapshot(Deps{}, "mail_send")
+	_, body, _, err := snap(context.Background(), json.RawMessage(`{"to":["real@y.com\nBCC: evil@x.com"],"subject":"hi"}`))
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
 
 	// The only BCC framework line is the legitimate (empty) one we add.
 	if strings.Contains(body, "\nBCC: evil@x.com") {

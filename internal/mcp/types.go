@@ -138,6 +138,10 @@ type Tool struct {
 	// what the user approved rather than a second, independent fetch
 	// (issue #116). A non-nil err denies the call before any prompt:
 	// a dialog that can't show what will happen is not approvable.
+	// That also makes it the hook for any dialog that must be able to
+	// refuse without a server fetch: the send family returns
+	// ErrPromptTooLong rather than prompt with a truncated body that
+	// could hide a recipient (issue #125); snap may be nil.
 	// Only consulted when policy says prompt.
 	PromptSnapshot func(ctx context.Context, args json.RawMessage) (title, body string, snap any, err error) `json:"-"`
 }

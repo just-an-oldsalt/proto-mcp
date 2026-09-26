@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -77,5 +78,51 @@ func TestSanitizePromptText_NFKCNormalization(t *testing.T) {
 	got := SanitizePromptText(in, 1000)
 	if got != "ABC" {
 		t.Errorf("NFKC didn't fold fullwidth: %q", got)
+	}
+}
+
+// Issue #125 — codepoints that render as a line break, or invisibly,
+// in the Touch ID dialog. A line break inside a field (a subject taken
+// from an attacker's email, say) could fake a "To:" line.
+func TestSanitizePromptText_StripsLineSeparatorsAndInvisibles(t *testing.T) {
+	for _, r := range []rune{
+		0x0085, // NEL
+		0x2028, // LINE SEPARATOR
+		0x2029, // PARAGRAPH SEPARATOR
+		0x061c, // ARABIC LETTER MARK
+		0x2060, // WORD JOINER
+		0x2061, // FUNCTION APPLICATION
+		0x2062, // INVISIBLE TIMES
+		0x2063, // INVISIBLE SEPARATOR
+		0x2064, // INVISIBLE PLUS
+	} {
+		in := "Q3 notes" + string(r) + "To: fake@x"
+		got := SanitizePromptText(in, 1000)
+		if strings.ContainsRune(got, r) {
+			t.Errorf("%U not stripped: %q", r, got)
+		}
+		if got != "Q3 notesTo: fake@x" {
+			t.Errorf("%U: got %q", r, got)
+		}
+		strict, err := SanitizePromptTextStrict(in, 1000)
+		if err != nil || strict != got {
+			t.Errorf("%U: strict = %q, %v; want %q", r, strict, err, got)
+		}
+	}
+}
+
+// Issue #125 — the strict variant refuses rather than truncates, and
+// measures the text after normalization and stripping.
+func TestSanitizePromptTextStrict_RefusesOverCap(t *testing.T) {
+	if _, err := SanitizePromptTextStrict(strings.Repeat("a", 201), 200); !errors.Is(err, ErrPromptTooLong) {
+		t.Errorf("201 runes at cap 200: err = %v, want ErrPromptTooLong", err)
+	}
+	got, err := SanitizePromptTextStrict(strings.Repeat("a", 200), 200)
+	if err != nil || got != strings.Repeat("a", 200) {
+		t.Errorf("200 runes at cap 200: %q, %v", got, err)
+	}
+	// Stripped characters don't count toward the cap.
+	if _, err := SanitizePromptTextStrict(strings.Repeat("a​", 200), 200); err != nil {
+		t.Errorf("zero-width padding counted toward the cap: %v", err)
 	}
 }

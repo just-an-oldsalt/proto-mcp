@@ -5,30 +5,110 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
+	"github.com/just-an-oldsalt/proto-mcp/internal/mcp"
 	"github.com/just-an-oldsalt/proto-mcp/internal/store"
 )
 
 // --- PROTO-126: faithful recipient display in send-approval dialogs ---
 
-// sanitizeField collapses CR / LF / tab in a single user-supplied value
-// to spaces. SanitizePromptText deliberately PRESERVES newlines (they're
-// the framework's field separators in the To/CC/BCC/Subject body), so a
-// recipient or subject containing "\nBCC: evil@x" would otherwise inject
-// a fake line and make the approval dialog misrepresent the send. We
-// neutralize newlines inside each value; only our own separators remain.
+// sanitizeField collapses line breaks and tabs in a single
+// user-supplied value to spaces. SanitizePromptText deliberately
+// PRESERVES newlines (they're the framework's field separators in the
+// To/CC/BCC/Subject body), so a recipient or subject containing
+// "\nBCC: evil@x" would otherwise inject a fake line and make the
+// approval dialog misrepresent the send. We neutralize line breaks
+// inside each value; only our own separators remain. Issue #125 added
+// the Unicode line breaks (NEL, LINE / PARAGRAPH SEPARATOR), which
+// render as new lines just like "\n".
 func sanitizeField(s string) string {
-	return strings.NewReplacer("\r", " ", "\n", " ", "\t", " ").Replace(s)
+	return fieldLineBreaks.Replace(s)
 }
 
+var fieldLineBreaks = strings.NewReplacer(
+	"\r", " ", "\n", " ", "\t", " ",
+	"\u0085", " ", "\u2028", " ", "\u2029", " ",
+)
+
 // joinAddrs sanitizes each address (PROTO-126) then comma-joins for
-// display in an approval prompt.
+// display in an approval prompt. Addresses are never shortened: a
+// cut-off address would misrepresent where the mail goes, so a list
+// too long to show is refused by sendApprovalDialog instead.
 func joinAddrs(addrs []string) string {
 	out := make([]string, 0, len(addrs))
 	for _, a := range addrs {
 		out = append(out, sanitizeField(a))
 	}
 	return strings.Join(out, ", ")
+}
+
+// --- Issue #125: approval dialogs that can't misrepresent a send ---
+//
+// The Touch ID dialog is the control that stops an injected
+// instruction from sending mail (docs/security.md), so every
+// send-family dialog follows the same rules:
+//
+//   - Recipients (To, CC, BCC) come before Subject and anything else
+//     long or attacker-influenced.
+//   - Recipients are bare addresses. A display name is free text and
+//     could say anything, including another address.
+//   - Each free-text field (subject, file names, IDs) is capped on its
+//     own, so one long value can't push the rest out of view.
+//   - The finished body is never truncated. If it is still over
+//     promptBodyMaxRunes (hundreds of recipients, say), the call is
+//     refused instead of shown in part.
+
+const (
+	// promptBodyMaxRunes is the most a send-family dialog may hold.
+	promptBodyMaxRunes = 4000
+	// promptSubjectMaxRunes caps the Subject line.
+	promptSubjectMaxRunes = 200
+	// promptNameMaxRunes caps a file name or message ID.
+	promptNameMaxRunes = 100
+)
+
+// capField sanitizes one value for a dialog line and shortens it to
+// max runes, ending with "..." when cut. (Not "…": SanitizePromptText's
+// NFKC pass would expand it to "..." anyway.) Not for addresses; see
+// joinAddrs.
+func capField(s string, max int) string {
+	s = sanitizeField(s)
+	if utf8.RuneCountInString(s) <= max {
+		return s
+	}
+	return string([]rune(s)[:max-3]) + "..."
+}
+
+// promptAddrs renders raw recipient arguments (as the LLM passed them)
+// as bare addresses, splitting any entry that holds several. An entry
+// that doesn't parse is shown as given, since the send would fail on
+// it anyway. An empty list renders as "(none)".
+func promptAddrs(entries []string) string {
+	var addrs []string
+	for _, e := range entries {
+		addrs = append(addrs, normalizeRecipientList(e)...)
+	}
+	return orNone(joinAddrs(addrs))
+}
+
+func orNone(s string) string {
+	if s == "" {
+		return "(none)"
+	}
+	return s
+}
+
+// sendApprovalDialog is the one exit for every send-family dialog. It
+// sanitizes the body without truncating it, and fails closed with an
+// error (so PromptSnapshot denies the call) when the body is too long
+// to show in full.
+func sendApprovalDialog(toolName, body string) (title, sanitized string, err error) {
+	sanitized, err = mcp.SanitizePromptTextStrict(body, promptBodyMaxRunes)
+	if err != nil {
+		return "", "", fmt.Errorf("%w; nothing was sent. Send to fewer recipients or attachments per call", err)
+	}
+	return mcp.SanitizePromptText("Approve "+toolName+"?", 120), sanitized, nil
 }
 
 // Phase 7/A — D36. Helpers that translate opaque IDs (message_id,
