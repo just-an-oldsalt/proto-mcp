@@ -103,9 +103,11 @@ func TestEnvelopeReupsertPreservesDecryption(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Re-sync the envelope with a moved start time.
+	// Re-sync the same revision (last_edit unchanged, e.g. a backfill):
+	// envelope fields update, the cached decryption stays. An edit
+	// (newer last_edit) is covered by TestEnvelopeEditClearsDecryption.
 	moved := env("ev-1", "cal-1", 2000)
-	moved.LastEdit = 2000
+	moved.LastEdit = 1000
 	if err := s.UpsertCalendarEventEnvelope(ctx, moved); err != nil {
 		t.Fatal(err)
 	}
@@ -210,6 +212,47 @@ func TestReconcileCalendarEvents(t *testing.T) {
 	}
 	if _, err := s.GetCalendarEvent(ctx, "ev-1"); err != nil {
 		t.Errorf("ev-1 should remain: %v", err)
+	}
+}
+
+// #130 — an event edited server-side (newer last_edit) must drop its
+// cached decryption, or reads keep serving the old title/attendees and
+// FTS keeps matching the old text.
+func TestEnvelopeEditClearsDecryption(t *testing.T) {
+	ctx := context.Background()
+	s := mustOpen(t)
+	seedCalendar(t, s, "cal-1")
+	ev := env("ev-1", "cal-1", 1000)
+	ev.LastEdit = 100
+	if err := s.UpsertCalendarEventEnvelope(ctx, ev); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.FillCalendarEventDecrypted(ctx, "ev-1", CalendarEventDecrypted{
+		Summary: "Old title", Location: "Room A", AttendeesJSON: `["a@example.com"]`, IsRecurring: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	ev.LastEdit = 200
+	if err := s.UpsertCalendarEventEnvelope(ctx, ev); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetCalendarEvent(ctx, "ev-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Decrypted || got.Summary != "" || got.Location != "" || got.AttendeesJSON != "" || got.IsRecurring {
+		t.Errorf("edited event kept stale decryption: decrypted=%v %+v", got.Decrypted, got.CalendarEventDecrypted)
+	}
+	if got.LastEdit != 200 {
+		t.Errorf("last_edit = %d, want 200", got.LastEdit)
+	}
+	rows, err := s.ListCalendarEvents(ctx, CalendarEventFilter{Query: "Old"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 0 {
+		t.Errorf("FTS still matches the pre-edit title: %v", ids(rows))
 	}
 }
 

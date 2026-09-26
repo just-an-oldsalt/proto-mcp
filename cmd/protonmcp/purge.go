@@ -82,6 +82,12 @@ func runPurge(ctx context.Context, args []string) error {
 	attBytes, _ := st.SumAttachmentBytes(ctx)
 	fmt.Printf("Cached attachments:     %d (%d bytes)\n", attCount, attBytes)
 
+	calTotal, calWould, err := st.CountDecryptedCalendarEvents(ctx, cutoff)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Decrypted cal. events:  %d (would purge %d)\n", calTotal, calWould)
+
 	if *dryRun {
 		fmt.Println("(--dry-run; nothing changed)")
 		return nil
@@ -100,6 +106,14 @@ func runPurge(ctx context.Context, args []string) error {
 		return fmt.Errorf("purge attachments: %w", err)
 	}
 	fmt.Printf("Purged %d attachment cache row(s).\n", attN)
+
+	// #130 — decrypted calendar text (summary, attendees, raw iCal)
+	// is plaintext at rest too; same cutoff.
+	calN, err := st.PurgeCalendarOlderThan(ctx, cutoff)
+	if err != nil {
+		return fmt.Errorf("purge calendar events: %w", err)
+	}
+	fmt.Printf("Purged %d decrypted calendar event(s).\n", calN)
 
 	// PROTO-135 — the on-disk decrypted-attachment staging dir is a
 	// separate plaintext store from the SQLite cache; sweep it with the
@@ -170,6 +184,8 @@ func sweepBodiesAtStartup(ctx context.Context, st *store.Store) (int64, error) {
 		// via slog if anything else cares.
 		_ = attN
 	}
+	// #130 — decrypted calendar text, same cutoff, best-effort.
+	_, _ = st.PurgeCalendarOlderThan(ctx, cutoff)
 	// PROTO-135 — best-effort sweep of the on-disk staging plaintext at
 	// the same retention cutoff.
 	_, _ = mcptools.SweepStagingOlderThan(cutoff)
