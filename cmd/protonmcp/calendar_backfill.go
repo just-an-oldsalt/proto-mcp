@@ -8,6 +8,7 @@ import (
 	"os"
 	"time"
 
+	protonclient "github.com/just-an-oldsalt/proto-mcp/internal/proton"
 	"github.com/just-an-oldsalt/proto-mcp/internal/store"
 	syncpkg "github.com/just-an-oldsalt/proto-mcp/internal/sync"
 )
@@ -62,18 +63,27 @@ func runCalendarBackfill(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	// Issue #110: calendars are mirrored but events can't be fetched on
+	// this session. That's a known limitation, not a failed backfill, so
+	// say so once and exit 0.
+	if res.EventsBlocked {
+		fmt.Fprintf(os.Stderr, "note: %d calendar(s) mirrored; %s\n",
+			res.CalendarsUpserted, protonclient.CalendarScopeNotice)
+	}
 
 	out := struct {
 		Calendars       int   `json:"calendars"`
 		EventsUpserted  int   `json:"events_upserted"`
 		EventsDeleted   int   `json:"events_deleted"`
 		EventsDecrypted int   `json:"events_decrypted"`
+		EventsBlocked   bool  `json:"events_blocked"`
 		ElapsedMS       int64 `json:"elapsed_ms"`
 	}{
 		Calendars:       res.CalendarsUpserted,
 		EventsUpserted:  res.EventsUpserted,
 		EventsDeleted:   res.EventsDeleted,
 		EventsDecrypted: res.EventsDecrypted,
+		EventsBlocked:   res.EventsBlocked,
 		ElapsedMS:       res.Elapsed.Milliseconds(),
 	}
 	enc := json.NewEncoder(os.Stdout)

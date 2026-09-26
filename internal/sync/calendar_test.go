@@ -2,7 +2,9 @@ package sync
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 
 	gpa "github.com/ProtonMail/go-proton-api"
@@ -196,7 +198,7 @@ func TestSyncCalendarEvents_FetchFailureWritesNothing(t *testing.T) {
 	st := mustOpen(t)
 	seedCal(t, st, "cal-1")
 
-	boom := errors.New("403 insufficient scope (Code=9100)")
+	boom := scopeError(t)
 	fetch := func(context.Context, string) ([]gpa.CalendarEvent, error) {
 		return nil, boom
 	}
@@ -204,6 +206,9 @@ func TestSyncCalendarEvents_FetchFailureWritesNothing(t *testing.T) {
 	_, _, err := syncCalendarEvents(ctx, st, "cal-1", fetch)
 	if !errors.Is(err, boom) {
 		t.Fatalf("err = %v, want it to wrap %v", err, boom)
+	}
+	if !errors.Is(err, protonclient.ErrMissingScope) {
+		t.Errorf("err = %v, want it to match ErrMissingScope", err)
 	}
 
 	if _, err := st.GetSyncState(ctx, calendarMaxEditPrefix+"cal-1"); err != store.ErrNotFound {
@@ -308,5 +313,103 @@ func TestToStoreCalendar_MemberIsAuthoritative(t *testing.T) {
 	})
 	if off.Active {
 		t.Error("member without the Active flag should map Active=false")
+	}
+}
+
+// scopeError builds the error go-proton-api returns for /events on a
+// session without the calendar scope: the real 403 body decoded into a
+// *gpa.APIError and wrapped the way catchAPIError wraps it.
+func scopeError(t *testing.T) error {
+	t.Helper()
+	apiErr := &gpa.APIError{}
+	body := `{"Code":9100,"Error":"Access token does not have sufficient scope","Details":{"MissingScopes":["calendar"]}}`
+	if err := json.Unmarshal([]byte(body), apiErr); err != nil {
+		t.Fatal(err)
+	}
+	apiErr.Status = 403
+	return fmt.Errorf("403 GET https://mail-api.proton.me/calendar/v1/x/events: %w", apiErr)
+}
+
+// Phase 2 of RunCalendarOnce on a blocked session: the first 9100 stops
+// the pass (no request per remaining calendar), records the block, and
+// reports it as a result rather than an error.
+func TestSyncAllCalendarEvents_BlockedSetsFlag(t *testing.T) {
+	ctx := context.Background()
+	st := mustOpen(t)
+	seedCal(t, st, "cal-1")
+	seedCal(t, st, "cal-2")
+
+	calls := 0
+	fetch := func(context.Context, string) ([]gpa.CalendarEvent, error) {
+		calls++
+		return nil, scopeError(t)
+	}
+	res := &CalendarRunResult{}
+	if err := syncAllCalendarEvents(ctx, st, []gpa.Calendar{{ID: "cal-1"}, {ID: "cal-2"}}, fetch, res); err != nil {
+		t.Fatalf("blocked pass returned an error: %v", err)
+	}
+	if !res.EventsBlocked {
+		t.Error("EventsBlocked = false")
+	}
+	if len(res.MissingScopes) != 1 || res.MissingScopes[0] != "calendar" {
+		t.Errorf("MissingScopes = %v, want [calendar]", res.MissingScopes)
+	}
+	if calls != 1 {
+		t.Errorf("fetch called %d times, want 1 (stop at the first 9100)", calls)
+	}
+	blk, ok, err := st.CalendarEventsBlocked(ctx)
+	if err != nil || !ok {
+		t.Fatalf("flag not set: ok=%v err=%v", ok, err)
+	}
+	if blk.Value != "missing_scope:calendar" {
+		t.Errorf("flag value = %q", blk.Value)
+	}
+}
+
+// Once events come back, a full successful pass clears the flag.
+func TestSyncAllCalendarEvents_SuccessClearsFlag(t *testing.T) {
+	ctx := context.Background()
+	st := mustOpen(t)
+	seedCal(t, st, "cal-1")
+	if err := st.SetCalendarEventsBlocked(ctx, []string{"calendar"}); err != nil {
+		t.Fatal(err)
+	}
+
+	fetch := func(context.Context, string) ([]gpa.CalendarEvent, error) {
+		return []gpa.CalendarEvent{calEvent("ev-1", "cal-1", 100)}, nil
+	}
+	res := &CalendarRunResult{}
+	if err := syncAllCalendarEvents(ctx, st, []gpa.Calendar{{ID: "cal-1"}}, fetch, res); err != nil {
+		t.Fatal(err)
+	}
+	if res.EventsBlocked || res.EventsUpserted != 1 {
+		t.Errorf("res = %+v, want 1 upserted and not blocked", res)
+	}
+	if _, ok, _ := st.CalendarEventsBlocked(ctx); ok {
+		t.Error("flag still set after a successful events pass")
+	}
+}
+
+// Any other failure is still an error, and says nothing about scope:
+// the flag is left exactly as it was.
+func TestSyncAllCalendarEvents_OtherErrorLeavesFlag(t *testing.T) {
+	ctx := context.Background()
+	st := mustOpen(t)
+	seedCal(t, st, "cal-1")
+	if err := st.SetCalendarEventsBlocked(ctx, []string{"calendar"}); err != nil {
+		t.Fatal(err)
+	}
+
+	boom := errors.New("network down")
+	fetch := func(context.Context, string) ([]gpa.CalendarEvent, error) { return nil, boom }
+	res := &CalendarRunResult{}
+	if err := syncAllCalendarEvents(ctx, st, []gpa.Calendar{{ID: "cal-1"}}, fetch, res); !errors.Is(err, boom) {
+		t.Fatalf("err = %v, want %v", err, boom)
+	}
+	if res.EventsBlocked {
+		t.Error("EventsBlocked set for a non-scope error")
+	}
+	if _, ok, _ := st.CalendarEventsBlocked(ctx); !ok {
+		t.Error("flag cleared by a failed pass")
 	}
 }

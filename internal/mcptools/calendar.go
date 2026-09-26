@@ -24,6 +24,9 @@ type calendarInfo struct {
 
 type calendarListResult struct {
 	Calendars []calendarInfo `json:"calendars"`
+	// Notice is set when event access is blocked (issue #110), so the
+	// caller knows up front that these calendars' events can't be read.
+	Notice string `json:"notice,omitempty"`
 }
 
 func calendarList(deps Deps) mcp.Tool {
@@ -39,6 +42,9 @@ func calendarList(deps Deps) mcp.Tool {
 				return mcp.ErrorResult("calendar_list: %v", err), nil
 			}
 			out := calendarListResult{Calendars: make([]calendarInfo, 0, len(cals))}
+			if eventsBlocked(ctx, deps) {
+				out.Notice = protonclient.CalendarScopeNotice
+			}
 			for _, c := range cals {
 				out.Calendars = append(out.Calendars, calendarInfo{
 					CalendarID:  c.ID,
@@ -75,6 +81,10 @@ type calendarSummary struct {
 type calendarEventsResult struct {
 	Events     []calendarSummary `json:"events"`
 	NextCursor string            `json:"next_cursor,omitempty"`
+	// Notice is set when event access is blocked (issue #110) but the
+	// mirror still holds events from before: they are returned, and may
+	// be out of date.
+	Notice string `json:"notice,omitempty"`
 }
 
 func calendarEvents(deps Deps) mcp.Tool {
@@ -92,7 +102,8 @@ func calendarEvents(deps Deps) mcp.Tool {
 			"Use from/to (RFC3339 or YYYY-MM-DD) for agenda-style queries like \"this week\". " +
 			"Read-only; served from the local mirror and decrypted on demand. " +
 			"Recurring events are returned once (the master) with recurring=true and the raw rrule — individual occurrences are NOT expanded in v1. " +
-			"Full-text query matches only events already decrypted (any prior listing or calendar-backfill --decrypt warms this).",
+			"Full-text query matches only events already decrypted (any prior listing or calendar-backfill --decrypt warms this). " +
+			"If Proton has not granted this session event access, this returns an error saying so rather than an empty list.",
 		InputSchema: json.RawMessage(`{
 			"type": "object",
 			"properties": {
@@ -157,10 +168,25 @@ func calendarEvents(deps Deps) mcp.Tool {
 				return mcp.ErrorResult("calendar_events: %v", err), nil
 			}
 
-			// Warm any undecrypted rows in this page (best-effort, online).
-			ensureDecrypted(ctx, deps, rows)
+			// Issue #110: on a session without the calendar scope the
+			// mirror is empty because sync can't fetch events, not
+			// because there are none. An empty list here would be read
+			// as "you have no events", so say why instead.
+			blocked := eventsBlocked(ctx, deps)
+			if blocked && len(rows) == 0 {
+				return mcp.ErrorResult("%s", protonclient.CalendarScopeNotice), nil
+			}
+
+			// Warm any undecrypted rows in this page (best-effort,
+			// online). Skipped when blocked: each fetch would 403.
+			if !blocked {
+				ensureDecrypted(ctx, deps, rows)
+			}
 
 			out := calendarEventsResult{Events: make([]calendarSummary, 0, len(rows))}
+			if blocked {
+				out.Notice = staleEventsNotice
+			}
 			for _, r := range rows {
 				out.Events = append(out.Events, summaryFromRow(r))
 			}
@@ -209,6 +235,17 @@ func calendarReadEvent(deps Deps) mcp.Tool {
 			row, gerr := deps.Store.GetCalendarEvent(ctx.Std, in.EventID)
 			inStore := gerr == nil
 
+			// Issue #110: event fetches 403 on a session without the
+			// calendar scope. Serve what the mirror has (flagged as
+			// possibly stale), and don't make a request that is known
+			// to fail — refresh included.
+			if eventsBlocked(ctx, deps) {
+				if inStore {
+					return mcp.StructuredResult(staleDetail{detail: detailFromRow(row), notice: staleEventsNotice})
+				}
+				return mcp.ErrorResult("%s", protonclient.CalendarScopeNotice), nil
+			}
+
 			// Cache hit.
 			if inStore && row.Decrypted && !in.Refresh {
 				return mcp.StructuredResult(detailFromRow(row))
@@ -234,6 +271,9 @@ func calendarReadEvent(deps Deps) mcp.Tool {
 				if inStore {
 					return mcp.StructuredResult(detailFromRow(row)) // graceful: return what we have
 				}
+				if protonclient.IsMissingScope(err) {
+					return mcp.ErrorResult("%s", protonclient.CalendarScopeNotice), nil
+				}
 				return mcp.ErrorResult("calendar_read_event: %v", err), nil
 			}
 
@@ -248,6 +288,51 @@ func calendarReadEvent(deps Deps) mcp.Tool {
 }
 
 // ----- shared helpers -----
+
+// staleEventsNotice accompanies events served from the mirror while
+// event access is blocked (issue #110).
+const staleEventsNotice = protonclient.CalendarScopeNotice +
+	" These events were mirrored before access was lost and may be out of date."
+
+// staleDetail is a calendar_read_event result plus a notice, marshalled
+// flat so the detail's fields stay at the top level as the schema
+// describes.
+type staleDetail struct {
+	detail *protonclient.CalendarEventDetail
+	notice string
+}
+
+func (d staleDetail) MarshalJSON() ([]byte, error) {
+	b, err := json.Marshal(d.detail)
+	if err != nil {
+		return nil, err
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(b, &m); err != nil {
+		return nil, err
+	}
+	n, err := json.Marshal(d.notice)
+	if err != nil {
+		return nil, err
+	}
+	m["notice"] = n
+	return json.Marshal(m)
+}
+
+// eventsBlocked reports whether calendar sync has recorded that this
+// session can't read events (Code 9100, issue #110). A store error
+// reads as "not blocked": this only decides how to explain results.
+func eventsBlocked(ctx mcp.Context, deps Deps) bool {
+	if deps.Store == nil {
+		return false
+	}
+	_, ok, err := deps.Store.CalendarEventsBlocked(ctx.Std)
+	if err != nil {
+		slog.Warn("calendar: read events-blocked flag failed", "err", err.Error())
+		return false
+	}
+	return ok
+}
 
 // ensureDecrypted warms undecrypted rows in a page by decrypting them on
 // demand and persisting the result. Best-effort: requires a session, and
@@ -377,7 +462,8 @@ const calendarListSchema = `{
 				},
 				"required": ["calendar_id", "name"]
 			}
-		}
+		},
+		"notice": {"type": "string"}
 	},
 	"required": ["calendars"]
 }`
@@ -408,7 +494,8 @@ const calendarEventsSchema = `{
 				"required": ["event_id", "calendar_id", "start_unix"]
 			}
 		},
-		"next_cursor": {"type": "string"}
+		"next_cursor": {"type": "string"},
+		"notice":      {"type": "string"}
 	},
 	"required": ["events"]
 }`
@@ -443,7 +530,8 @@ const calendarEventDetailSchema = `{
 				}
 			}
 		},
-		"raw_ical": {"type": "string"}
+		"raw_ical": {"type": "string"},
+		"notice":   {"type": "string"}
 	},
 	"required": ["event_id", "calendar_id", "start_unix"]
 }`

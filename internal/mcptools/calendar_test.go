@@ -3,6 +3,7 @@ package mcptools
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/just-an-oldsalt/proto-mcp/internal/mcp"
@@ -155,5 +156,132 @@ func TestCalendarReadEventTool_RequiresEventID(t *testing.T) {
 	tl := calendarReadEvent(Deps{Store: st})
 	if _, err := tl.Handler(mcp.Context{Std: context.Background()}, json.RawMessage(`{}`)); err == nil {
 		t.Error("expected InvalidParams error for missing event_id")
+	}
+}
+
+func blockEvents(t *testing.T, st *store.Store) {
+	t.Helper()
+	if err := st.SetCalendarEventsBlocked(context.Background(), []string{"calendar"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Issue #110: on a session without the calendar scope the mirror holds
+// calendars but no events. Returning {"events":[]} made Claude tell the
+// user they had no events; the tool must say why instead.
+func TestCalendarEventsTool_BlockedEmptyMirrorExplains(t *testing.T) {
+	st := calStore(t)
+	mustCal(t, st, "cal-1", "Personal")
+	blockEvents(t, st)
+
+	tl := calendarEvents(Deps{Store: st})
+	res, err := tl.Handler(mcp.Context{Std: context.Background()}, json.RawMessage(`{"from":"2026-09-21","to":"2026-09-28"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.IsError {
+		t.Fatalf("want an error result, got %+v", res.StructuredContent)
+	}
+	txt := resultText(res)
+	for _, want := range []string{"unavailable", "'calendar' scope", "#110", "calendar_list"} {
+		if !strings.Contains(txt, want) {
+			t.Errorf("error text %q missing %q", txt, want)
+		}
+	}
+}
+
+// Without the flag an empty mirror is just an empty result.
+func TestCalendarEventsTool_UnblockedEmptyMirrorIsEmpty(t *testing.T) {
+	st := calStore(t)
+	mustCal(t, st, "cal-1", "Personal")
+
+	res, err := calendarEvents(Deps{Store: st}).Handler(mcp.Context{Std: context.Background()}, json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected error: %s", resultText(res))
+	}
+	out := res.StructuredContent.(calendarEventsResult)
+	if len(out.Events) != 0 || out.Notice != "" {
+		t.Errorf("out = %+v, want empty with no notice", out)
+	}
+}
+
+// Events mirrored before the block are still served, with a notice.
+func TestCalendarEventsTool_BlockedWithMirroredEventsAddsNotice(t *testing.T) {
+	st := calStore(t)
+	mustCal(t, st, "cal-1", "Personal")
+	mustEnvelope(t, st, "ev-1", "cal-1", 1000)
+	blockEvents(t, st)
+
+	res, err := calendarEvents(Deps{Store: st}).Handler(mcp.Context{Std: context.Background()}, json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected error: %s", resultText(res))
+	}
+	out := res.StructuredContent.(calendarEventsResult)
+	if len(out.Events) != 1 {
+		t.Fatalf("events = %d, want 1", len(out.Events))
+	}
+	if !strings.Contains(out.Notice, "#110") || !strings.Contains(out.Notice, "out of date") {
+		t.Errorf("notice = %q", out.Notice)
+	}
+}
+
+func TestCalendarListTool_BlockedAddsNotice(t *testing.T) {
+	st := calStore(t)
+	mustCal(t, st, "cal-1", "Personal")
+	blockEvents(t, st)
+
+	res, err := calendarList(Deps{Store: st}).Handler(mcp.Context{Std: context.Background()}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := res.StructuredContent.(calendarListResult)
+	if len(out.Calendars) != 1 || !strings.Contains(out.Notice, "#110") {
+		t.Errorf("out = %+v", out)
+	}
+}
+
+func TestCalendarReadEventTool_Blocked(t *testing.T) {
+	st := calStore(t)
+	ctx := context.Background()
+	mustCal(t, st, "cal-1", "Personal")
+	mustEnvelope(t, st, "ev-1", "cal-1", 1000)
+	if err := st.FillCalendarEventDecrypted(ctx, "ev-1", store.CalendarEventDecrypted{Summary: "Review"}); err != nil {
+		t.Fatal(err)
+	}
+	blockEvents(t, st)
+	tl := calendarReadEvent(Deps{Store: st})
+
+	// Not mirrored: the scope explanation, not a generic failure.
+	res, err := tl.Handler(mcp.Context{Std: ctx}, json.RawMessage(`{"event_id":"missing","calendar_id":"cal-1"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.IsError || !strings.Contains(resultText(res), "#110") {
+		t.Errorf("want the scope error, got IsError=%v %q", res.IsError, resultText(res))
+	}
+
+	// Mirrored: served flat (detail fields at the top level) plus a notice.
+	res, err = tl.Handler(mcp.Context{Std: ctx}, json.RawMessage(`{"event_id":"ev-1","refresh":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.IsError {
+		t.Fatalf("unexpected error: %s", resultText(res))
+	}
+	var got map[string]any
+	if err := json.Unmarshal([]byte(resultText(res)), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["event_id"] != "ev-1" || got["summary"] != "Review" {
+		t.Errorf("detail fields missing: %v", got)
+	}
+	if n, _ := got["notice"].(string); !strings.Contains(n, "#110") {
+		t.Errorf("notice = %q", n)
 	}
 }

@@ -86,6 +86,8 @@ type Runtime struct {
 
 	// bgSyncCancel stops the background sync ticker (PROTO-144) on Close.
 	bgSyncCancel func()
+	// calScope de-duplicates the calendar-scope warning (issue #110).
+	calScope calendarScopeLog
 
 	hupStop   chan struct{}
 	pidUnlink func()
@@ -604,6 +606,7 @@ func (r *Runtime) backgroundSyncOnce(ctx context.Context, logger *slog.Logger) {
 		}
 		return
 	}
+	r.calScope.observe(logger, calRes)
 	if calRes != nil && (calRes.EventsUpserted > 0 || calRes.EventsDeleted > 0 || calRes.CalendarsDeleted > 0) {
 		logger.Info("background calendar sync",
 			"events_upserted", calRes.EventsUpserted,
